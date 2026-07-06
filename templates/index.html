@@ -192,6 +192,7 @@
         <button id="refreshBtn">↻ Refresh</button>
         <button id="csvBtn" title="Download current view as CSV">⬇ CSV</button>
         <button id="portfolioBtn" title="Paper trading portfolio">💼 Portfolio</button>
+        <button id="logBtn" title="Snapshot log & backtest">📊 Log</button>
       </span>
       <span><span class="dot" id="liveDot"></span> <span id="updated">—</span></span>
     </div>
@@ -261,6 +262,38 @@
         <div id="pfOrders"></div>
         <div style="margin-top:20px;text-align:right">
           <button id="pfReset" style="border-color:var(--red);color:var(--red)">Reset portfolio</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Snapshot log / backtest modal -->
+  <div class="overlay" id="logOverlay">
+    <div class="modal" style="width:min(820px,94vw)">
+      <div class="modal-head">
+        <h3>📊 Snapshot Log &amp; Backtest</h3>
+        <button class="close" id="logClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="metrics" id="logSummary"></div>
+        <div class="trade-row" style="margin-bottom:16px">
+          <button id="logCapture">📸 Capture now</button>
+          <button id="logDownload">⬇ Download CSV</button>
+          <label style="margin-left:auto">Backtest view
+            <select id="logView">
+              <option value="demand">Demand Score</option>
+              <option value="volgainers">Volume Gainers</option>
+            </select>
+          </label>
+        </div>
+        <div id="btSummary"></div>
+        <h4 style="margin:18px 0 10px;color:var(--muted)">Forward returns (first sighting → latest)</h4>
+        <div id="btTable"></div>
+        <div class="chart-note" style="margin-top:14px">
+          The logger auto-captures every 60s during market hours (09:15–15:30 IST).
+          "Forward return" = how the price moved from when a stock first appeared
+          in the list to its latest snapshot — a rough test of whether the signal
+          was predictive. Needs data captured across time to be meaningful.
         </div>
       </div>
     </div>
@@ -631,9 +664,70 @@
           </tr>`).join("") + `</tbody></table>`;
     }
 
+    // ---- Snapshot log / backtest ----
+    async function openLog() {
+      document.getElementById("logOverlay").classList.add("show");
+      await refreshLog();
+    }
+    async function refreshLog() {
+      const st = await (await fetch("/api/log/status")).json();
+      const dot = st.running ? '<span class="pos">● on</span>' : '<span class="neg">● off</span>';
+      const mkt = st.marketHours ? '<span class="pos">Open</span>' : '<span class="neg">Closed</span>';
+      document.getElementById("logSummary").innerHTML = [
+        `<div class="metric"><div class="k">Logger</div><div class="v">${dot}</div></div>`,
+        `<div class="metric"><div class="k">Market</div><div class="v">${mkt}</div></div>`,
+        `<div class="metric"><div class="k">Snapshots</div><div class="v">${st.snapshots}</div></div>`,
+      ].join("");
+      await runBacktest();
+    }
+    async function runBacktest() {
+      const view = document.getElementById("logView").value;
+      const d = await (await fetch("/api/log/backtest?view=" + view)).json();
+      const sumEl = document.getElementById("btSummary");
+      const tblEl = document.getElementById("btTable");
+      if (!d.summary) {
+        sumEl.innerHTML = "";
+        tblEl.innerHTML = `<div class="empty" style="padding:20px">${d.message || "No data yet."}</div>`;
+        return;
+      }
+      const s = d.summary;
+      sumEl.innerHTML = `<div class="metrics">
+        <div class="metric"><div class="k">Symbols</div><div class="v">${s.symbols}</div></div>
+        <div class="metric"><div class="k">Avg Return</div><div class="v ${s.avgReturnPct>=0?'pos':'neg'}">${s.avgReturnPct>=0?'+':''}${s.avgReturnPct}%</div></div>
+        <div class="metric"><div class="k">Hit Rate</div><div class="v">${s.hitRatePct}%</div></div>
+      </div>`;
+      const rows = d.symbols.slice(0, 25);
+      tblEl.innerHTML = `<table><thead><tr><th>Stock</th><th>First Rank</th><th>First Seen</th><th>First LTP</th><th>Latest LTP</th><th>Return</th><th>Seen</th></tr></thead><tbody>` +
+        rows.map(r => `<tr>
+          <td class="sym">${r.symbol}</td>
+          <td>${r.firstRank ?? "—"}</td>
+          <td style="text-align:left">${(r.firstSeen||"").replace("T"," ").slice(0,16)}</td>
+          <td>${fmtPrice(r.firstLtp)}</td>
+          <td>${fmtPrice(r.lastLtp)}</td>
+          <td class="${r.forwardReturnPct>=0?'pos':'neg'}">${r.forwardReturnPct>=0?'+':''}${r.forwardReturnPct}%</td>
+          <td>${r.sightings}</td>
+        </tr>`).join("") + `</tbody></table>`;
+    }
+
     document.getElementById("refreshBtn").onclick = load;
     document.getElementById("csvBtn").onclick = exportCSV;
     document.getElementById("portfolioBtn").onclick = openPortfolio;
+    document.getElementById("logBtn").onclick = openLog;
+    document.getElementById("logView").onchange = runBacktest;
+    document.getElementById("logCapture").onclick = async (e) => {
+      e.target.textContent = "Capturing…";
+      await fetch("/api/log/snapshot", { method: "POST" });
+      e.target.textContent = "📸 Capture now";
+      await refreshLog();
+    };
+    document.getElementById("logDownload").onclick = () => {
+      window.location = "/api/log/download";
+    };
+    document.getElementById("logClose").onclick =
+      () => document.getElementById("logOverlay").classList.remove("show");
+    document.getElementById("logOverlay").onclick = (e) => {
+      if (e.target.id === "logOverlay") e.currentTarget.classList.remove("show");
+    };
     document.getElementById("mBuy").onclick = () => placeOrder("BUY");
     document.getElementById("mSell").onclick = () => placeOrder("SELL");
     document.getElementById("pfClose").onclick =

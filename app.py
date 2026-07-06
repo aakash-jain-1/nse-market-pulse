@@ -13,10 +13,11 @@ service worker from another local app (a BSE announcements PWA) caches that
 origin and hijacks requests. A fresh port sidesteps that stale cache.
 """
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
 
 import nse_client as nse
 import paper
+import snapshot_logger as snaplog
 
 app = Flask(__name__)
 
@@ -82,10 +83,44 @@ def api_paper_reset():
     return jsonify({"ok": True, "message": "Portfolio reset"})
 
 
+@app.route("/api/log/status")
+def api_log_status():
+    return jsonify(snaplog.status())
+
+
+@app.route("/api/log/snapshot", methods=["POST"])
+def api_log_snapshot():
+    n = snaplog.capture_snapshot()
+    return jsonify({"ok": n > 0, "rowsWritten": n, "status": snaplog.status()})
+
+
+@app.route("/api/log/backtest")
+def api_log_backtest():
+    view = request.args.get("view", "demand")
+    return jsonify(snaplog.backtest(view))
+
+
+@app.route("/api/log/download")
+def api_log_download():
+    st = snaplog.status()
+    if not st["totalRows"]:
+        return jsonify({"error": "No snapshots logged yet"}), 404
+    return send_file(st["logFile"], as_attachment=True,
+                     download_name="nse_snapshots.csv")
+
+
 @app.errorhandler(Exception)
 def handle_error(e):
     return jsonify({"error": str(e)}), 500
 
 
+DEBUG = True
+
 if __name__ == "__main__":
-    app.run(debug=True, port=5055)
+    # In debug mode Flask spawns a reloader parent + a worker child. Only the
+    # worker (which actually serves) sets WERKZEUG_RUN_MAIN, so start the
+    # background logger there to avoid two loggers writing the same file.
+    import os
+    if not DEBUG or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        snaplog.start()
+    app.run(debug=DEBUG, port=5055)

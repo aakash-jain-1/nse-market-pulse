@@ -26,17 +26,19 @@ intraday momentum and unusual activity. It pulls data from NSE India's public
 
 ```
 NSE/
-├── app.py            # Flask server + JSON API endpoints (runs on port 5055)
-├── nse_client.py     # NSE session mgmt + data fetching / normalization (CORE)
-├── paper.py          # Paper-trading engine (virtual portfolio, JSON-persisted)
-├── nse_demand.py     # Standalone CLI scanner (original, still works)
+├── app.py             # Flask server + JSON API endpoints (runs on port 5055)
+├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
+├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
+├── snapshot_logger.py # Background snapshot logger + backtester (CSV)
+├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
-│   └── index.html    # Entire dashboard UI (HTML + CSS + JS inline)
+│   └── index.html     # Entire dashboard UI (HTML + CSS + JS inline)
+├── data/              # (gitignored) snapshots.csv lives here
 ├── requirements.txt
 ├── README.md
-├── AGENTS.md         # <- this file
+├── AGENTS.md          # <- this file
 ├── .gitignore
-└── paper_state.json  # (gitignored) local virtual-portfolio state
+└── paper_state.json   # (gitignored) local virtual-portfolio state
 ```
 
 ## How to run
@@ -122,6 +124,13 @@ The frontend polls `/api/<view>` and renders tables client-side.
   (~100-150) have a price, so only those are tradable. State persists to
   `paper_state.json` (gitignored). This is broker-agnostic by design: swapping
   in a real broker feed later only changes the price/fill source.
+- **Snapshot logging + backtest** (`snapshot_logger.py`) — a daemon thread
+  captures the demand board + volume-gainers (25 each) to `data/snapshots.csv`
+  every 60s **during market hours only** (Mon-Fri 09:15-15:30 IST). The 📊 Log
+  button shows logger status, a manual "Capture now", CSV download, and a simple
+  **forward-return backtest** (price move from a symbol's first sighting to its
+  latest, with avg return + hit rate). Started in `app.py` guarded by
+  `WERKZEUG_RUN_MAIN` so the Flask reloader doesn't run two loggers.
 
 ## Known limitations
 
@@ -137,7 +146,6 @@ The frontend polls `/api/<view>` and renders tables client-side.
   **Angel One SmartAPI** or **Upstox v2** (both free) but has no account yet.
   Plan: keep the paper-trading interface, swap `get_price`/fills for the broker
   feed. Needs the user's API credentials.
-- Server-side snapshot logging (periodic CSV/DB) for backtesting.
 - Persist sparkline price history (survive page reload) via localStorage.
 - Phone/LAN access + optional deploy.
 - Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
@@ -147,6 +155,7 @@ The frontend polls `/api/<view>` and renders tables client-side.
 
 - OI % change column + CSV export.
 - Paper trading engine (see feature summary).
+- Snapshot logging + forward-return backtest (see feature summary).
 
 ## Conventions
 
