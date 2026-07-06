@@ -144,6 +144,18 @@
     .chart-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
     .chart-box h4 { margin: 0 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
     .chart-note { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+    .depth-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
+    .depth-box h4 { margin: 0 0 12px; font-size: 13px; }
+    .depth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .depth-grid table { width: 100%; }
+    .depth-grid th { font-size: 10px; }
+    .depth-grid td, .depth-grid th { padding: 5px 8px; }
+    .depth-bid { color: var(--green); }
+    .depth-ask { color: var(--red); }
+    .depth-bar { position: relative; }
+    .depth-bar > span { position: absolute; right: 0; top: 0; bottom: 0; opacity: 0.10; }
+    .depth-bar.bid > span { background: var(--green); }
+    .depth-bar.ask > span { background: var(--red); }
     .trade-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
     .trade-box h4 { margin: 0 0 12px; font-size: 13px; }
     .trade-row { display: flex; gap: 10px; align-items: center; }
@@ -230,10 +242,11 @@
       <div class="modal-body">
         <div class="metrics" id="mMetrics"></div>
         <div class="chart-box">
-          <h4>Live price (this session)</h4>
+          <h4 id="mChartTitle">Intraday price</h4>
           <div id="mChart"></div>
           <div class="chart-note" id="mNote"></div>
         </div>
+        <div id="mDepth"></div>
         <div class="trade-box">
           <h4>Paper trade <span style="color:var(--muted);font-weight:400">(virtual money)</span></h4>
           <div class="trade-row">
@@ -541,12 +554,98 @@
       if (rowData.score != null) add("Demand Score", rowData.score);
       document.getElementById("mMetrics").innerHTML = metrics.join("");
 
+      // Show the session sparkline immediately, then upgrade to the real
+      // intraday chart + market depth from NSE's per-stock endpoints.
+      document.getElementById("mChartTitle").textContent = "Intraday price";
       document.getElementById("mChart").innerHTML = bigChart(sym);
-      const note = h.length < 2
-        ? "Collecting live data… keep this page open and the chart will build as prices refresh."
-        : `${h.length} points captured since you opened the dashboard.`;
-      document.getElementById("mNote").textContent = note;
+      document.getElementById("mNote").textContent = "Loading real intraday chart…";
+      document.getElementById("mDepth").innerHTML = "";
       document.getElementById("overlay").classList.add("show");
+      loadRealChart(sym);
+      loadDepth(sym);
+    }
+
+    async function loadRealChart(sym) {
+      try {
+        const d = await (await fetch("/api/chart/" + encodeURIComponent(sym))).json();
+        if (window._detailSym !== sym) return;  // user moved on
+        if (d.error || !d.points || d.points.length < 2) {
+          document.getElementById("mNote").textContent =
+            "No intraday chart available (market may be closed). Showing this-session trend above.";
+          return;
+        }
+        document.getElementById("mChart").innerHTML = realChart(d.points, d.prevClose);
+        const t0 = new Date(d.points[0].t), t1 = new Date(d.points[d.points.length-1].t);
+        document.getElementById("mNote").textContent =
+          `Real NSE intraday · ${d.points.length} points · ${t0.toLocaleTimeString("en-IN")}–${t1.toLocaleTimeString("en-IN")}`;
+      } catch (e) {
+        document.getElementById("mNote").textContent = "Chart unavailable: " + e.message;
+      }
+    }
+
+    function realChart(points, prevClose, w = 580, h = 200) {
+      const ys = points.map(p => p.price);
+      let min = Math.min(...ys), max = Math.max(...ys);
+      if (prevClose) { min = Math.min(min, prevClose); max = Math.max(max, prevClose); }
+      const rng = (max - min) || 1;
+      const n = points.length;
+      const x = (i) => (i / (n - 1)) * w;
+      const y = (v) => h - 20 - ((v - min) / rng) * (h - 40);
+      const coords = points.map((p, i) => `${x(i).toFixed(1)},${y(p.price).toFixed(1)}`);
+      const up = ys[ys.length - 1] >= (prevClose ?? ys[0]);
+      const color = up ? "#26d07c" : "#ff5c68";
+      const area = `0,${h-20} ${coords.join(" ")} ${w},${h-20}`;
+      let prevLine = "";
+      if (prevClose) {
+        const py = y(prevClose).toFixed(1);
+        prevLine = `<line x1="0" y1="${py}" x2="${w}" y2="${py}" stroke="#8b98a9" stroke-width="1" stroke-dasharray="4 4" opacity="0.6"/>
+          <text x="${w-4}" y="${(y(prevClose)-4).toFixed(1)}" fill="#8b98a9" font-size="10" text-anchor="end">prev ₹${prevClose}</text>`;
+      }
+      return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <polygon points="${area}" fill="${color}" opacity="0.08"/>
+        ${prevLine}
+        <polyline fill="none" stroke="${color}" stroke-width="1.8" points="${coords.join(" ")}" stroke-linejoin="round"/>
+        <text x="4" y="14" fill="#8b98a9" font-size="11">₹${max.toFixed(2)}</text>
+        <text x="4" y="${h-4}" fill="#8b98a9" font-size="11">₹${min.toFixed(2)}</text>
+      </svg>`;
+    }
+
+    async function loadDepth(sym) {
+      try {
+        const q = await (await fetch("/api/quote/" + encodeURIComponent(sym))).json();
+        if (window._detailSym !== sym || q.error) return;
+        // Enrich metrics with real quote fields when available.
+        const extra = [];
+        const add = (k, v) => extra.push(`<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`);
+        if (q.deliveryPct != null) add("Delivery %", q.deliveryPct + "%");
+        if (q.vwap != null) add("VWAP", "₹" + fmtPrice(q.vwap));
+        if (q.dayHigh != null && q.dayLow != null)
+          add("Day Range", `${fmtPrice(q.dayLow)}–${fmtPrice(q.dayHigh)}`);
+        if (q.yearHigh != null && q.yearLow != null)
+          add("52W Range", `${fmtPrice(q.yearLow)}–${fmtPrice(q.yearHigh)}`);
+        if (extra.length)
+          document.getElementById("mMetrics").insertAdjacentHTML("beforeend", extra.join(""));
+
+        const bids = q.depth.bids, asks = q.depth.asks;
+        const hasDepth = bids.some(b => b.qty) || asks.some(a => a.qty);
+        if (!hasDepth) {
+          document.getElementById("mDepth").innerHTML =
+            `<div class="depth-box"><h4>Market depth</h4><div class="chart-note">No live order book (market closed). Available during 09:15–15:30 IST.</div></div>`;
+          return;
+        }
+        const maxQ = Math.max(...bids.map(b=>b.qty||0), ...asks.map(a=>a.qty||0)) || 1;
+        const rowHtml = (side, x) => `<tr>
+          <td class="depth-bar ${side}">${x.price?fmtPrice(x.price):"—"}<span style="width:${(x.qty/maxQ*100).toFixed(0)}%"></span></td>
+          <td>${x.qty?fmtNum(x.qty):"—"}</td></tr>`;
+        document.getElementById("mDepth").innerHTML = `<div class="depth-box">
+          <h4>Market depth (5 levels)</h4>
+          <div class="depth-grid">
+            <table><thead><tr><th class="depth-bid" style="text-align:left">Bid</th><th>Qty</th></tr></thead>
+              <tbody>${bids.map(b=>rowHtml("bid",b)).join("")}</tbody></table>
+            <table><thead><tr><th class="depth-ask" style="text-align:left">Ask</th><th>Qty</th></tr></thead>
+              <tbody>${asks.map(a=>rowHtml("ask",a)).join("")}</tbody></table>
+          </div></div>`;
+      } catch (e) { /* depth is best-effort */ }
     }
     function bigChart(sym, w = 580, h = 200) {
       const pts = history[sym] || [];

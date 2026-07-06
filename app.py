@@ -16,6 +16,7 @@ origin and hijacks requests. A fresh port sidesteps that stale cache.
 from flask import Flask, jsonify, render_template, request, send_file
 
 import nse_client as nse
+import nse_quote
 import paper
 import snapshot_logger as snaplog
 
@@ -60,6 +61,16 @@ def api_oispurts():
 @app.route("/api/futures")
 def api_futures():
     return jsonify(nse.get_futures())
+
+
+@app.route("/api/quote/<symbol>")
+def api_quote(symbol):
+    return jsonify(nse_quote.get_quote(symbol))
+
+
+@app.route("/api/chart/<symbol>")
+def api_chart(symbol):
+    return jsonify(nse_quote.get_chart(symbol))
 
 
 @app.route("/api/demand")

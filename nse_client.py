@@ -431,7 +431,20 @@ def get_price_map():
 
 
 def get_price(symbol):
-    """Return the latest known price for a symbol, or None if not available."""
+    """
+    Return the latest known price for a symbol. First checks the merged hot-list
+    map (fast, no extra request); falls back to the per-stock NextApi quote so
+    that ANY tradable symbol can be priced (enables paper-trading anything).
+    """
     if not symbol:
         return None
-    return get_price_map().get(symbol.upper())
+    sym = symbol.upper()
+    price = get_price_map().get(sym)
+    if price is not None:
+        return price
+    # Lazy import avoids a circular dependency (nse_quote imports this module).
+    try:
+        import nse_quote
+        return nse_quote.get_ltp(sym)
+    except Exception:
+        return None

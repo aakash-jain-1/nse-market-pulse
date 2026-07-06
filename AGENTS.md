@@ -28,6 +28,7 @@ intraday momentum and unusual activity. It pulls data from NSE India's public
 NSE/
 ├── app.py             # Flask server + JSON API endpoints (runs on port 5055)
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
+├── nse_quote.py       # Per-stock quote/chart/depth via NextApi gateway
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
 ├── snapshot_logger.py # Background snapshot logger + backtester (CSV)
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
@@ -88,17 +89,35 @@ The frontend polls `/api/<view>` and renders tables client-side.
 | Volume gainers | `/api/live-analysis-volume-gainers` |
 | OI spurts (underlyings) | `/api/live-analysis-oi-spurts-underlyings` |
 | Most-active stock futures | `/api/liveEquity-derivatives?index=stock_fut` (has underlying+pChange+OI+lastPrice+underlyingValue+expiry; ~20 rows) |
-| Intraday chart | `/api/chart-databyindex?index=<SYMBOL>EQN` |
+| Intraday chart (OLD, empty) | `/api/chart-databyindex?index=<SYMBOL>EQN` |
+
+### NextApi gateway (NEW — the big unlock, `nse_quote.py`)
+The current NSE website uses a newer gateway that DOES work from our warmed
+session, **as long as we send a stock-specific Referer**
+(`/get-quote/equity/<SYMBOL>`). Base path:
+
+    /api/NextApi/apiClient/GetQuoteApi?functionName=<fn>&...
+
+| Purpose | functionName | Notes |
+|---------|--------------|-------|
+| Full quote + 5-level market depth | `getSymbolData&marketType=N&series=EQ&symbol=X` | LTP in `tradeInfo.lastPrice`; change/open/high/low in `metaData`; depth in `orderBook`; delivery % in `tradeInfo.deliveryToTradedQuantity` |
+| Real intraday chart | `getSymbolChartData&symbol=<X>EQN&days=1D` | `grapthData` = `[[ts_ms, price, phase, ...], ...]` (400+ pts/day) |
+| Company meta | `getMetaData&symbol=X` | |
+| Option chain | `getOptionChainData&symbol=X&params=...` | not yet wired up |
+
+This finally gives real charts, per-stock quotes for ANY symbol, and market
+depth. `nse_client.get_price()` falls back to `nse_quote.get_ltp()` so paper
+trading works for any tradable symbol (not just hot-list names).
 
 ### BLOCKED / unreliable endpoints (do not rely on)
-- `/api/quote-equity?symbol=X` → **403 Forbidden** (heavy anti-bot; needs
-  per-stock page context we couldn't reliably reproduce).
-- `/api/chart-databyindex?index=<SYMBOL>EQN` → returns **empty `grapthData`**
-  in practice. Because of this, the dashboard builds **live sparklines
-  client-side** by accumulating LTP across auto-refreshes instead.
-- `/api/snapshot-derivatives-equity?index=oi_gainers` → returns "No Data Found"
+- `/api/quote-equity?symbol=X` → **403 Forbidden** (superseded by NextApi above).
+- `/api/chart-databyindex?index=<SYMBOL>EQN` → **empty** (superseded by
+  `getSymbolChartData` above). Client-side sparklines are still used as an
+  instant fallback in the detail modal while the real chart loads.
+- `/api/snapshot-derivatives-equity?index=oi_gainers` → "No Data Found"
   pre-market; only has data during market hours.
 - `/api/equity-stockIndices?index=...` → 404 with the names we tried.
+- Market depth (`orderBook`) is all-zeros outside market hours (09:15–15:30 IST).
 
 ## Feature summary (what's built)
 
@@ -112,7 +131,10 @@ The frontend polls `/api/<view>` and renders tables client-side.
   Short covering / Long unwinding, with an honest grey "OI Rising/Falling"
   fallback when the price direction is genuinely unknown (e.g. indices).
 - **Live sparklines** per row (client-side, accumulate across refreshes).
-- **Stock detail modal** on row click (metrics + larger live chart).
+- **Stock detail modal** on row click — now shows the **real NSE intraday
+  chart** (`getSymbolChartData`, with prev-close line), **5-level market depth**
+  (`orderBook`), and enriched metrics (delivery %, VWAP, day/52W range). Falls
+  back to the session sparkline when the real chart isn't available.
 - **Alerts** — desktop notification + sound beep when a stock crosses a
   configurable volume multiple (20x/50x/100x) with a rising price.
 - **CSV export** — client-side download of the current view (⬇ CSV button).
@@ -139,7 +161,8 @@ The frontend polls `/api/<view>` and renders tables client-side.
 
 ## Known limitations
 
-- Live intraday charts are client-side only (NSE chart endpoint is empty).
+- Real intraday charts + depth come from the NextApi gateway (per-symbol, needs
+  the stock-specific Referer); depth is empty outside market hours.
 - OI price-direction coverage is partial pre-market; improves during 09:15–15:30 IST.
 - All endpoints are unofficial and can change without notice.
 - Data only meaningful during NSE market hours (Mon–Fri, 09:15–15:30 IST).
@@ -153,6 +176,8 @@ The frontend polls `/api/<view>` and renders tables client-side.
   feed. Needs the user's API credentials.
 - Persist sparkline price history (survive page reload) via localStorage.
 - Phone/LAN access + optional deploy.
+- Wire up the **option chain** (`getOptionChainData`) for an options module.
+- Use real per-stock quotes to remove the paper-trading hot-list limit fully.
 - Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
   bits (quotes, historical). See README/analysis for the API landscape.
 
@@ -162,6 +187,8 @@ The frontend polls `/api/<view>` and renders tables client-side.
 - Paper trading engine (see feature summary).
 - Snapshot logging + forward-return backtest (see feature summary).
 - Futures tab: basis (premium/discount), annualized carry, OI buildup.
+- NextApi gateway integration (`nse_quote.py`): real intraday charts, per-stock
+  quotes for any symbol, and 5-level market depth in the detail modal.
 
 ## Futures roadmap (user wants to trade futures)
 
