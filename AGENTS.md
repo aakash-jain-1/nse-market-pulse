@@ -87,7 +87,7 @@ The frontend polls `/api/<view>` and renders tables client-side.
 | Most active by value | `/api/live-analysis-most-active-securities?index=value` |
 | Volume gainers | `/api/live-analysis-volume-gainers` |
 | OI spurts (underlyings) | `/api/live-analysis-oi-spurts-underlyings` |
-| Most-active stock futures | `/api/liveEquity-derivatives?index=stock_fut` (has underlying+pChange+OI) |
+| Most-active stock futures | `/api/liveEquity-derivatives?index=stock_fut` (has underlying+pChange+OI+lastPrice+underlyingValue+expiry; ~20 rows) |
 | Intraday chart | `/api/chart-databyindex?index=<SYMBOL>EQN` |
 
 ### BLOCKED / unreliable endpoints (do not rely on)
@@ -124,6 +124,11 @@ The frontend polls `/api/<view>` and renders tables client-side.
   (~100-150) have a price, so only those are tradable. State persists to
   `paper_state.json` (gitignored). This is broker-agnostic by design: swapping
   in a real broker feed later only changes the price/fill source.
+- **Futures tab** (`get_futures()`) — most-active stock futures with **basis**
+  (futures price - spot = premium/discount), basis %, annualized carry (by days
+  to expiry), OI, and long/short buildup. OI change is cross-referenced from the
+  OI-spurts endpoint (partial coverage -> "OI n/a" when unknown). Note stock_fut
+  returns only ~20 (most-active) contracts, not the full F&O universe.
 - **Snapshot logging + backtest** (`snapshot_logger.py`) — a daemon thread
   captures the demand board + volume-gainers (25 each) to `data/snapshots.csv`
   every 60s **during market hours only** (Mon-Fri 09:15-15:30 IST). The 📊 Log
@@ -156,6 +161,14 @@ The frontend polls `/api/<view>` and renders tables client-side.
 - OI % change column + CSV export.
 - Paper trading engine (see feature summary).
 - Snapshot logging + forward-return backtest (see feature summary).
+- Futures tab: basis (premium/discount), annualized carry, OI buildup.
+
+## Futures roadmap (user wants to trade futures)
+
+- Futures paper trading (lot sizes, margin/leverage, MTM). Needs a lot-size
+  source (stock_fut lacks marketLot; NSE publishes an F&O lot-size master).
+- Rollover tracker (OI shift current-month -> next-month near expiry).
+- Full F&O universe (stock_fut is only ~20 most-active contracts).
 
 ## Conventions
 

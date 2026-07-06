@@ -12,6 +12,7 @@ lazily rebuild them on failure.
 
 import threading
 import time
+from datetime import datetime
 
 import requests
 
@@ -34,6 +35,7 @@ ENDPOINTS = {
     "value": "/api/live-analysis-most-active-securities?index=value",
     "volgainers": "/api/live-analysis-volume-gainers",
     "oispurts": "/api/live-analysis-oi-spurts-underlyings",
+    "stockfut": "/api/liveEquity-derivatives?index=stock_fut",
 }
 
 # Module-level session, rebuilt lazily and guarded so concurrent web requests
@@ -233,6 +235,88 @@ def get_oi_spurts(limit=20):
                 "prevOI": prev,
                 "changeInOI": change,
                 "oiPctChange": pct,
+                "volume": _num(r.get("volume")),
+                "signal": label,
+                "signalKind": kind,
+            }
+        )
+    return out
+
+
+def _oi_change_map():
+    """symbol -> changeInOI from the OI-spurts endpoint (best-effort)."""
+    out = {}
+    try:
+        data = _fetch(ENDPOINTS["oispurts"])
+        for r in data.get("data", []):
+            sym = r.get("symbol")
+            if sym:
+                out[sym] = _num(r.get("changeInOI"))
+    except Exception:
+        pass
+    return out
+
+
+def _days_to_expiry(expiry):
+    """expiry like '28-Jul-2026' -> integer days from today (or None)."""
+    if not expiry:
+        return None
+    try:
+        exp = datetime.strptime(expiry, "%d-%b-%Y").date()
+        return (exp - datetime.now().date()).days
+    except Exception:
+        return None
+
+
+def get_futures(limit=25):
+    """
+    Most-active stock futures enriched with:
+      - basis / premium-discount vs spot (futures price - underlying spot)
+      - basis % and annualized carry (by days to expiry)
+      - OI + change in OI (cross-referenced) and long/short buildup signal
+    """
+    data = _fetch(ENDPOINTS["stockfut"])
+    rows = data.get("data", [])[:limit]
+    oi_changes = _oi_change_map()
+
+    out = []
+    for r in rows:
+        sym = r.get("underlying")
+        fut = _num(r.get("lastPrice"))
+        spot = _num(r.get("underlyingValue"))
+        pchg = _num(r.get("pChange"))
+        basis = None
+        basis_pct = None
+        annualized = None
+        dte = _days_to_expiry(r.get("expiryDate"))
+        if fut is not None and spot not in (None, 0):
+            basis = fut - spot
+            basis_pct = basis / spot * 100
+            if dte and dte > 0:
+                annualized = basis_pct * (365.0 / dte)
+
+        change_oi = oi_changes.get(sym)
+        label, kind = _oi_signal(
+            (change_oi or 0) >= 0 if change_oi is not None else (pchg or 0) >= 0,
+            pchg,
+        )
+        if change_oi is None:
+            # Without a real OI change we can't assert buildup direction.
+            label, kind = ("OI n/a", "neutral")
+
+        out.append(
+            {
+                "symbol": sym,
+                "expiry": r.get("expiryDate"),
+                "daysToExpiry": dte,
+                "ltp": fut,
+                "spot": spot,
+                "pChange": pchg,
+                "basis": round(basis, 2) if basis is not None else None,
+                "basisPct": round(basis_pct, 2) if basis_pct is not None else None,
+                "annualizedPct": round(annualized, 1) if annualized is not None else None,
+                "oi": _num(r.get("openInterest")),
+                "changeInOI": change_oi,
                 "volume": _num(r.get("volume")),
                 "signal": label,
                 "signalKind": kind,

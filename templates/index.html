@@ -311,6 +311,8 @@
         desc: "Trading far above their average volume — the classic 'something's happening' signal." },
       { key: "oispurts",   label: "F&O Open Interest", title: "Open Interest Spurts (F&O)",
         desc: "Where derivatives traders are building positions. Price up + OI up = long buildup." },
+      { key: "futures",    label: "⚡ Futures", title: "Stock Futures — Basis & OI",
+        desc: "Active stock futures with premium/discount to spot and OI buildup. Premium = bullish carry, discount = bearish." },
       { key: "gainers",    label: "Top Gainers", title: "Top Gainers",
         desc: "Biggest price risers right now — momentum / strength." },
       { key: "losers",     label: "Top Losers", title: "Top Losers",
@@ -429,6 +431,30 @@
             <td><span class="badge ${cls}">${r.signal || "—"}</span></td>
             <td>${sparkline(r.symbol)}</td></tr>`;
         }).join("");
+      } else if (key === "futures") {
+        head = `<tr><th>Stock</th><th>Expiry</th><th>Fut LTP</th><th>Spot</th><th>Basis</th><th>Basis %</th><th>% Chg</th><th>OI</th><th>Signal</th><th>Trend</th></tr>`;
+        body = rows.map((r,i) => {
+          const cls = r.signalKind === "buildup" ? "buildup"
+                    : r.signalKind === "short" ? "short" : "neutral";
+          const basisCls = (r.basis ?? 0) >= 0 ? "pos" : "neg";
+          const basisTxt = r.basis == null ? "—"
+            : `${r.basis>=0?'+':''}${fmtPrice(r.basis)}`;
+          const basisPctTxt = r.basisPct == null ? "—"
+            : `${r.basisPct>=0?'+':''}${r.basisPct}%`;
+          const tag = (r.basis ?? 0) >= 0 ? "Prem" : "Disc";
+          const dte = r.daysToExpiry != null ? ` <span style="color:var(--muted)">(${r.daysToExpiry}d)</span>` : "";
+          return `<tr data-sym="${r.symbol}">
+            ${rowStart(i, r.symbol)}
+            <td style="text-align:left">${(r.expiry||"").slice(0,6)}${dte}</td>
+            <td>${fmtPrice(r.ltp)}</td>
+            <td>${fmtPrice(r.spot)}</td>
+            <td class="${basisCls}">${basisTxt} <span class="badge ${(r.basis??0)>=0?'buildup':'short'}" style="font-size:10px">${tag}</span></td>
+            <td class="${basisCls}">${basisPctTxt}</td>
+            ${pctCell(r.pChange)}
+            <td>${fmtNum(r.oi)}</td>
+            <td><span class="badge ${cls}">${r.signal || "—"}</span></td>
+            <td>${sparkline(r.symbol)}</td></tr>`;
+        }).join("");
       } else if (key === "gainers" || key === "losers") {
         head = `<tr><th>Stock</th><th>LTP</th><th>% Chg</th><th>Prev Close</th><th>Volume</th><th>Trend</th></tr>`;
         body = rows.map((r,i) => `<tr data-sym="${r.symbol}">
@@ -501,6 +527,11 @@
         add("% Change", `<span class="${rowData.pChange>=0?'pos':'neg'}">${rowData.pChange>=0?'+':''}${rowData.pChange.toFixed(2)}%</span>`);
       if (rowData.week1volChange) add("Vol vs Avg", rowData.week1volChange.toFixed(1) + "x");
       if (rowData.volMult) add("Vol vs Avg", rowData.volMult.toFixed(1) + "x");
+      if (rowData.spot != null) add("Spot", "₹" + fmtPrice(rowData.spot));
+      if (rowData.basis != null)
+        add("Basis", `<span class="${rowData.basis>=0?'pos':'neg'}">${rowData.basis>=0?'+':''}${fmtPrice(rowData.basis)} (${rowData.basisPct}%)</span>`);
+      if (rowData.annualizedPct != null)
+        add("Annualized", `<span class="${rowData.annualizedPct>=0?'pos':'neg'}">${rowData.annualizedPct>=0?'+':''}${rowData.annualizedPct}%</span>`);
       if (rowData.volume != null) add("Volume", fmtNum(rowData.volume));
       if (rowData.value != null) add("Traded Value", fmtCr(rowData.value));
       if (rowData.latestOI != null) add("Latest OI", fmtNum(rowData.latestOI));

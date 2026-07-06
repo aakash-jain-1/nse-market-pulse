@@ -57,6 +57,11 @@ def api_oispurts():
     return jsonify(nse.get_oi_spurts())
 
 
+@app.route("/api/futures")
+def api_futures():
+    return jsonify(nse.get_futures())
+
+
 @app.route("/api/demand")
 def api_demand():
     return jsonify(nse.get_demand_score())
