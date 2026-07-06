@@ -28,3 +28,6 @@ Thumbs.db
 # Logs / data dumps
 *.log
 *.csv
+
+# Paper trading state (local virtual portfolio)
+paper_state.json

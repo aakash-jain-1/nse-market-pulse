@@ -302,3 +302,52 @@ def get_demand_score(limit=25):
         r["score"] = round(r["score"], 1)
         r["signalCount"] = len(r.pop("signals"))
     return ranked[:limit]
+
+
+# Short-lived cache for a broad symbol -> last price map, assembled from every
+# live list we already fetch. Used by the paper-trading engine to price fills.
+_ltp_cache = {"ts": 0.0, "map": {}}
+_LTP_TTL = 10  # seconds
+
+
+def get_price_map():
+    """
+    Merge the LTPs from every live list into one {symbol: price} dict. This is
+    a best-effort price source limited to symbols currently appearing in the
+    hot lists (~100-150 names). NSE's per-stock quote endpoint is blocked, so
+    this is the most reliable price lookup we have without a broker feed.
+    """
+    if (time.time() - _ltp_cache["ts"]) < _LTP_TTL and _ltp_cache["map"]:
+        return _ltp_cache["map"]
+
+    pmap = {}
+
+    def absorb(rows):
+        for r in rows or []:
+            sym, ltp = r.get("symbol"), r.get("ltp")
+            if sym and ltp is not None:
+                pmap[sym] = ltp
+
+    for fn in (
+        lambda: get_most_active("volume", 50),
+        lambda: get_most_active("value", 50),
+        lambda: get_volume_gainers(50),
+        lambda: get_variations("gainers", 500),
+        lambda: get_variations("losers", 500),
+        lambda: get_oi_spurts(50),
+    ):
+        try:
+            absorb(fn())
+        except Exception:
+            pass
+
+    _ltp_cache["ts"] = time.time()
+    _ltp_cache["map"] = pmap
+    return pmap
+
+
+def get_price(symbol):
+    """Return the latest known price for a symbol, or None if not available."""
+    if not symbol:
+        return None
+    return get_price_map().get(symbol.upper())

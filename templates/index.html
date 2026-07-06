@@ -144,6 +144,15 @@
     .chart-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
     .chart-box h4 { margin: 0 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
     .chart-note { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+    .trade-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
+    .trade-box h4 { margin: 0 0 12px; font-size: 13px; }
+    .trade-row { display: flex; gap: 10px; align-items: center; }
+    .trade-row input { width: 90px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 14px; }
+    .trade-row button.buy { background: rgba(38,208,124,0.15); border-color: var(--green); color: var(--green); font-weight: 700; padding: 8px 22px; }
+    .trade-row button.sell { background: rgba(255,92,104,0.15); border-color: var(--red); color: var(--red); font-weight: 700; padding: 8px 22px; }
+    .trade-msg { font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+    .trade-msg.ok { color: var(--green); }
+    .trade-msg.bad { color: var(--red); }
     .alert-toast {
       position: fixed; bottom: 20px; right: 20px; z-index: 60;
       display: flex; flex-direction: column; gap: 10px; max-width: 340px;
@@ -182,6 +191,7 @@
         <button id="soundBtn" title="Toggle sound">🔔 Sound</button>
         <button id="refreshBtn">↻ Refresh</button>
         <button id="csvBtn" title="Download current view as CSV">⬇ CSV</button>
+        <button id="portfolioBtn" title="Paper trading portfolio">💼 Portfolio</button>
       </span>
       <span><span class="dot" id="liveDot"></span> <span id="updated">—</span></span>
     </div>
@@ -222,6 +232,35 @@
           <h4>Live price (this session)</h4>
           <div id="mChart"></div>
           <div class="chart-note" id="mNote"></div>
+        </div>
+        <div class="trade-box">
+          <h4>Paper trade <span style="color:var(--muted);font-weight:400">(virtual money)</span></h4>
+          <div class="trade-row">
+            <input type="number" id="mQty" min="1" value="10" />
+            <button class="buy" id="mBuy">Buy</button>
+            <button class="sell" id="mSell">Sell</button>
+          </div>
+          <div class="trade-msg" id="mTradeMsg"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Portfolio modal -->
+  <div class="overlay" id="pfOverlay">
+    <div class="modal" style="width:min(820px,94vw)">
+      <div class="modal-head">
+        <h3>💼 Paper Portfolio</h3>
+        <button class="close" id="pfClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="metrics" id="pfSummary"></div>
+        <h4 style="margin:6px 0 10px;color:var(--muted)">Holdings</h4>
+        <div id="pfHoldings"></div>
+        <h4 style="margin:22px 0 10px;color:var(--muted)">Recent orders</h4>
+        <div id="pfOrders"></div>
+        <div style="margin-top:20px;text-align:right">
+          <button id="pfReset" style="border-color:var(--red);color:var(--red)">Reset portfolio</button>
         </div>
       </div>
     </div>
@@ -416,6 +455,8 @@
 
     // ---- Detail modal ----
     function openDetail(sym) {
+      window._detailSym = sym;
+      document.getElementById("mTradeMsg").textContent = "";
       const h = history[sym] || [];
       const rowData = (window._lastRows || []).find(r => r.symbol === sym) || {};
       document.getElementById("mSym").textContent = sym;
@@ -526,8 +567,85 @@
       URL.revokeObjectURL(a.href);
     }
 
+    // ---- Paper trading ----
+    async function placeOrder(side) {
+      const sym = window._detailSym;
+      const qty = parseInt(document.getElementById("mQty").value, 10);
+      const msgEl = document.getElementById("mTradeMsg");
+      msgEl.className = "trade-msg";
+      msgEl.textContent = "Placing…";
+      try {
+        const res = await fetch("/api/paper/order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ symbol: sym, side, qty }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          const o = data.order;
+          msgEl.className = "trade-msg ok";
+          msgEl.textContent = `✓ ${o.side} ${o.qty} ${o.symbol} @ ₹${fmtPrice(o.price)} (₹${fmtNum(o.value)})`;
+        } else {
+          msgEl.className = "trade-msg bad";
+          msgEl.textContent = "✕ " + data.message;
+        }
+      } catch (e) {
+        msgEl.className = "trade-msg bad";
+        msgEl.textContent = "✕ " + e.message;
+      }
+    }
+
+    async function openPortfolio() {
+      const ov = document.getElementById("pfOverlay");
+      ov.classList.add("show");
+      const p = await (await fetch("/api/paper/portfolio")).json();
+      const pnlCls = p.totalPnl >= 0 ? "pos" : "neg";
+      document.getElementById("pfSummary").innerHTML = [
+        `<div class="metric"><div class="k">Equity</div><div class="v">₹${fmtNum(p.equity)}</div></div>`,
+        `<div class="metric"><div class="k">Cash</div><div class="v">₹${fmtNum(p.cash)}</div></div>`,
+        `<div class="metric"><div class="k">Total P&L</div><div class="v ${pnlCls}">${p.totalPnl>=0?'+':''}₹${fmtNum(p.totalPnl)} (${p.totalPnlPct>=0?'+':''}${p.totalPnlPct}%)</div></div>`,
+      ].join("");
+
+      const holds = document.getElementById("pfHoldings");
+      if (!p.positions.length) {
+        holds.innerHTML = `<div class="empty" style="padding:20px">No holdings yet. Open a stock and hit Buy.</div>`;
+      } else {
+        holds.innerHTML = `<table><thead><tr><th>Stock</th><th>Qty</th><th>Avg</th><th>LTP</th><th>Value</th><th>P&L</th></tr></thead><tbody>` +
+          p.positions.map(pos => `<tr>
+            <td class="sym">${pos.symbol}</td><td>${pos.qty}</td>
+            <td>${fmtPrice(pos.avgPrice)}</td><td>${fmtPrice(pos.ltp)}</td>
+            <td>${fmtNum(pos.value)}</td>
+            <td class="${pos.pnl>=0?'pos':'neg'}">${pos.pnl>=0?'+':''}${fmtNum(pos.pnl)} (${pos.pnlPct>=0?'+':''}${pos.pnlPct}%)</td>
+          </tr>`).join("") + `</tbody></table>`;
+      }
+
+      const ord = document.getElementById("pfOrders");
+      ord.innerHTML = !p.orders.length
+        ? `<div class="empty" style="padding:20px">No orders yet.</div>`
+        : `<table><thead><tr><th>Time</th><th>Side</th><th>Stock</th><th>Qty</th><th>Price</th><th>Value</th></tr></thead><tbody>` +
+          p.orders.map(o => `<tr>
+            <td style="text-align:left">${o.time}</td>
+            <td class="${o.side==='BUY'?'pos':'neg'}">${o.side}</td>
+            <td class="sym">${o.symbol}</td><td>${o.qty}</td>
+            <td>${fmtPrice(o.price)}</td><td>${fmtNum(o.value)}</td>
+          </tr>`).join("") + `</tbody></table>`;
+    }
+
     document.getElementById("refreshBtn").onclick = load;
     document.getElementById("csvBtn").onclick = exportCSV;
+    document.getElementById("portfolioBtn").onclick = openPortfolio;
+    document.getElementById("mBuy").onclick = () => placeOrder("BUY");
+    document.getElementById("mSell").onclick = () => placeOrder("SELL");
+    document.getElementById("pfClose").onclick =
+      () => document.getElementById("pfOverlay").classList.remove("show");
+    document.getElementById("pfOverlay").onclick = (e) => {
+      if (e.target.id === "pfOverlay") e.currentTarget.classList.remove("show");
+    };
+    document.getElementById("pfReset").onclick = async () => {
+      if (!confirm("Reset paper portfolio to ₹10,00,000 and clear all positions?")) return;
+      await fetch("/api/paper/reset", { method: "POST" });
+      openPortfolio();
+    };
     document.getElementById("mClose").onclick =
       () => document.getElementById("overlay").classList.remove("show");
     document.getElementById("overlay").onclick = (e) => {

@@ -28,13 +28,15 @@ intraday momentum and unusual activity. It pulls data from NSE India's public
 NSE/
 ├── app.py            # Flask server + JSON API endpoints (runs on port 5055)
 ├── nse_client.py     # NSE session mgmt + data fetching / normalization (CORE)
+├── paper.py          # Paper-trading engine (virtual portfolio, JSON-persisted)
 ├── nse_demand.py     # Standalone CLI scanner (original, still works)
 ├── templates/
 │   └── index.html    # Entire dashboard UI (HTML + CSS + JS inline)
 ├── requirements.txt
 ├── README.md
 ├── AGENTS.md         # <- this file
-└── .gitignore
+├── .gitignore
+└── paper_state.json  # (gitignored) local virtual-portfolio state
 ```
 
 ## How to run
@@ -111,6 +113,15 @@ The frontend polls `/api/<view>` and renders tables client-side.
 - **Stock detail modal** on row click (metrics + larger live chart).
 - **Alerts** — desktop notification + sound beep when a stock crosses a
   configurable volume multiple (20x/50x/100x) with a rising price.
+- **CSV export** — client-side download of the current view (⬇ CSV button).
+- **Paper trading** (`paper.py`) — virtual portfolio starting at Rs 10,00,000.
+  Buy/Sell from the stock detail modal; 💼 Portfolio button shows holdings,
+  live mark-to-market P&L, and order history. Fills are simulated at the latest
+  price from `nse_client.get_price()`, which merges all live lists into a
+  symbol->LTP map. **Limitation:** only symbols currently in the hot lists
+  (~100-150) have a price, so only those are tradable. State persists to
+  `paper_state.json` (gitignored). This is broker-agnostic by design: swapping
+  in a real broker feed later only changes the price/fill source.
 
 ## Known limitations
 
@@ -121,13 +132,21 @@ The frontend polls `/api/<view>` and renders tables client-side.
 
 ## Roadmap / ideas (not yet built)
 
-- OI % change column (backend already computes `oiPctChange`).
-- CSV export / logging of snapshots for backtesting.
+- **Real-time broker feed** (the big one): integrate a free broker API for live
+  ticks, working charts, and market depth. User is leaning toward starting with
+  **Angel One SmartAPI** or **Upstox v2** (both free) but has no account yet.
+  Plan: keep the paper-trading interface, swap `get_price`/fills for the broker
+  feed. Needs the user's API credentials.
+- Server-side snapshot logging (periodic CSV/DB) for backtesting.
 - Persist sparkline price history (survive page reload) via localStorage.
 - Phone/LAN access + optional deploy.
-- Consider migrating live data to a broker API (Angel One SmartAPI / Upstox /
-  Dhan) or reliable historical lib (jugaad-data / nsefeed) for robustness —
-  see README/analysis for the API landscape.
+- Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
+  bits (quotes, historical). See README/analysis for the API landscape.
+
+## Done recently
+
+- OI % change column + CSV export.
+- Paper trading engine (see feature summary).
 
 ## Conventions
 
