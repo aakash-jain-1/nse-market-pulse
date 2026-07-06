@@ -156,6 +156,17 @@
     .depth-bar > span { position: absolute; right: 0; top: 0; bottom: 0; opacity: 0.10; }
     .depth-bar.bid > span { background: var(--green); }
     .depth-bar.ask > span { background: var(--red); }
+    .oc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .oc-table th, .oc-table td { padding: 5px 7px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    .oc-table thead th { position: sticky; top: 0; background: var(--panel-2); z-index: 1; font-size: 10px; }
+    .oc-strike { text-align: center; font-weight: 700; background: var(--panel-2); }
+    .oc-itm { background: rgba(38,208,124,0.07); }
+    .oc-atm td { background: rgba(240,185,11,0.14) !important; }
+    .oc-ce-bar { position: relative; }
+    .oc-ce-bar > span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--red); opacity: 0.12; }
+    .oc-pe-bar { position: relative; }
+    .oc-pe-bar > span { position: absolute; right: 0; top: 0; bottom: 0; background: var(--green); opacity: 0.12; }
+    .oc-wrap { max-height: 60vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
     .trade-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
     .trade-box h4 { margin: 0 0 12px; font-size: 13px; }
     .trade-row { display: flex; gap: 10px; align-items: center; }
@@ -204,6 +215,7 @@
         <button id="refreshBtn">↻ Refresh</button>
         <button id="csvBtn" title="Download current view as CSV">⬇ CSV</button>
         <button id="portfolioBtn" title="Paper trading portfolio">💼 Portfolio</button>
+        <button id="ocBtn" title="Option chain">⛓ Options</button>
         <button id="logBtn" title="Snapshot log & backtest">📊 Log</button>
       </span>
       <span><span class="dot" id="liveDot"></span> <span id="updated">—</span></span>
@@ -237,7 +249,10 @@
     <div class="modal">
       <div class="modal-head">
         <h3 id="mSym">—</h3>
-        <button class="close" id="mClose">✕</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button id="mOptions" title="View option chain">⛓ Options</button>
+          <button class="close" id="mClose">✕</button>
+        </div>
       </div>
       <div class="modal-body">
         <div class="metrics" id="mMetrics"></div>
@@ -307,6 +322,32 @@
           "Forward return" = how the price moved from when a stock first appeared
           in the list to its latest snapshot — a rough test of whether the signal
           was predictive. Needs data captured across time to be meaningful.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Option chain modal -->
+  <div class="overlay" id="ocOverlay">
+    <div class="modal" style="width:min(1040px,96vw)">
+      <div class="modal-head">
+        <h3>⛓ Option Chain — <span id="ocSym">—</span></h3>
+        <button class="close" id="ocClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="trade-row" style="margin-bottom:14px;flex-wrap:wrap">
+          <input type="text" id="ocInput" placeholder="Symbol e.g. RELIANCE" style="text-transform:uppercase;width:160px" />
+          <button id="ocLoad">Load</button>
+          <label style="margin-left:auto">Expiry
+            <select id="ocExpiry"></select>
+          </label>
+        </div>
+        <div class="metrics" id="ocSummary"></div>
+        <div id="ocTable"><div class="chart-note">Enter an F&amp;O symbol and click Load.</div></div>
+        <div class="chart-note" style="margin-top:12px">
+          Green rows are in-the-money. ATM strike is highlighted. Bars show OI size.
+          <b>PCR</b> &gt; 1 = more puts (potential support/bullish); &lt; 1 = more calls.
+          <b>Max pain</b> = strike where option writers lose least (price often gravitates there near expiry).
         </div>
       </div>
     </div>
@@ -839,9 +880,97 @@
         </tr>`).join("") + `</tbody></table>`;
     }
 
+    // ---- Option chain ----
+    function openOptionChain(sym) {
+      document.getElementById("ocOverlay").classList.add("show");
+      if (sym) {
+        document.getElementById("ocInput").value = sym;
+        loadOptionChain(sym);
+      }
+    }
+    async function loadOptionChain(sym, expiry) {
+      sym = (sym || document.getElementById("ocInput").value || "").toUpperCase().trim();
+      if (!sym) return;
+      document.getElementById("ocSym").textContent = sym;
+      document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Loading ${sym} option chain…</div>`;
+      document.getElementById("ocSummary").innerHTML = "";
+      try {
+        const url = "/api/optionchain/" + encodeURIComponent(sym) + (expiry ? "?expiry=" + encodeURIComponent(expiry) : "");
+        const d = await (await fetch(url)).json();
+        if (d.error || !d.rows || !d.rows.length) {
+          document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">No option chain for ${sym}. Use an F&O symbol (e.g. RELIANCE, TCS, TATAMOTORS).</div>`;
+          return;
+        }
+        renderOCExpiries(d);
+        renderOCSummary(d);
+        renderOCTable(d);
+      } catch (e) {
+        document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Failed: ${e.message}</div>`;
+      }
+    }
+    function renderOCExpiries(d) {
+      const sel = document.getElementById("ocExpiry");
+      sel.innerHTML = (d.expiries || []).map(e => `<option value="${e}" ${e===d.expiry?'selected':''}>${e}</option>`).join("");
+    }
+    function renderOCSummary(d) {
+      const pcrCls = d.pcr == null ? "" : (d.pcr >= 1 ? "pos" : "neg");
+      document.getElementById("ocSummary").innerHTML = [
+        `<div class="metric"><div class="k">Spot</div><div class="v">₹${fmtPrice(d.underlying)}</div></div>`,
+        `<div class="metric"><div class="k">PCR</div><div class="v ${pcrCls}">${d.pcr ?? "—"}</div></div>`,
+        `<div class="metric"><div class="k">Max Pain</div><div class="v">${d.maxPain ?? "—"}</div></div>`,
+        `<div class="metric"><div class="k">ATM</div><div class="v">${d.atmStrike ?? "—"}</div></div>`,
+        `<div class="metric"><div class="k">CE OI</div><div class="v">${fmtNum(d.ceTotOI)}</div></div>`,
+        `<div class="metric"><div class="k">PE OI</div><div class="v">${fmtNum(d.peTotOI)}</div></div>`,
+      ].join("");
+    }
+    function renderOCTable(d) {
+      const spot = d.underlying || 0;
+      let maxOI = 1;
+      d.rows.forEach(r => {
+        maxOI = Math.max(maxOI, (r.ce && r.ce.oi) || 0, (r.pe && r.pe.oi) || 0);
+      });
+      const cell = (v) => v == null ? "—" : fmtNum(v);
+      const px = (v) => v == null ? "—" : fmtPrice(v);
+      const body = d.rows.map(r => {
+        const ce = r.ce || {}, pe = r.pe || {};
+        const ceItm = r.strike < spot, peItm = r.strike > spot;
+        const isAtm = r.strike === d.atmStrike;
+        const ceW = ((ce.oi || 0) / maxOI * 100).toFixed(0);
+        const peW = ((pe.oi || 0) / maxOI * 100).toFixed(0);
+        const chgCls = (v) => v == null ? "" : (v >= 0 ? "pos" : "neg");
+        return `<tr class="${isAtm ? 'oc-atm' : ''}">
+          <td class="oc-ce-bar ${ceItm?'oc-itm':''}">${cell(ce.oi)}<span style="width:${ceW}%"></span></td>
+          <td class="${chgCls(ce.chgOi)} ${ceItm?'oc-itm':''}">${cell(ce.chgOi)}</td>
+          <td class="${ceItm?'oc-itm':''}">${ce.iv!=null?ce.iv.toFixed(1):"—"}</td>
+          <td class="${ceItm?'oc-itm':''}">${px(ce.ltp)}</td>
+          <td class="oc-strike">${r.strike}</td>
+          <td class="${peItm?'oc-itm':''}">${px(pe.ltp)}</td>
+          <td class="${peItm?'oc-itm':''}">${pe.iv!=null?pe.iv.toFixed(1):"—"}</td>
+          <td class="${chgCls(pe.chgOi)} ${peItm?'oc-itm':''}">${cell(pe.chgOi)}</td>
+          <td class="oc-pe-bar ${peItm?'oc-itm':''}">${cell(pe.oi)}<span style="width:${peW}%"></span></td>
+        </tr>`;
+      }).join("");
+      document.getElementById("ocTable").innerHTML = `<div class="oc-wrap"><table class="oc-table">
+        <thead><tr>
+          <th>CALLS OI</th><th>Chg OI</th><th>IV</th><th>LTP</th>
+          <th class="oc-strike">STRIKE</th>
+          <th>LTP</th><th>IV</th><th>Chg OI</th><th>PUTS OI</th>
+        </tr></thead><tbody>${body}</tbody></table></div>`;
+    }
+
     document.getElementById("refreshBtn").onclick = load;
     document.getElementById("csvBtn").onclick = exportCSV;
     document.getElementById("portfolioBtn").onclick = openPortfolio;
+    document.getElementById("ocBtn").onclick = () => openOptionChain();
+    document.getElementById("ocLoad").onclick = () => loadOptionChain();
+    document.getElementById("ocInput").onkeydown = (e) => { if (e.key === "Enter") loadOptionChain(); };
+    document.getElementById("ocExpiry").onchange = (e) =>
+      loadOptionChain(document.getElementById("ocInput").value, e.target.value);
+    document.getElementById("ocClose").onclick =
+      () => document.getElementById("ocOverlay").classList.remove("show");
+    document.getElementById("ocOverlay").onclick = (e) => {
+      if (e.target.id === "ocOverlay") e.currentTarget.classList.remove("show");
+    };
     document.getElementById("logBtn").onclick = openLog;
     document.getElementById("logView").onchange = runBacktest;
     document.getElementById("logCapture").onclick = async (e) => {
@@ -860,6 +989,9 @@
     };
     document.getElementById("mBuy").onclick = () => placeOrder("BUY");
     document.getElementById("mSell").onclick = () => placeOrder("SELL");
+    document.getElementById("mOptions").onclick = () => {
+      if (window._detailSym) openOptionChain(window._detailSym);
+    };
     document.getElementById("pfClose").onclick =
       () => document.getElementById("pfOverlay").classList.remove("show");
     document.getElementById("pfOverlay").onclick = (e) => {

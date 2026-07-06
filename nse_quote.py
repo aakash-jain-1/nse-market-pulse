@@ -152,3 +152,131 @@ def get_ltp(symbol):
         return get_quote(symbol).get("ltp")
     except Exception:
         return None
+
+
+def _oc_referer(symbol):
+    return {"Referer": nse.BASE + "/get-quote/optionchain/" + symbol}
+
+
+def _oc_warm(symbol):
+    if ("oc", symbol) in _warmed:
+        return
+    try:
+        nse.get_session().get(
+            nse.BASE + "/get-quote/optionchain/" + symbol, timeout=15
+        )
+        _warmed.add(("oc", symbol))
+    except Exception:
+        pass
+
+
+def get_option_expiries(symbol):
+    """List of expiry dates (e.g. '28-Jul-2026') available for a symbol."""
+    symbol = symbol.upper().strip()
+    _oc_warm(symbol)
+    url = nse.BASE + NEXT + f"getOptionChainDropdown&symbol={symbol}"
+    r = nse.get_session().get(url, headers=_oc_referer(symbol), timeout=15)
+    r.raise_for_status()
+    return r.json().get("expiryDates", []) or []
+
+
+def _leg(d):
+    return {
+        "oi": _num(d.get("openInterest")),
+        "chgOi": _num(d.get("changeinOpenInterest")),
+        "pChgOi": _num(d.get("pchangeinOpenInterest")),
+        "ltp": _num(d.get("lastPrice")),
+        "change": _num(d.get("change")),
+        "iv": _num(d.get("impliedVolatility")),
+        "volume": _num(d.get("totalTradedVolume")),
+        "bid": _num(d.get("buyPrice1")),
+        "ask": _num(d.get("sellPrice1")),
+    }
+
+
+def _max_pain(rows):
+    """Strike at which option writers lose the least (expected pinning level)."""
+    strikes = [r["strike"] for r in rows if r["strike"] is not None]
+    if not strikes:
+        return None
+    best, best_loss = None, None
+    for expiry_price in strikes:
+        loss = 0.0
+        for r in rows:
+            k = r["strike"]
+            if k is None:
+                continue
+            ce_oi = (r["ce"] or {}).get("oi") or 0
+            pe_oi = (r["pe"] or {}).get("oi") or 0
+            if expiry_price > k:
+                loss += ce_oi * (expiry_price - k)   # CE writers pay
+            if expiry_price < k:
+                loss += pe_oi * (k - expiry_price)   # PE writers pay
+        if best_loss is None or loss < best_loss:
+            best_loss, best = loss, expiry_price
+    return best
+
+
+def get_option_chain(symbol, expiry=None):
+    """
+    Normalized option chain for a symbol + expiry, with analytics:
+      underlying, expiry, expiries[], rows[{strike, ce, pe}],
+      pcr, maxPain, atmStrike, ceTotOI, peTotOI.
+    """
+    symbol = symbol.upper().strip()
+    expiries = get_option_expiries(symbol)
+    if not expiry:
+        expiry = expiries[0] if expiries else None
+    if not expiry:
+        return {"symbol": symbol, "expiries": [], "rows": [], "error": "no expiries"}
+
+    key = ("oc", symbol, expiry)
+    hit = _cache.get(key)
+    if hit and (time.time() - hit[0]) < _QUOTE_TTL:
+        return hit[1]
+
+    _oc_warm(symbol)
+    q = f"getOptionChainData&symbol={symbol}&params=expiryDate={expiry}"
+    r = nse.get_session().get(nse.BASE + NEXT + q, headers=_oc_referer(symbol), timeout=15)
+    r.raise_for_status()
+    data = r.json()
+
+    underlying = _num(data.get("underlyingValue"))
+    rows = []
+    ce_tot = pe_tot = 0.0
+    for item in data.get("data", []) or []:
+        ce = item.get("CE") or {}
+        pe = item.get("PE") or {}
+        strike = _num((ce or pe).get("strikePrice"))
+        ce_leg = _leg(ce) if ce else None
+        pe_leg = _leg(pe) if pe else None
+        if ce_leg and ce_leg["oi"]:
+            ce_tot += ce_leg["oi"]
+        if pe_leg and pe_leg["oi"]:
+            pe_tot += pe_leg["oi"]
+        rows.append({"strike": strike, "ce": ce_leg, "pe": pe_leg})
+
+    rows.sort(key=lambda r: (r["strike"] is None, r["strike"]))
+    atm = None
+    if underlying and rows:
+        atm = min(
+            (r["strike"] for r in rows if r["strike"] is not None),
+            key=lambda k: abs(k - underlying),
+            default=None,
+        )
+
+    out = {
+        "symbol": symbol,
+        "expiry": expiry,
+        "expiries": expiries,
+        "underlying": underlying,
+        "timestamp": data.get("timestamp"),
+        "rows": rows,
+        "ceTotOI": ce_tot,
+        "peTotOI": pe_tot,
+        "pcr": round(pe_tot / ce_tot, 2) if ce_tot else None,
+        "maxPain": _max_pain(rows),
+        "atmStrike": atm,
+    }
+    _cache[key] = (time.time(), out)
+    return out

@@ -103,11 +103,15 @@ session, **as long as we send a stock-specific Referer**
 | Full quote + 5-level market depth | `getSymbolData&marketType=N&series=EQ&symbol=X` | LTP in `tradeInfo.lastPrice`; change/open/high/low in `metaData`; depth in `orderBook`; delivery % in `tradeInfo.deliveryToTradedQuantity` |
 | Real intraday chart | `getSymbolChartData&symbol=<X>EQN&days=1D` | `grapthData` = `[[ts_ms, price, phase, ...], ...]` (400+ pts/day) |
 | Company meta | `getMetaData&symbol=X` | |
-| Option chain | `getOptionChainData&symbol=X&params=...` | not yet wired up |
+| Option expiries/strikes | `getOptionChainDropdown&symbol=X` | `expiryDates`, `strikePrice` lists |
+| Option chain | `getOptionChainData&symbol=X&params=expiryDate=<28-Jul-2026>` | note the `params=expiryDate=...` nested form; `data[].CE/PE` + `underlyingValue` |
 
 This finally gives real charts, per-stock quotes for ANY symbol, and market
 depth. `nse_client.get_price()` falls back to `nse_quote.get_ltp()` so paper
 trading works for any tradable symbol (not just hot-list names).
+
+**Note on symbol renames:** some underlyings changed tickers (e.g. TATAMOTORS →
+`TMPV`); use the current F&O symbol. Non-F&O symbols return "no expiries".
 
 ### BLOCKED / unreliable endpoints (do not rely on)
 - `/api/quote-equity?symbol=X` → **403 Forbidden** (superseded by NextApi above).
@@ -130,6 +134,9 @@ trading works for any tradable symbol (not just hot-list names).
   cached ~20s). Classified server-side into: Long buildup / Short buildup /
   Short covering / Long unwinding, with an honest grey "OI Rising/Falling"
   fallback when the price direction is genuinely unknown (e.g. indices).
+- **Option Chain** (`⛓ Options` button, or from the detail modal) — full CE/PE
+  grid for any F&O symbol + expiry, with **PCR**, **max pain**, **ATM** highlight,
+  ITM shading, and OI-size bars. Backed by `nse_quote.get_option_chain()`.
 - **Live sparklines** per row (client-side, accumulate across refreshes).
 - **Stock detail modal** on row click — now shows the **real NSE intraday
   chart** (`getSymbolChartData`, with prev-close line), **5-level market depth**
@@ -176,7 +183,8 @@ trading works for any tradable symbol (not just hot-list names).
   feed. Needs the user's API credentials.
 - Persist sparkline price history (survive page reload) via localStorage.
 - Phone/LAN access + optional deploy.
-- Wire up the **option chain** (`getOptionChainData`) for an options module.
+- Options analytics: OI change heatmap, IV skew chart, multi-expiry PCR trend.
+- Paper-trade options (buy/sell CE/PE contracts) from the chain grid.
 - Use real per-stock quotes to remove the paper-trading hot-list limit fully.
 - Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
   bits (quotes, historical). See README/analysis for the API landscape.
@@ -189,6 +197,7 @@ trading works for any tradable symbol (not just hot-list names).
 - Futures tab: basis (premium/discount), annualized carry, OI buildup.
 - NextApi gateway integration (`nse_quote.py`): real intraday charts, per-stock
   quotes for any symbol, and 5-level market depth in the detail modal.
+- Option chain module: full CE/PE grid + PCR / max pain / ATM analytics.
 
 ## Futures roadmap (user wants to trade futures)
 
