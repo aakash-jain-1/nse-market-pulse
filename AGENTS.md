@@ -1,0 +1,139 @@
+# Project Context — NSE Market Pulse
+
+> This file is the single source of truth for AI agents / future sessions
+> working on this project. Read it first. Keep it updated when things change.
+
+## What this project is
+
+**NSE Market Pulse** is a live dashboard + CLI that surfaces which NSE (National
+Stock Exchange of India) stocks are **"in demand" right now**, aimed at spotting
+intraday momentum and unusual activity. It pulls data from NSE India's public
+(unofficial) JSON API and presents it in an auto-refreshing web UI.
+
+- **GitHub:** `git@github.com:aakash-jain-1/nse-market-pulse.git` (branch `main`)
+- **Purpose:** educational/research; NOT investment advice.
+- **Owner:** aakash-jain-1
+
+## Tech stack
+
+- Python **3.13** (Windows). See "Environment gotchas" for the interpreter path.
+- **Flask 3.1.3** — web server + JSON API
+- **requests 2.34.2** — NSE HTTP calls (with cookie warm-up)
+- **tabulate 0.10.0** — CLI table formatting
+- Vanilla HTML/CSS/JS frontend (no build step, no framework)
+
+## File structure
+
+```
+NSE/
+├── app.py            # Flask server + JSON API endpoints (runs on port 5055)
+├── nse_client.py     # NSE session mgmt + data fetching / normalization (CORE)
+├── nse_demand.py     # Standalone CLI scanner (original, still works)
+├── templates/
+│   └── index.html    # Entire dashboard UI (HTML + CSS + JS inline)
+├── requirements.txt
+├── README.md
+├── AGENTS.md         # <- this file
+└── .gitignore
+```
+
+## How to run
+
+```bash
+python app.py            # dashboard at http://127.0.0.1:5055
+python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
+```
+
+The Flask app runs in debug mode, so it auto-reloads on `.py` changes and
+re-reads `templates/index.html` on every request (no restart needed for UI edits).
+
+## Environment gotchas (IMPORTANT)
+
+- On this Windows machine the bare `python` command sometimes resolves to the
+  Microsoft Store shim and fails with *"Python was not found"*. Use the full
+  interpreter path when that happens:
+  `C:/Users/aakas/AppData/Local/Programs/Python/Python313/python.exe`
+- **Port 5000 is contaminated** by a *different* previously-run app (a "BSE
+  Corporate Announcements" PWA) whose **service worker** is cached in the
+  browser and hijacks `127.0.0.1:5000`. That's why we run on **port 5055**.
+  If port 5000 shows the wrong app: hard-refresh (Ctrl+Shift+R) or unregister
+  the service worker (F12 → Application → Service Workers → Unregister).
+
+## Architecture notes
+
+### NSE session handling (`nse_client.py`)
+NSE blocks plain HTTP requests. We must:
+1. Create a `requests.Session` with a browser-like `User-Agent` + `Referer`.
+2. **Warm it up** by GETting the homepage and `/market-data/live-equity-market`
+   so NSE sets session cookies.
+3. Reuse that session for API calls; rebuild it automatically on failure and
+   after a TTL (`_SESSION_TTL = 300s`). Guarded by a lock for concurrency.
+
+### Data flow
+`nse_client.py` fetches + normalizes each endpoint into clean `list[dict]`.
+Both `app.py` (JSON API) and `nse_demand.py` (CLI) consume these functions.
+The frontend polls `/api/<view>` and renders tables client-side.
+
+### Working NSE endpoints (verified)
+| Purpose | Endpoint |
+|---------|----------|
+| Top gainers | `/api/live-analysis-variations?index=gainers` |
+| Top losers | `/api/live-analysis-variations?index=loosers` (note NSE's misspelling) |
+| Most active by volume | `/api/live-analysis-most-active-securities?index=volume` |
+| Most active by value | `/api/live-analysis-most-active-securities?index=value` |
+| Volume gainers | `/api/live-analysis-volume-gainers` |
+| OI spurts (underlyings) | `/api/live-analysis-oi-spurts-underlyings` |
+| Most-active stock futures | `/api/liveEquity-derivatives?index=stock_fut` (has underlying+pChange+OI) |
+| Intraday chart | `/api/chart-databyindex?index=<SYMBOL>EQN` |
+
+### BLOCKED / unreliable endpoints (do not rely on)
+- `/api/quote-equity?symbol=X` → **403 Forbidden** (heavy anti-bot; needs
+  per-stock page context we couldn't reliably reproduce).
+- `/api/chart-databyindex?index=<SYMBOL>EQN` → returns **empty `grapthData`**
+  in practice. Because of this, the dashboard builds **live sparklines
+  client-side** by accumulating LTP across auto-refreshes instead.
+- `/api/snapshot-derivatives-equity?index=oi_gainers` → returns "No Data Found"
+  pre-market; only has data during market hours.
+- `/api/equity-stockIndices?index=...` → 404 with the names we tried.
+
+## Feature summary (what's built)
+
+- **Demand Score** — composite ranking combining volume-gainers (volume
+  multiple), most-active-by-value (money flow rank), and top-gainers (% gain).
+  See `get_demand_score()`.
+- **Volume Gainers**, **Top Gainers/Losers**, **Most Active (Volume/Value)**.
+- **F&O Open Interest tab** — OI spurts enriched with the underlying's real
+  `pChange` (cross-referenced from `stock_fut` + gainers/losers + most-active,
+  cached ~20s). Classified server-side into: Long buildup / Short buildup /
+  Short covering / Long unwinding, with an honest grey "OI Rising/Falling"
+  fallback when the price direction is genuinely unknown (e.g. indices).
+- **Live sparklines** per row (client-side, accumulate across refreshes).
+- **Stock detail modal** on row click (metrics + larger live chart).
+- **Alerts** — desktop notification + sound beep when a stock crosses a
+  configurable volume multiple (20x/50x/100x) with a rising price.
+
+## Known limitations
+
+- Live intraday charts are client-side only (NSE chart endpoint is empty).
+- OI price-direction coverage is partial pre-market; improves during 09:15–15:30 IST.
+- All endpoints are unofficial and can change without notice.
+- Data only meaningful during NSE market hours (Mon–Fri, 09:15–15:30 IST).
+
+## Roadmap / ideas (not yet built)
+
+- OI % change column (backend already computes `oiPctChange`).
+- CSV export / logging of snapshots for backtesting.
+- Persist sparkline price history (survive page reload) via localStorage.
+- Phone/LAN access + optional deploy.
+- Consider migrating live data to a broker API (Angel One SmartAPI / Upstox /
+  Dhan) or reliable historical lib (jugaad-data / nsefeed) for robustness —
+  see README/analysis for the API landscape.
+
+## Conventions
+
+- Keep data-fetching logic in `nse_client.py`; keep `app.py` thin (routes only).
+- Normalize NSE fields into stable keys (`symbol`, `ltp`, `pChange`, `volume`,
+  ...) so the frontend/CLI don't depend on NSE's raw field names.
+- No secrets in the repo (`.gitignore` covers `.env`). NSE needs no API key.
+- Only commit/push when the user explicitly asks.
+```
