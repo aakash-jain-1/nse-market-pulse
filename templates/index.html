@@ -181,6 +181,7 @@
         </label>
         <button id="soundBtn" title="Toggle sound">🔔 Sound</button>
         <button id="refreshBtn">↻ Refresh</button>
+        <button id="csvBtn" title="Download current view as CSV">⬇ CSV</button>
       </span>
       <span><span class="dot" id="liveDot"></span> <span id="updated">—</span></span>
     </div>
@@ -338,7 +339,7 @@
             <td><span class="badge">${r.week1volChange ? r.week1volChange.toFixed(1)+"x" : "—"}</span></td>
             <td>${sparkline(r.symbol)}</td></tr>`).join("");
       } else if (key === "oispurts") {
-        head = `<tr><th>Stock</th><th>Underlying</th><th>% Chg</th><th>Latest OI</th><th>OI Change</th><th>Signal</th><th>Trend</th></tr>`;
+        head = `<tr><th>Stock</th><th>Underlying</th><th>% Chg</th><th>Latest OI</th><th>OI Change</th><th>OI %</th><th>Signal</th><th>Trend</th></tr>`;
         body = rows.map((r,i) => {
           const oiUp = (r.changeInOI ?? 0) >= 0;
           const cls = r.signalKind === "buildup" ? "buildup"
@@ -346,10 +347,13 @@
           const pctHtml = r.pChange == null
             ? `<td style="color:var(--muted)">—</td>`
             : pctCell(r.pChange);
+          const oiPct = r.oiPctChange == null ? "—"
+            : `<span class="${r.oiPctChange>=0?'pos':'neg'}">${r.oiPctChange>=0?'+':''}${r.oiPctChange.toFixed(1)}%</span>`;
           return `<tr data-sym="${r.symbol}">
             ${rowStart(i, r.symbol)}<td>${fmtPrice(r.ltp)}</td>${pctHtml}
             <td>${fmtNum(r.latestOI)}</td>
             <td class="${oiUp?'pos':'neg'}">${oiUp?'+':''}${fmtNum(r.changeInOI)}</td>
+            <td>${oiPct}</td>
             <td><span class="badge ${cls}">${r.signal || "—"}</span></td>
             <td>${sparkline(r.symbol)}</td></tr>`;
         }).join("");
@@ -427,6 +431,8 @@
       if (rowData.value != null) add("Traded Value", fmtCr(rowData.value));
       if (rowData.latestOI != null) add("Latest OI", fmtNum(rowData.latestOI));
       if (rowData.changeInOI != null) add("OI Change", fmtNum(rowData.changeInOI));
+      if (rowData.oiPctChange != null)
+        add("OI % Change", `<span class="${rowData.oiPctChange>=0?'pos':'neg'}">${rowData.oiPctChange>=0?'+':''}${rowData.oiPctChange.toFixed(1)}%</span>`);
       if (rowData.score != null) add("Demand Score", rowData.score);
       document.getElementById("mMetrics").innerHTML = metrics.join("");
 
@@ -492,7 +498,36 @@
       apply();
     }
 
+    function exportCSV() {
+      const rows = window._lastRows || [];
+      if (!rows.length) return;
+      // Union of keys across rows, keeping a sensible leading order.
+      const preferred = ["symbol","ltp","pChange","score","signalCount","volMult",
+        "volume","value","week1AvgVolume","week1volChange","latestOI","prevOI",
+        "changeInOI","oiPctChange","signal","prevClose"];
+      const present = new Set();
+      rows.forEach(r => Object.keys(r).forEach(k => present.add(k)));
+      const cols = preferred.filter(k => present.has(k))
+        .concat([...present].filter(k => !preferred.includes(k)));
+      const esc = (v) => {
+        if (v == null) return "";
+        const s = String(v);
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      };
+      const lines = [cols.join(",")].concat(
+        rows.map(r => cols.map(c => esc(r[c])).join(","))
+      );
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `nse_${current}_${stamp}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
     document.getElementById("refreshBtn").onclick = load;
+    document.getElementById("csvBtn").onclick = exportCSV;
     document.getElementById("mClose").onclick =
       () => document.getElementById("overlay").classList.remove("show");
     document.getElementById("overlay").onclick = (e) => {
