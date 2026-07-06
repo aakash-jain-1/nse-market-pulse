@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NSE In-Demand Scanner</title>
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --panel: #141922;
+      --panel-2: #1b2230;
+      --border: #232c3b;
+      --text: #e6edf3;
+      --muted: #8b98a9;
+      --green: #26d07c;
+      --red: #ff5c68;
+      --accent: #ffb020;
+      --blue: #4a9eff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 28px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #10151e, #0b0e14);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    header h1 { font-size: 20px; margin: 0; letter-spacing: 0.3px; }
+    header h1 span { color: var(--accent); }
+    .status { display: flex; align-items: center; gap: 14px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+    .dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--green); display: inline-block;
+      box-shadow: 0 0 8px var(--green); animation: pulse 1.8s infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+    .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    select, button {
+      background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 7px 12px; font-size: 13px; cursor: pointer;
+    }
+    button:hover, select:hover { border-color: var(--blue); }
+    button.on { border-color: var(--green); color: var(--green); }
+    label { color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+    .tabs { display: flex; gap: 6px; padding: 16px 28px 0; flex-wrap: wrap; }
+    .tab {
+      padding: 9px 16px; border-radius: 8px 8px 0 0; background: transparent;
+      border: 1px solid transparent; color: var(--muted); font-size: 14px;
+      cursor: pointer; white-space: nowrap;
+    }
+    .tab.active {
+      background: var(--panel); color: var(--text);
+      border-color: var(--border); border-bottom-color: var(--panel);
+    }
+    main { padding: 0 28px 40px; }
+    .panel {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 0 12px 12px 12px; overflow: hidden;
+    }
+    .panel-head {
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .panel-head h2 { margin: 0; font-size: 16px; }
+    .panel-head p { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td {
+      text-align: right; padding: 11px 16px; font-size: 13.5px;
+      border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+    th:first-child, td:first-child { text-align: left; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover { background: var(--panel-2); }
+    td.sym { font-weight: 700; letter-spacing: 0.3px; }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+    .rank {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px; border-radius: 6px; background: var(--panel-2);
+      color: var(--muted); font-size: 12px; font-weight: 700; margin-right: 10px;
+    }
+    .rank.top { background: var(--accent); color: #1a1200; }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 20px;
+      font-size: 11.5px; font-weight: 700;
+      background: rgba(255,176,32,0.15); color: var(--accent);
+    }
+    .badge.buildup { background: rgba(38,208,124,0.15); color: var(--green); }
+    .badge.short { background: rgba(255,92,104,0.15); color: var(--red); }
+    .badge.neutral { background: var(--panel-2); color: var(--muted); }
+    .score-bar {
+      height: 6px; border-radius: 4px; background: var(--panel-2);
+      overflow: hidden; width: 90px; display: inline-block; vertical-align: middle; margin-left: 8px;
+    }
+    .score-bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--green)); }
+    .spark { display: inline-block; vertical-align: middle; }
+    .loading, .empty { padding: 40px; text-align: center; color: var(--muted); }
+    .err { color: var(--red); }
+    .hint {
+      font-size: 12px; color: var(--muted); margin: 14px 28px 0;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 12px 16px;
+    }
+    .hint b { color: var(--text); }
+    footer { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
+    /* Modal */
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: none; align-items: center; justify-content: center; z-index: 50;
+      backdrop-filter: blur(2px);
+    }
+    .overlay.show { display: flex; }
+    .modal {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 14px; width: min(640px, 92vw); max-height: 88vh; overflow: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    }
+    .modal-head {
+      padding: 18px 22px; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: var(--panel);
+    }
+    .modal-head h3 { margin: 0; font-size: 22px; letter-spacing: 0.5px; }
+    .modal-head .close { font-size: 22px; background: none; border: none; color: var(--muted); }
+    .modal-body { padding: 22px; }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+    .metric { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+    .metric .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .metric .v { font-size: 18px; font-weight: 700; margin-top: 4px; }
+    .chart-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+    .chart-box h4 { margin: 0 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
+    .chart-note { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+    .alert-toast {
+      position: fixed; bottom: 20px; right: 20px; z-index: 60;
+      display: flex; flex-direction: column; gap: 10px; max-width: 340px;
+    }
+    .toast {
+      background: var(--panel); border: 1px solid var(--accent);
+      border-left: 4px solid var(--accent); border-radius: 10px; padding: 12px 16px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.5); animation: slidein 0.3s ease;
+    }
+    .toast b { color: var(--accent); }
+    .toast .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    @keyframes slidein { from{transform:translateX(120%);opacity:0;} to{transform:translateX(0);opacity:1;} }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>NSE <span>In-Demand</span> Scanner</h1>
+    <div class="status">
+      <span class="controls">
+        <label>Auto-refresh
+          <select id="refreshSel">
+            <option value="0">Off</option>
+            <option value="15">15s</option>
+            <option value="30" selected>30s</option>
+            <option value="60">60s</option>
+          </select>
+        </label>
+        <label>Alert &gt;
+          <select id="alertSel">
+            <option value="0">Off</option>
+            <option value="20">20x vol</option>
+            <option value="50" selected>50x vol</option>
+            <option value="100">100x vol</option>
+          </select>
+        </label>
+        <button id="soundBtn" title="Toggle sound">🔔 Sound</button>
+        <button id="refreshBtn">↻ Refresh</button>
+      </span>
+      <span><span class="dot" id="liveDot"></span> <span id="updated">—</span></span>
+    </div>
+  </header>
+
+  <div class="tabs" id="tabs"></div>
+
+  <main>
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 id="panelTitle"></h2>
+          <p id="panelDesc"></p>
+        </div>
+        <span id="panelMeta" class="badge" style="display:none"></span>
+      </div>
+      <div id="tableWrap"><div class="loading">Loading…</div></div>
+    </div>
+    <div class="hint">
+      <b>How to read this:</b> The strongest short-term demand signal is <b>high volume</b>
+      (well above average) <b>plus</b> a <b>rising price</b> together. The <b>Demand Score</b>
+      tab ranks stocks across multiple hot lists. <b>Sparklines</b> show live price movement
+      since you opened this page (they fill in as data refreshes). Click any row for details.
+      This shows where activity is — not a profit guarantee. Always use stop-losses.
+    </div>
+  </main>
+
+  <!-- Detail modal -->
+  <div class="overlay" id="overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="mSym">—</h3>
+        <button class="close" id="mClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="metrics" id="mMetrics"></div>
+        <div class="chart-box">
+          <h4>Live price (this session)</h4>
+          <div id="mChart"></div>
+          <div class="chart-note" id="mNote"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="alert-toast" id="toasts"></div>
+
+  <footer>Data: NSE India live API · For research/education only · Not investment advice</footer>
+
+  <script>
+    const TABS = [
+      { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
+        desc: "Composite ranking — stocks appearing across gainers, money-flow & volume spikes rank highest." },
+      { key: "volgainers", label: "Volume Gainers", title: "Volume Gainers (unusual activity)",
+        desc: "Trading far above their average volume — the classic 'something's happening' signal." },
+      { key: "oispurts",   label: "F&O Open Interest", title: "Open Interest Spurts (F&O)",
+        desc: "Where derivatives traders are building positions. Price up + OI up = long buildup." },
+      { key: "gainers",    label: "Top Gainers", title: "Top Gainers",
+        desc: "Biggest price risers right now — momentum / strength." },
+      { key: "losers",     label: "Top Losers", title: "Top Losers",
+        desc: "Biggest price fallers — reversal or shorting candidates." },
+      { key: "volume",     label: "Most Active (Volume)", title: "Most Active by Volume",
+        desc: "Where the crowd is trading by share count." },
+      { key: "value",      label: "Most Active (Value)", title: "Most Active by Value",
+        desc: "Where the big money is flowing by rupees traded." },
+    ];
+
+    let current = "demand";
+    let timer = null;
+    let soundOn = false;
+    // Live price history accumulated across refreshes: { SYMBOL: [{t, price}] }
+    const history = {};
+    const alerted = new Set();
+
+    const fmtNum = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");
+    const fmtPrice = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
+    const fmtCr = (n) => n == null ? "—" : "₹" + (n/1e7).toLocaleString("en-IN",{maximumFractionDigits:1}) + " Cr";
+    const pctCell = (p) => {
+      if (p == null) return "<td>—</td>";
+      const cls = p >= 0 ? "pos" : "neg";
+      return `<td class="${cls}">${p >= 0 ? "+" : ""}${p.toFixed(2)}%</td>`;
+    };
+
+    function recordPrice(sym, price) {
+      if (!sym || price == null) return;
+      const h = history[sym] || (history[sym] = []);
+      const last = h[h.length - 1];
+      if (!last || last.price !== price) h.push({ t: Date.now(), price });
+      if (h.length > 120) h.shift();
+    }
+
+    function sparkline(sym, w = 90, h = 26) {
+      const pts = history[sym] || [];
+      if (pts.length < 2)
+        return `<svg class="spark" width="${w}" height="${h}"><text x="4" y="17" fill="#5b6675" font-size="10">…</text></svg>`;
+      const ys = pts.map(p => p.price);
+      const min = Math.min(...ys), max = Math.max(...ys);
+      const rng = (max - min) || 1;
+      const step = w / (pts.length - 1);
+      const coords = pts.map((p, i) => {
+        const x = i * step;
+        const y = h - 3 - ((p.price - min) / rng) * (h - 6);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+      const up = ys[ys.length - 1] >= ys[0];
+      const color = up ? "#26d07c" : "#ff5c68";
+      return `<svg class="spark" width="${w}" height="${h}">
+        <polyline fill="none" stroke="${color}" stroke-width="1.5"
+          points="${coords.join(" ")}" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>`;
+    }
+
+    function buildTabs() {
+      const el = document.getElementById("tabs");
+      el.innerHTML = "";
+      TABS.forEach(t => {
+        const b = document.createElement("button");
+        b.className = "tab" + (t.key === current ? " active" : "");
+        b.textContent = t.label;
+        b.onclick = () => { current = t.key; buildTabs(); load(); };
+        el.appendChild(b);
+      });
+      const meta = TABS.find(t => t.key === current);
+      document.getElementById("panelTitle").textContent = meta.title;
+      document.getElementById("panelDesc").textContent = meta.desc;
+    }
+
+    function rowStart(i, sym) {
+      return `<td class="sym"><span class="rank ${i<3?'top':''}">${i+1}</span>${sym}</td>`;
+    }
+
+    function renderTable(key, rows) {
+      // Always record prices for sparkline history + alerts.
+      rows.forEach(r => recordPrice(r.symbol, r.ltp));
+      checkAlerts(key, rows);
+
+      if (!rows || rows.length === 0)
+        return `<div class="empty">No data (market may be closed).</div>`;
+
+      let head, body;
+      if (key === "demand") {
+        head = `<tr><th>Stock</th><th>LTP</th><th>% Chg</th><th>Vol ×Avg</th><th>Signals</th><th>Score</th><th>Trend</th></tr>`;
+        const max = rows[0].score || 1;
+        body = rows.map((r,i) => `<tr data-sym="${r.symbol}">
+            ${rowStart(i, r.symbol)}<td>${fmtPrice(r.ltp)}</td>${pctCell(r.pChange)}
+            <td>${r.volMult ? r.volMult.toFixed(1)+"x" : "—"}</td>
+            <td>${r.signalCount}</td>
+            <td>${r.score}<span class="score-bar"><i style="width:${Math.max(4,(r.score/max)*100)}%"></i></span></td>
+            <td>${sparkline(r.symbol)}</td></tr>`).join("");
+      } else if (key === "volgainers") {
+        head = `<tr><th>Stock</th><th>LTP</th><th>% Chg</th><th>Today Vol</th><th>1W Avg Vol</th><th>vs Avg</th><th>Trend</th></tr>`;
+        body = rows.map((r,i) => `<tr data-sym="${r.symbol}">
+            ${rowStart(i, r.symbol)}<td>${fmtPrice(r.ltp)}</td>${pctCell(r.pChange)}
+            <td>${fmtNum(r.volume)}</td><td>${fmtNum(r.week1AvgVolume)}</td>
+            <td><span class="badge">${r.week1volChange ? r.week1volChange.toFixed(1)+"x" : "—"}</span></td>
+            <td>${sparkline(r.symbol)}</td></tr>`).join("");
+      } else if (key === "oispurts") {
+        head = `<tr><th>Stock</th><th>Underlying</th><th>% Chg</th><th>Latest OI</th><th>OI Change</th><th>Signal</th><th>Trend</th></tr>`;
+        body = rows.map((r,i) => {
+          const oiUp = (r.changeInOI ?? 0) >= 0;
+          const cls = r.signalKind === "buildup" ? "buildup"
+                    : r.signalKind === "short" ? "short" : "neutral";
+          const pctHtml = r.pChange == null
+            ? `<td style="color:var(--muted)">—</td>`
+            : pctCell(r.pChange);
+          return `<tr data-sym="${r.symbol}">
+            ${rowStart(i, r.symbol)}<td>${fmtPrice(r.ltp)}</td>${pctHtml}
+            <td>${fmtNum(r.latestOI)}</td>
+            <td class="${oiUp?'pos':'neg'}">${oiUp?'+':''}${fmtNum(r.changeInOI)}</td>
+            <td><span class="badge ${cls}">${r.signal || "—"}</span></td>
+            <td>${sparkline(r.symbol)}</td></tr>`;
+        }).join("");
+      } else if (key === "gainers" || key === "losers") {
+        head = `<tr><th>Stock</th><th>LTP</th><th>% Chg</th><th>Prev Close</th><th>Volume</th><th>Trend</th></tr>`;
+        body = rows.map((r,i) => `<tr data-sym="${r.symbol}">
+            ${rowStart(i, r.symbol)}<td>${fmtPrice(r.ltp)}</td>${pctCell(r.pChange)}
+            <td>${fmtPrice(r.prevClose)}</td><td>${fmtNum(r.volume)}</td>
+            <td>${sparkline(r.symbol)}</td></tr>`).join("");
+      } else {
+        head = `<tr><th>Stock</th><th>LTP</th><th>% Chg</th><th>Volume</th><th>Value</th><th>Trend</th></tr>`;
+        body = rows.map((r,i) => `<tr data-sym="${r.symbol}">
+            ${rowStart(i, r.symbol)}<td>${fmtPrice(r.ltp)}</td>${pctCell(r.pChange)}
+            <td>${fmtNum(r.volume)}</td><td>${fmtCr(r.value)}</td>
+            <td>${sparkline(r.symbol)}</td></tr>`).join("");
+      }
+      return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+    }
+
+    // ---- Alerts ----
+    function beep() {
+      if (!soundOn) return;
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.frequency.value = 880; o.type = "sine";
+        g.gain.setValueAtTime(0.001, ctx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+        o.start(); o.stop(ctx.currentTime + 0.42);
+      } catch (e) {}
+    }
+    function toast(sym, msg) {
+      const box = document.getElementById("toasts");
+      const el = document.createElement("div");
+      el.className = "toast";
+      el.innerHTML = `<b>🚀 ${sym}</b><div class="sub">${msg}</div>`;
+      box.appendChild(el);
+      setTimeout(() => el.remove(), 8000);
+    }
+    function fireAlert(sym, msg) {
+      toast(sym, msg);
+      beep();
+      if ("Notification" in window && Notification.permission === "granted") {
+        new Notification("🚀 " + sym + " in demand", { body: msg });
+      }
+    }
+    function checkAlerts(key, rows) {
+      const thr = parseInt(document.getElementById("alertSel").value, 10);
+      if (!thr) return;
+      rows.forEach(r => {
+        const mult = r.week1volChange || r.volMult;
+        if (mult && mult >= thr && (r.pChange ?? 0) > 0 && !alerted.has(r.symbol)) {
+          alerted.add(r.symbol);
+          fireAlert(r.symbol, `${mult.toFixed(0)}x avg volume · +${(r.pChange).toFixed(2)}% @ ₹${fmtPrice(r.ltp)}`);
+        }
+      });
+    }
+
+    // ---- Detail modal ----
+    function openDetail(sym) {
+      const h = history[sym] || [];
+      const rowData = (window._lastRows || []).find(r => r.symbol === sym) || {};
+      document.getElementById("mSym").textContent = sym;
+
+      const metrics = [];
+      const add = (k, v) => metrics.push(`<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`);
+      add("Last Price", "₹" + fmtPrice(rowData.ltp));
+      if (rowData.pChange != null)
+        add("% Change", `<span class="${rowData.pChange>=0?'pos':'neg'}">${rowData.pChange>=0?'+':''}${rowData.pChange.toFixed(2)}%</span>`);
+      if (rowData.week1volChange) add("Vol vs Avg", rowData.week1volChange.toFixed(1) + "x");
+      if (rowData.volMult) add("Vol vs Avg", rowData.volMult.toFixed(1) + "x");
+      if (rowData.volume != null) add("Volume", fmtNum(rowData.volume));
+      if (rowData.value != null) add("Traded Value", fmtCr(rowData.value));
+      if (rowData.latestOI != null) add("Latest OI", fmtNum(rowData.latestOI));
+      if (rowData.changeInOI != null) add("OI Change", fmtNum(rowData.changeInOI));
+      if (rowData.score != null) add("Demand Score", rowData.score);
+      document.getElementById("mMetrics").innerHTML = metrics.join("");
+
+      document.getElementById("mChart").innerHTML = bigChart(sym);
+      const note = h.length < 2
+        ? "Collecting live data… keep this page open and the chart will build as prices refresh."
+        : `${h.length} points captured since you opened the dashboard.`;
+      document.getElementById("mNote").textContent = note;
+      document.getElementById("overlay").classList.add("show");
+    }
+    function bigChart(sym, w = 580, h = 200) {
+      const pts = history[sym] || [];
+      if (pts.length < 2)
+        return `<div style="height:${h}px;display:flex;align-items:center;justify-content:center;color:var(--muted)">Waiting for more data…</div>`;
+      const ys = pts.map(p => p.price);
+      const min = Math.min(...ys), max = Math.max(...ys), rng = (max - min) || 1;
+      const step = w / (pts.length - 1);
+      const coords = pts.map((p, i) => {
+        const x = i * step;
+        const y = h - 20 - ((p.price - min) / rng) * (h - 40);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+      const up = ys[ys.length-1] >= ys[0];
+      const color = up ? "#26d07c" : "#ff5c68";
+      const area = `0,${h-20} ${coords.join(" ")} ${w},${h-20}`;
+      return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <polygon points="${area}" fill="${color}" opacity="0.08"/>
+        <polyline fill="none" stroke="${color}" stroke-width="2" points="${coords.join(" ")}" stroke-linejoin="round"/>
+        <text x="4" y="14" fill="#8b98a9" font-size="11">₹${max.toFixed(2)}</text>
+        <text x="4" y="${h-4}" fill="#8b98a9" font-size="11">₹${min.toFixed(2)}</text>
+      </svg>`;
+    }
+
+    async function load() {
+      const wrap = document.getElementById("tableWrap");
+      const dot = document.getElementById("liveDot");
+      dot.style.background = "var(--accent)";
+      try {
+        const res = await fetch("/api/" + current);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        window._lastRows = data;
+        wrap.innerHTML = renderTable(current, data);
+        wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
+          tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
+        document.getElementById("updated").textContent =
+          "Updated " + new Date().toLocaleTimeString("en-IN");
+        dot.style.background = "var(--green)";
+      } catch (e) {
+        wrap.innerHTML = `<div class="loading err">Failed to load: ${e.message}</div>`;
+        dot.style.background = "var(--red)";
+      }
+    }
+
+    function setupRefresh() {
+      const sel = document.getElementById("refreshSel");
+      const apply = () => {
+        if (timer) clearInterval(timer);
+        const s = parseInt(sel.value, 10);
+        if (s > 0) timer = setInterval(load, s * 1000);
+      };
+      sel.onchange = apply;
+      apply();
+    }
+
+    document.getElementById("refreshBtn").onclick = load;
+    document.getElementById("mClose").onclick =
+      () => document.getElementById("overlay").classList.remove("show");
+    document.getElementById("overlay").onclick = (e) => {
+      if (e.target.id === "overlay") e.currentTarget.classList.remove("show");
+    };
+    document.getElementById("soundBtn").onclick = (e) => {
+      soundOn = !soundOn;
+      e.target.classList.toggle("on", soundOn);
+      if (soundOn) {
+        beep();
+        if ("Notification" in window && Notification.permission === "default")
+          Notification.requestPermission();
+      }
+    };
+
+    buildTabs();
+    setupRefresh();
+    load();
+  </script>
+</body>
+</html>
