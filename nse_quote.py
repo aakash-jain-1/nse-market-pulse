@@ -170,6 +170,93 @@ def _oc_warm(symbol):
         pass
 
 
+def _deriv_referer(symbol):
+    return {"Referer": nse.BASE + "/get-quote/derivatives?symbol=" + symbol}
+
+
+def _deriv_warm(symbol):
+    if ("deriv", symbol) in _warmed:
+        return
+    try:
+        nse.get_session().get(
+            nse.BASE + "/get-quote/derivatives?symbol=" + symbol, timeout=15
+        )
+        _warmed.add(("deriv", symbol))
+    except Exception:
+        pass
+
+
+def get_symbol_futures(symbol):
+    """
+    Futures contracts (all expiries) for ANY F&O underlying, via
+    getSymbolDerivativesData. Returns basis / premium-discount vs spot,
+    annualized carry, OI and change-in-OI + a long/short buildup signal.
+    Works for the full universe (not just the ~20 most-active names).
+    """
+    symbol = symbol.upper().strip()
+    key = ("fut", symbol)
+    hit = _cache.get(key)
+    if hit and (time.time() - hit[0]) < _QUOTE_TTL:
+        return hit[1]
+
+    _deriv_warm(symbol)
+    r = nse.get_session().get(
+        nse.BASE + NEXT + f"getSymbolDerivativesData&symbol={symbol}",
+        headers=_deriv_referer(symbol), timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    underlying = None
+    futs = []
+    for row in data.get("data", []) or []:
+        itype = row.get("instrumentType")
+        if itype not in ("FUTSTK", "FUTIDX"):
+            continue
+        spot = _num(row.get("underlyingValue"))
+        underlying = underlying or spot
+        fut = _num(row.get("lastPrice"))
+        pchg = _num(row.get("pchange"))
+        chg_oi = _num(row.get("changeinOpenInterest"))
+        basis = basis_pct = annualized = None
+        dte = nse._days_to_expiry(row.get("expiryDate"))
+        if fut is not None and spot not in (None, 0):
+            basis = fut - spot
+            basis_pct = basis / spot * 100
+            if dte and dte > 0:
+                annualized = basis_pct * (365.0 / dte)
+        label, kind = nse._oi_signal((chg_oi or 0) >= 0, pchg)
+        futs.append({
+            "symbol": symbol,
+            "expiry": row.get("expiryDate"),
+            "daysToExpiry": dte,
+            "ltp": fut,
+            "spot": spot,
+            "pChange": pchg,
+            "basis": round(basis, 2) if basis is not None else None,
+            "basisPct": round(basis_pct, 2) if basis_pct is not None else None,
+            "annualizedPct": round(annualized, 1) if annualized is not None else None,
+            "oi": _num(row.get("openInterest")),
+            "changeInOI": chg_oi,
+            "volume": _num(row.get("totalTradedVolume")),
+            "signal": label,
+            "signalKind": kind,
+        })
+    futs.sort(key=lambda x: (nse._days_to_expiry(x["expiry"]) or 9999))
+    out = {"symbol": symbol, "underlying": underlying, "futures": futs}
+    _cache[key] = (time.time(), out)
+    return out
+
+
+def get_near_future(symbol):
+    """Just the near-month futures row for a symbol (or None)."""
+    try:
+        futs = get_symbol_futures(symbol).get("futures") or []
+        return futs[0] if futs else None
+    except Exception:
+        return None
+
+
 def get_option_expiries(symbol):
     """List of expiry dates (e.g. '28-Jul-2026') available for a symbol."""
     symbol = symbol.upper().strip()

@@ -151,6 +151,8 @@
     .scan-tags { display: flex; flex-wrap: wrap; gap: 4px; }
     .scan-tag { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); white-space: nowrap; }
     .scan-tag.star { background: rgba(240,185,11,0.16); border-color: transparent; color: #f0b90b; font-weight: 700; }
+    .fut-toggle { font-size: 12px; padding: 5px 12px; border-radius: 6px; }
+    .fut-toggle.active { background: var(--accent); border-color: var(--accent); color: #fff; }
     .depth-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
     .depth-box h4 { margin: 0 0 12px; font-size: 13px; }
     .depth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
@@ -174,6 +176,9 @@
     .oc-pe-bar { position: relative; }
     .oc-pe-bar > span { position: absolute; right: 0; top: 0; bottom: 0; background: var(--green); opacity: 0.12; }
     .oc-wrap { max-height: 60vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    .oc-index-picks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+    .oc-index-picks button { font-size: 11px; padding: 4px 12px; border-radius: 999px; background: rgba(240,185,11,0.12); border: 1px solid transparent; color: #f0b90b; }
+    .oc-index-picks button:hover { background: rgba(240,185,11,0.22); }
     .oc-levels { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 4px 0 16px; }
     .oc-level-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
     .oc-level-box h4 { margin: 0 0 8px; font-size: 12px; }
@@ -266,6 +271,12 @@
         <label class="chk"><input type="checkbox" id="fFno"> F&amp;O only</label>
         <button id="fApply">Apply</button>
         <button id="fReset" title="Clear filters">Clear</button>
+      </div>
+      <div id="futMode" class="scan-filters" style="display:none">
+        <span style="color:var(--muted);font-size:12px">Coverage:</span>
+        <button id="futFast" class="fut-toggle active">Most active (fast)</button>
+        <button id="futAll" class="fut-toggle">All F&amp;O (~215)</button>
+        <span id="futHint" style="color:var(--muted);font-size:11px"></span>
       </div>
       <div id="tableWrap"><div class="loading">Loading…</div></div>
     </div>
@@ -369,13 +380,15 @@
         <button class="close" id="ocClose">✕</button>
       </div>
       <div class="modal-body">
-        <div class="trade-row" style="margin-bottom:14px;flex-wrap:wrap">
-          <input type="text" id="ocInput" placeholder="Symbol e.g. RELIANCE" style="text-transform:uppercase;width:160px" />
+        <div class="trade-row" style="margin-bottom:10px;flex-wrap:wrap">
+          <input type="text" id="ocInput" list="ocSymbols" placeholder="Search any F&O symbol…" style="text-transform:uppercase;width:220px" />
+          <datalist id="ocSymbols"></datalist>
           <button id="ocLoad">Load</button>
           <label style="margin-left:auto">Expiry
             <select id="ocExpiry"></select>
           </label>
         </div>
+        <div id="ocIndexPicks" class="oc-index-picks"></div>
         <div class="metrics" id="ocSummary"></div>
         <div id="ocLevels"></div>
         <div id="ocCharts"></div>
@@ -405,7 +418,7 @@
       { key: "oispurts",   label: "F&O Open Interest", title: "Open Interest Spurts (F&O)",
         desc: "Where derivatives traders are building positions. Price up + OI up = long buildup." },
       { key: "futures",    label: "⚡ Futures", title: "Stock Futures — Basis & OI",
-        desc: "Active stock futures with premium/discount to spot and OI buildup. Premium = bullish carry, discount = bearish." },
+        desc: "Futures with premium/discount to spot and OI buildup. Toggle 'All F&O' to cover the whole ~215-name universe. Premium = bullish carry, discount = bearish." },
       { key: "gainers",    label: "Top Gainers", title: "Top Gainers",
         desc: "Biggest price risers right now — momentum / strength." },
       { key: "losers",     label: "Top Losers", title: "Top Losers",
@@ -417,6 +430,7 @@
     ];
 
     let current = "scanner";
+    let futAll = false;  // Futures tab: false = most-active feed, true = full F&O sweep
     let timer = null;
     let soundOn = false;
     // Live price history accumulated across refreshes: { SYMBOL: [{t, price}] }
@@ -513,6 +527,8 @@
       document.getElementById("panelDesc").textContent = meta.desc;
       document.getElementById("scanFilters").style.display =
         current === "scanner" ? "flex" : "none";
+      document.getElementById("futMode").style.display =
+        current === "futures" ? "flex" : "none";
     }
 
     function scannerQuery() {
@@ -826,9 +842,15 @@
       const dot = document.getElementById("liveDot");
       dot.style.background = "var(--accent)";
       try {
-        const url = "/api/" + current + (current === "scanner" ? scannerQuery() : "");
+        let url = "/api/" + current + (current === "scanner" ? scannerQuery() : "");
+        if (current === "futures" && futAll) {
+          url = "/api/futures/all";
+          if (!window._futAllLoaded)
+            wrap.innerHTML = `<div class="loading">Sweeping all ~215 F&amp;O futures… first load takes ~10-15s, then it's cached.</div>`;
+        }
         const res = await fetch(url);
         const data = await res.json();
+        if (current === "futures" && futAll) window._futAllLoaded = true;
         if (data.error) throw new Error(data.error);
         window._lastRows = data;
         wrap.innerHTML = renderTable(current, data);
@@ -1181,6 +1203,18 @@
         </tr></thead><tbody>${body}</tbody></table></div>`;
     }
 
+    function setFutMode(all) {
+      futAll = all;
+      document.getElementById("futAll").classList.toggle("active", all);
+      document.getElementById("futFast").classList.toggle("active", !all);
+      document.getElementById("futHint").textContent = all
+        ? "Full universe, sorted by volume (cached 90s)."
+        : "NSE's 20 most-active futures (updates every refresh).";
+      window._futAllLoaded = false;
+      load();
+    }
+    document.getElementById("futFast").onclick = () => setFutMode(false);
+    document.getElementById("futAll").onclick = () => setFutMode(true);
     document.getElementById("refreshBtn").onclick = load;
     document.getElementById("fApply").onclick = load;
     document.getElementById("fReset").onclick = () => {
@@ -1250,9 +1284,25 @@
       }
     };
 
+    // Load the full F&O universe once, to power the option-chain symbol picker.
+    async function loadFnoUniverse() {
+      try {
+        const d = await (await fetch("/api/fno/universe")).json();
+        const all = [...(d.indices || []), ...(d.stocks || [])];
+        document.getElementById("ocSymbols").innerHTML =
+          all.map(s => `<option value="${s}">`).join("");
+        document.getElementById("ocIndexPicks").innerHTML =
+          `<span style="color:var(--muted);font-size:11px;align-self:center;margin-right:4px">Indices:</span>` +
+          (d.indices || []).map(s => `<button data-oc="${s}">${s}</button>`).join("");
+        document.querySelectorAll("#ocIndexPicks button").forEach(b =>
+          b.onclick = () => loadOptionChain(b.getAttribute("data-oc")));
+      } catch (e) { /* picker is best-effort */ }
+    }
+
     buildTabs();
     setupRefresh();
     load();
+    loadFnoUniverse();
   </script>
 </body>
 </html>

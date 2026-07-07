@@ -63,6 +63,16 @@ def api_futures():
     return jsonify(nse.get_futures())
 
 
+@app.route("/api/futures/all")
+def api_futures_all():
+    return jsonify(nse.get_all_futures())
+
+
+@app.route("/api/futures/<symbol>")
+def api_futures_symbol(symbol):
+    return jsonify(nse_quote.get_symbol_futures(symbol))
+
+
 @app.route("/api/scanner")
 def api_scanner():
     def fnum(name):
@@ -101,6 +111,11 @@ def api_optionchain(symbol):
 @app.route("/api/optionchain/<symbol>/summary")
 def api_optionchain_summary(symbol):
     return jsonify(nse_quote.get_option_summary(symbol))
+
+
+@app.route("/api/fno/universe")
+def api_fno_universe():
+    return jsonify(nse.get_fno_universe())
 
 
 @app.route("/api/demand")

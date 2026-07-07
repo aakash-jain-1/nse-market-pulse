@@ -325,6 +325,26 @@ def get_futures(limit=25):
     return out
 
 
+_fno_cache = {"ts": 0.0, "data": None}
+_FNO_TTL = 3600  # the F&O list changes rarely; cache for an hour
+
+
+def get_fno_universe():
+    """
+    Full F&O universe: all derivative-enabled index and stock underlyings.
+    Cached for an hour since NSE only revises the list periodically.
+    """
+    if _fno_cache["data"] and (time.time() - _fno_cache["ts"]) < _FNO_TTL:
+        return _fno_cache["data"]
+    data = _fetch("/api/underlying-information")
+    d = data.get("data", {})
+    indices = [x.get("symbol") for x in d.get("IndexList", []) if x.get("symbol")]
+    stocks = [x.get("symbol") for x in d.get("UnderlyingList", []) if x.get("symbol")]
+    out = {"indices": indices, "stocks": sorted(stocks), "count": len(indices) + len(stocks)}
+    _fno_cache.update(ts=time.time(), data=out)
+    return out
+
+
 def get_scanner(
     direction="any",
     min_abs_change=None,
@@ -487,6 +507,46 @@ def get_scanner(
     for e in rows:
         e["score"] = round(e["score"], 1)
         e["listCount"] = len(e.pop("lists"))
+    return rows
+
+
+_all_fut_cache = {"ts": 0.0, "rows": None}
+_ALL_FUT_TTL = 90  # seconds; a full sweep is expensive so cache aggressively
+
+
+def get_all_futures(force=False):
+    """
+    Near-month futures for the ENTIRE F&O universe (~215 names), not just the
+    ~20 most-active. Fetched concurrently per symbol via getSymbolDerivativesData
+    with a small worker pool (to stay polite to NSE) and cached for 90s.
+
+    Returns rows sorted by traded volume (most active first).
+    """
+    if (not force and _all_fut_cache["rows"] is not None
+            and (time.time() - _all_fut_cache["ts"]) < _ALL_FUT_TTL):
+        return _all_fut_cache["rows"]
+
+    from concurrent.futures import ThreadPoolExecutor
+    import nse_quote
+
+    uni = get_fno_universe()
+    symbols = (uni.get("indices") or []) + (uni.get("stocks") or [])
+
+    def one(sym):
+        try:
+            return nse_quote.get_near_future(sym)
+        except Exception:
+            return None
+
+    rows = []
+    # Modest concurrency: enough to finish in a few seconds, gentle on NSE.
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for r in pool.map(one, symbols):
+            if r and r.get("ltp") is not None:
+                rows.append(r)
+
+    rows.sort(key=lambda x: (x.get("volume") or 0), reverse=True)
+    _all_fut_cache.update(ts=time.time(), rows=rows)
     return rows
 
 

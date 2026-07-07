@@ -104,7 +104,9 @@ session, **as long as we send a stock-specific Referer**
 | Real intraday chart | `getSymbolChartData&symbol=<X>EQN&days=1D` | `grapthData` = `[[ts_ms, price, phase, ...], ...]` (400+ pts/day) |
 | Company meta | `getMetaData&symbol=X` | |
 | Option expiries/strikes | `getOptionChainDropdown&symbol=X` | `expiryDates`, `strikePrice` lists |
-| Option chain | `getOptionChainData&symbol=X&params=expiryDate=<28-Jul-2026>` | note the `params=expiryDate=...` nested form; `data[].CE/PE` + `underlyingValue` |
+| Per-symbol futures + options | `getSymbolDerivativesData&symbol=X` | `data[]` of contracts; futures = `instrumentType` FUTSTK/FUTIDX (has lastPrice, OI, chgOI, volume, underlyingValue). Covers the WHOLE F&O universe, unlike the 20-row `stock_fut` feed. Referer: `/get-quote/derivatives?symbol=X`. |
+| Option chain | `getOptionChainData&symbol=X&params=expiryDate=<28-Jul-2026>` | note the `params=expiryDate=...` nested form; `data[].CE/PE` + `underlyingValue`. Works for **indices too** (NIFTY/BANKNIFTY/…) with the same call. |
+| Full F&O universe | `/api/underlying-information` | 5 indices + ~210 stock underlyings (also `/api/master-quote`). Cached 1h in `get_fno_universe()`. |
 
 This finally gives real charts, per-stock quotes for ANY symbol, and market
 depth. `nse_client.get_price()` falls back to `nse_quote.get_ltp()` so paper
@@ -135,6 +137,11 @@ trading works for any tradable symbol (not just hot-list names).
   multiple), most-active-by-value (money flow rank), and top-gainers (% gain).
   See `get_demand_score()`.
 - **Volume Gainers**, **Top Gainers/Losers**, **Most Active (Volume/Value)**.
+- **Futures tab** — near-month basis / premium-discount, annualized carry, and
+  OI buildup. Two modes via a toggle: **Most active** (fast, NSE's 20-row
+  `stock_fut` feed) and **All F&O** (`get_all_futures()` — a concurrent
+  per-symbol sweep of the whole ~215-name universe via `getSymbolDerivativesData`,
+  6 workers, cached 90s; `/api/futures/all`). Per-symbol via `/api/futures/<sym>`.
 - **F&O Open Interest tab** — OI spurts enriched with the underlying's real
   `pChange` (cross-referenced from `stock_fut` + gainers/losers + most-active,
   cached ~20s). Classified server-side into: Long buildup / Short buildup /
@@ -149,6 +156,10 @@ trading works for any tradable symbol (not just hot-list names).
     (call/put IV vs strike) — client-side SVG, spot marker on both.
   - **All-expiry summary** — PCR / max-pain / OI per expiry with a bull/bear
     bias flag, via `get_option_summary()` (`/api/optionchain/<sym>/summary`).
+  - **Full F&O universe picker** — the symbol box autocompletes across all ~215
+    F&O names (`get_fno_universe()` / `/api/fno/universe`), with one-click
+    **index chips** (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY/NIFTYNXT50). Index
+    option chains work through the same equity endpoint.
 - **Live sparklines** per row (client-side, accumulate across refreshes).
 - **Stock detail modal** on row click — now shows the **real NSE intraday
   chart** (`getSymbolChartData`, with prev-close line), **5-level market depth**
@@ -216,6 +227,10 @@ trading works for any tradable symbol (not just hot-list names).
 - Unified Scanner tab (`get_scanner()`): ranked in-demand board with filters
   (direction / min %chg / min vol×avg / min value Cr / OI buildup / F&O only)
   and explanatory tags. Now the default landing tab.
+- Full F&O universe (`get_fno_universe()`): searchable option-chain picker for
+  all ~215 F&O names + one-click index option chains.
+- All-F&O futures coverage: per-symbol futures via getSymbolDerivativesData and
+  a cached concurrent full-universe sweep behind the Futures-tab "All F&O" toggle.
 
 ## Futures roadmap (user wants to trade futures)
 
