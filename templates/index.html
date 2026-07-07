@@ -167,6 +167,19 @@
     .oc-pe-bar { position: relative; }
     .oc-pe-bar > span { position: absolute; right: 0; top: 0; bottom: 0; background: var(--green); opacity: 0.12; }
     .oc-wrap { max-height: 60vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    .oc-levels { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 4px 0 16px; }
+    .oc-level-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+    .oc-level-box h4 { margin: 0 0 8px; font-size: 12px; }
+    .oc-level-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
+    .oc-pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-weight: 700; }
+    .oc-pill.sup { background: rgba(38,208,124,0.16); color: var(--green); }
+    .oc-pill.res { background: rgba(255,92,104,0.16); color: var(--red); }
+    .oc-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+    .oc-chart-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+    .oc-chart-box h4 { margin: 0 0 8px; font-size: 12px; }
+    .oc-legend { font-size: 10px; color: var(--muted); display: flex; gap: 12px; margin-top: 4px; }
+    .oc-legend b { font-weight: 700; }
+    @media (max-width: 720px) { .oc-levels, .oc-charts { grid-template-columns: 1fr; } }
     .trade-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
     .trade-box h4 { margin: 0 0 12px; font-size: 13px; }
     .trade-row { display: flex; gap: 10px; align-items: center; }
@@ -343,6 +356,9 @@
           </label>
         </div>
         <div class="metrics" id="ocSummary"></div>
+        <div id="ocLevels"></div>
+        <div id="ocCharts"></div>
+        <div id="ocMulti"></div>
         <div id="ocTable"><div class="chart-note">Enter an F&amp;O symbol and click Load.</div></div>
         <div class="chart-note" style="margin-top:12px">
           Green rows are in-the-money. ATM strike is highlighted. Bars show OI size.
@@ -381,8 +397,45 @@
     let timer = null;
     let soundOn = false;
     // Live price history accumulated across refreshes: { SYMBOL: [{t, price}] }
-    const history = {};
-    const alerted = new Set();
+    // Persisted to localStorage so a browser refresh doesn't wipe sparklines.
+    // Intraday-only: anything from a previous day is discarded on load.
+    const HIST_KEY = "nseHistory.v1";
+    const todayStr = () => new Date().toISOString().slice(0, 10);
+    function loadHistory() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(HIST_KEY) || "null");
+        if (raw && raw.date === todayStr() && raw.data) return raw.data;
+      } catch (e) {}
+      return {};
+    }
+    function loadAlerted() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(HIST_KEY) || "null");
+        if (raw && raw.date === todayStr() && Array.isArray(raw.alerted)) return new Set(raw.alerted);
+      } catch (e) {}
+      return new Set();
+    }
+    const history = loadHistory();
+    const alerted = loadAlerted();
+    let _saveTimer = null;
+    function saveHistory() {
+      if (_saveTimer) return;  // debounce bursts of recordPrice calls
+      _saveTimer = setTimeout(() => {
+        _saveTimer = null;
+        try {
+          localStorage.setItem(HIST_KEY, JSON.stringify({
+            date: todayStr(), data: history, alerted: [...alerted],
+          }));
+        } catch (e) { /* quota exceeded — ignore, memory copy still works */ }
+      }, 1500);
+    }
+    window.addEventListener("beforeunload", () => {
+      try {
+        localStorage.setItem(HIST_KEY, JSON.stringify({
+          date: todayStr(), data: history, alerted: [...alerted],
+        }));
+      } catch (e) {}
+    });
 
     const fmtNum = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");
     const fmtPrice = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
@@ -397,7 +450,7 @@
       if (!sym || price == null) return;
       const h = history[sym] || (history[sym] = []);
       const last = h[h.length - 1];
-      if (!last || last.price !== price) h.push({ t: Date.now(), price });
+      if (!last || last.price !== price) { h.push({ t: Date.now(), price }); saveHistory(); }
       if (h.length > 120) h.shift();
     }
 
@@ -561,6 +614,7 @@
         const mult = r.week1volChange || r.volMult;
         if (mult && mult >= thr && (r.pChange ?? 0) > 0 && !alerted.has(r.symbol)) {
           alerted.add(r.symbol);
+          saveHistory();
           fireAlert(r.symbol, `${mult.toFixed(0)}x avg volume · +${(r.pChange).toFixed(2)}% @ ₹${fmtPrice(r.ltp)}`);
         }
       });
@@ -894,6 +948,9 @@
       document.getElementById("ocSym").textContent = sym;
       document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Loading ${sym} option chain…</div>`;
       document.getElementById("ocSummary").innerHTML = "";
+      document.getElementById("ocLevels").innerHTML = "";
+      document.getElementById("ocCharts").innerHTML = "";
+      document.getElementById("ocMulti").innerHTML = "";
       try {
         const url = "/api/optionchain/" + encodeURIComponent(sym) + (expiry ? "?expiry=" + encodeURIComponent(expiry) : "");
         const d = await (await fetch(url)).json();
@@ -903,10 +960,119 @@
         }
         renderOCExpiries(d);
         renderOCSummary(d);
+        renderOCLevels(d);
+        renderOCCharts(d);
         renderOCTable(d);
+        loadOCMulti(sym);
       } catch (e) {
         document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Failed: ${e.message}</div>`;
       }
+    }
+    function renderOCLevels(d) {
+      const box = document.getElementById("ocLevels");
+      const spot = d.underlying;
+      const row = (x, cls) => `<div class="oc-level-row">
+        <span class="oc-pill ${cls}">${x.strike}</span>
+        <span style="color:var(--muted)">${fmtNum(x.oi)} OI ${spot?`· ${(((x.strike/spot)-1)*100).toFixed(1)}%`:''}</span></div>`;
+      const sup = (d.support || []).map(x => row(x, "sup")).join("") || `<div class="chart-note">—</div>`;
+      const res = (d.resistance || []).map(x => row(x, "res")).join("") || `<div class="chart-note">—</div>`;
+      box.innerHTML = `<div class="oc-levels">
+        <div class="oc-level-box"><h4>🟢 Support — highest PUT OI</h4>${sup}</div>
+        <div class="oc-level-box"><h4>🔴 Resistance — highest CALL OI</h4>${res}</div>
+      </div>`;
+    }
+    function renderOCCharts(d) {
+      document.getElementById("ocCharts").innerHTML = `<div class="oc-charts">
+        <div class="oc-chart-box"><h4>OI change by strike</h4>${oiChangeChart(d)}
+          <div class="oc-legend"><span><b style="color:var(--red)">■</b> Call chg OI</span><span><b style="color:var(--green)">■</b> Put chg OI</span><span>dashed = spot</span></div></div>
+        <div class="oc-chart-box"><h4>IV skew</h4>${ivSkewChart(d)}
+          <div class="oc-legend"><span><b style="color:var(--red)">—</b> Call IV</span><span><b style="color:var(--green)">—</b> Put IV</span><span>dashed = spot</span></div></div>
+      </div>`;
+    }
+    function _ocPlotRows(d) {
+      // Focus the charts around ATM (±12 strikes) so they're readable.
+      const rows = d.rows.filter(r => r.strike != null);
+      let center = 0;
+      if (d.atmStrike != null) {
+        const idx = rows.findIndex(r => r.strike === d.atmStrike);
+        center = idx < 0 ? Math.floor(rows.length/2) : idx;
+      }
+      const lo = Math.max(0, center - 12), hi = Math.min(rows.length, center + 13);
+      return rows.slice(lo, hi);
+    }
+    function _spotX(rows, spot, w) {
+      if (!spot || rows.length < 2) return null;
+      const ks = rows.map(r => r.strike);
+      if (spot <= ks[0]) return 0;
+      if (spot >= ks[ks.length-1]) return w;
+      for (let i = 0; i < ks.length-1; i++) {
+        if (spot >= ks[i] && spot <= ks[i+1]) {
+          const frac = (spot - ks[i]) / ((ks[i+1]-ks[i]) || 1);
+          const step = w / (ks.length - 1);
+          return (i + frac) * step;
+        }
+      }
+      return null;
+    }
+    function oiChangeChart(d, w = 440, h = 190) {
+      const rows = _ocPlotRows(d);
+      if (rows.length < 2) return `<div class="chart-note">Not enough data.</div>`;
+      const vals = rows.flatMap(r => [ (r.ce&&r.ce.chgOi)||0, (r.pe&&r.pe.chgOi)||0 ]);
+      const maxAbs = Math.max(1, ...vals.map(Math.abs));
+      const n = rows.length, slot = w / n, bw = slot * 0.36;
+      const mid = h/2;
+      const y = (v) => mid - (v / maxAbs) * (mid - 12);
+      let bars = "";
+      rows.forEach((r, i) => {
+        const cx = i * slot + slot/2;
+        const ce = (r.ce&&r.ce.chgOi)||0, pe = (r.pe&&r.pe.chgOi)||0;
+        const ceY = y(ce), peY = y(pe);
+        bars += `<rect x="${(cx-bw).toFixed(1)}" y="${Math.min(mid,ceY).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.abs(ceY-mid).toFixed(1)}" fill="#ff5c68" opacity="0.85"/>`;
+        bars += `<rect x="${cx.toFixed(1)}" y="${Math.min(mid,peY).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.abs(peY-mid).toFixed(1)}" fill="#26d07c" opacity="0.85"/>`;
+      });
+      const sx = _spotX(rows, d.underlying, w);
+      const spotLine = sx==null ? "" : `<line x1="${sx.toFixed(1)}" y1="0" x2="${sx.toFixed(1)}" y2="${h}" stroke="#f0b90b" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.8"/>`;
+      const labels = `<text x="2" y="10" fill="#8b98a9" font-size="9">${rows[0].strike}</text><text x="${w-2}" y="10" fill="#8b98a9" font-size="9" text-anchor="end">${rows[rows.length-1].strike}</text>`;
+      return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <line x1="0" y1="${mid}" x2="${w}" y2="${mid}" stroke="var(--border)" stroke-width="1"/>${bars}${spotLine}${labels}</svg>`;
+    }
+    function ivSkewChart(d, w = 440, h = 190) {
+      const rows = _ocPlotRows(d);
+      const ceIV = rows.map(r => (r.ce && r.ce.iv) || null);
+      const peIV = rows.map(r => (r.pe && r.pe.iv) || null);
+      const all = [...ceIV, ...peIV].filter(v => v != null && v > 0);
+      if (all.length < 3) return `<div class="chart-note">IV not available (needs market hours / liquid strikes).</div>`;
+      const min = Math.min(...all), max = Math.max(...all), rng = (max-min)||1;
+      const n = rows.length, step = w / (n - 1);
+      const y = (v) => h - 16 - ((v - min) / rng) * (h - 30);
+      const line = (arr, color) => {
+        const pts = arr.map((v,i) => v!=null&&v>0 ? `${(i*step).toFixed(1)},${y(v).toFixed(1)}` : null).filter(Boolean);
+        return pts.length < 2 ? "" : `<polyline fill="none" stroke="${color}" stroke-width="1.8" points="${pts.join(" ")}"/>`;
+      };
+      const sx = _spotX(rows, d.underlying, w);
+      const spotLine = sx==null ? "" : `<line x1="${sx.toFixed(1)}" y1="0" x2="${sx.toFixed(1)}" y2="${h}" stroke="#f0b90b" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.8"/>`;
+      return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <text x="2" y="12" fill="#8b98a9" font-size="9">${max.toFixed(0)}%</text>
+        <text x="2" y="${h-4}" fill="#8b98a9" font-size="9">${min.toFixed(0)}%</text>
+        ${spotLine}${line(ceIV,"#ff5c68")}${line(peIV,"#26d07c")}</svg>`;
+    }
+    async function loadOCMulti(sym) {
+      const el = document.getElementById("ocMulti");
+      el.innerHTML = `<div class="chart-note" style="margin-bottom:8px">Loading all-expiry summary…</div>`;
+      try {
+        const d = await (await fetch("/api/optionchain/" + encodeURIComponent(sym) + "/summary")).json();
+        const rows = (d.expiries || []).filter(e => e.pcr != null || e.maxPain != null);
+        if (!rows.length) { el.innerHTML = ""; return; }
+        el.innerHTML = `<h4 style="margin:6px 0 8px;color:var(--muted)">All expiries</h4>
+          <table><thead><tr><th style="text-align:left">Expiry</th><th>PCR</th><th>Max Pain</th><th>Call OI</th><th>Put OI</th><th>Bias</th></tr></thead>
+          <tbody>${rows.map(e => {
+            const bias = e.pcr == null ? "—" : (e.pcr >= 1.1 ? '<span class="pos">Bullish</span>' : (e.pcr <= 0.7 ? '<span class="neg">Bearish</span>' : '<span style="color:var(--muted)">Neutral</span>'));
+            return `<tr><td style="text-align:left">${e.expiry}</td>
+              <td class="${e.pcr>=1?'pos':'neg'}">${e.pcr ?? "—"}</td>
+              <td>${e.maxPain ?? "—"}</td>
+              <td>${fmtNum(e.ceTotOI)}</td><td>${fmtNum(e.peTotOI)}</td><td>${bias}</td></tr>`;
+          }).join("")}</tbody></table>`;
+      } catch (e) { el.innerHTML = ""; }
     }
     function renderOCExpiries(d) {
       const sel = document.getElementById("ocExpiry");

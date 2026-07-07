@@ -265,6 +265,16 @@ def get_option_chain(symbol, expiry=None):
             default=None,
         )
 
+    # Support = strikes with the biggest PUT OI (writers defend below spot).
+    # Resistance = strikes with the biggest CALL OI (writers cap above spot).
+    def _top(leg, n=3):
+        vals = [
+            {"strike": r["strike"], "oi": (r[leg] or {}).get("oi") or 0}
+            for r in rows if r["strike"] is not None and (r[leg] or {}).get("oi")
+        ]
+        vals.sort(key=lambda x: -x["oi"])
+        return vals[:n]
+
     out = {
         "symbol": symbol,
         "expiry": expiry,
@@ -277,6 +287,30 @@ def get_option_chain(symbol, expiry=None):
         "pcr": round(pe_tot / ce_tot, 2) if ce_tot else None,
         "maxPain": _max_pain(rows),
         "atmStrike": atm,
+        "support": _top("pe"),
+        "resistance": _top("ce"),
     }
     _cache[key] = (time.time(), out)
     return out
+
+
+def get_option_summary(symbol):
+    """PCR / max-pain / OI across ALL expiries for a symbol, for comparison."""
+    symbol = symbol.upper().strip()
+    expiries = get_option_expiries(symbol)
+    rows = []
+    underlying = None
+    for exp in expiries:
+        try:
+            oc = get_option_chain(symbol, exp)
+        except Exception:
+            continue
+        underlying = underlying or oc.get("underlying")
+        rows.append({
+            "expiry": exp,
+            "pcr": oc.get("pcr"),
+            "maxPain": oc.get("maxPain"),
+            "ceTotOI": oc.get("ceTotOI"),
+            "peTotOI": oc.get("peTotOI"),
+        })
+    return {"symbol": symbol, "underlying": underlying, "expiries": rows}

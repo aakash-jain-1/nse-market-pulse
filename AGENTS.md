@@ -136,7 +136,13 @@ trading works for any tradable symbol (not just hot-list names).
   fallback when the price direction is genuinely unknown (e.g. indices).
 - **Option Chain** (`⛓ Options` button, or from the detail modal) — full CE/PE
   grid for any F&O symbol + expiry, with **PCR**, **max pain**, **ATM** highlight,
-  ITM shading, and OI-size bars. Backed by `nse_quote.get_option_chain()`.
+  ITM shading, and OI-size bars. Backed by `nse_quote.get_option_chain()`. Also:
+  - **Support/Resistance** — top-3 PUT-OI strikes (support) and CALL-OI strikes
+    (resistance), with % distance from spot.
+  - **OI-change chart** (CE vs PE chg-OI bars around ATM) + **IV-skew chart**
+    (call/put IV vs strike) — client-side SVG, spot marker on both.
+  - **All-expiry summary** — PCR / max-pain / OI per expiry with a bull/bear
+    bias flag, via `get_option_summary()` (`/api/optionchain/<sym>/summary`).
 - **Live sparklines** per row (client-side, accumulate across refreshes).
 - **Stock detail modal** on row click — now shows the **real NSE intraday
   chart** (`getSymbolChartData`, with prev-close line), **5-level market depth**
@@ -181,10 +187,9 @@ trading works for any tradable symbol (not just hot-list names).
   **Angel One SmartAPI** or **Upstox v2** (both free) but has no account yet.
   Plan: keep the paper-trading interface, swap `get_price`/fills for the broker
   feed. Needs the user's API credentials.
-- Persist sparkline price history (survive page reload) via localStorage.
 - Phone/LAN access + optional deploy.
-- Options analytics: OI change heatmap, IV skew chart, multi-expiry PCR trend.
-- Paper-trade options (buy/sell CE/PE contracts) from the chain grid.
+- Paper-trade options (buy/sell CE/PE contracts) from the chain grid. (parked
+  by user request — "keep at last")
 - Use real per-stock quotes to remove the paper-trading hot-list limit fully.
 - Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
   bits (quotes, historical). See README/analysis for the API landscape.
@@ -198,6 +203,10 @@ trading works for any tradable symbol (not just hot-list names).
 - NextApi gateway integration (`nse_quote.py`): real intraday charts, per-stock
   quotes for any symbol, and 5-level market depth in the detail modal.
 - Option chain module: full CE/PE grid + PCR / max pain / ATM analytics.
+- Options analytics: support/resistance walls, OI-change + IV-skew charts,
+  all-expiry PCR/max-pain summary.
+- Sparkline history + alert state persisted to localStorage (intraday-only, so
+  a browser refresh no longer wipes the client-side sparklines).
 
 ## Futures roadmap (user wants to trade futures)
 

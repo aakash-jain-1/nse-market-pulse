@@ -79,6 +79,11 @@ def api_optionchain(symbol):
     return jsonify(nse_quote.get_option_chain(symbol, expiry))
 
 
+@app.route("/api/optionchain/<symbol>/summary")
+def api_optionchain_summary(symbol):
+    return jsonify(nse_quote.get_option_summary(symbol))
+
+
 @app.route("/api/demand")
 def api_demand():
     return jsonify(nse.get_demand_score())
