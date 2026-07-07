@@ -393,6 +393,11 @@
         <div id="ocLevels"></div>
         <div id="ocCharts"></div>
         <div id="ocMulti"></div>
+        <div id="ocViewToggle" class="oc-index-picks" style="display:none">
+          <span style="color:var(--muted);font-size:11px;align-self:center;margin-right:2px">Grid:</span>
+          <button id="ocViewOi" class="fut-toggle active">Open Interest</button>
+          <button id="ocViewGreeks" class="fut-toggle">Greeks</button>
+        </div>
         <div id="ocTable"><div class="chart-note">Enter an F&amp;O symbol and click Load.</div></div>
         <div class="chart-note" style="margin-top:12px">
           Green rows are in-the-money. ATM strike is highlighted. Bars show OI size.
@@ -431,6 +436,7 @@
 
     let current = "scanner";
     let futAll = false;  // Futures tab: false = most-active feed, true = full F&O sweep
+    let ocView = "oi";   // Option-chain grid: "oi" or "greeks"
     let timer = null;
     let soundOn = false;
     // Live price history accumulated across refreshes: { SYMBOL: [{t, price}] }
@@ -1037,10 +1043,12 @@
           document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">No option chain for ${sym}. Use an F&O symbol (e.g. RELIANCE, TCS, TATAMOTORS).</div>`;
           return;
         }
+        window._ocData = d;
         renderOCExpiries(d);
         renderOCSummary(d);
         renderOCLevels(d);
         renderOCCharts(d);
+        document.getElementById("ocViewToggle").style.display = "flex";
         renderOCTable(d);
         loadOCMulti(sym);
       } catch (e) {
@@ -1176,31 +1184,58 @@
       });
       const cell = (v) => v == null ? "—" : fmtNum(v);
       const px = (v) => v == null ? "—" : fmtPrice(v);
-      const body = d.rows.map(r => {
-        const ce = r.ce || {}, pe = r.pe || {};
-        const ceItm = r.strike < spot, peItm = r.strike > spot;
-        const isAtm = r.strike === d.atmStrike;
-        const ceW = ((ce.oi || 0) / maxOI * 100).toFixed(0);
-        const peW = ((pe.oi || 0) / maxOI * 100).toFixed(0);
-        const chgCls = (v) => v == null ? "" : (v >= 0 ? "pos" : "neg");
-        return `<tr class="${isAtm ? 'oc-atm' : ''}">
-          <td class="oc-ce-bar ${ceItm?'oc-itm':''}">${cell(ce.oi)}<span style="width:${ceW}%"></span></td>
-          <td class="${chgCls(ce.chgOi)} ${ceItm?'oc-itm':''}">${cell(ce.chgOi)}</td>
-          <td class="${ceItm?'oc-itm':''}">${ce.iv!=null?ce.iv.toFixed(1):"—"}</td>
-          <td class="${ceItm?'oc-itm':''}">${px(ce.ltp)}</td>
-          <td class="oc-strike">${r.strike}</td>
-          <td class="${peItm?'oc-itm':''}">${px(pe.ltp)}</td>
-          <td class="${peItm?'oc-itm':''}">${pe.iv!=null?pe.iv.toFixed(1):"—"}</td>
-          <td class="${chgCls(pe.chgOi)} ${peItm?'oc-itm':''}">${cell(pe.chgOi)}</td>
-          <td class="oc-pe-bar ${peItm?'oc-itm':''}">${cell(pe.oi)}<span style="width:${peW}%"></span></td>
-        </tr>`;
-      }).join("");
-      document.getElementById("ocTable").innerHTML = `<div class="oc-wrap"><table class="oc-table">
-        <thead><tr>
-          <th>CALLS OI</th><th>Chg OI</th><th>IV</th><th>LTP</th>
+      const iv = (v) => v != null ? v.toFixed(1) : "—";
+      const chgCls = (v) => v == null ? "" : (v >= 0 ? "pos" : "neg");
+      let body, head;
+      if (ocView === "greeks") {
+        const g = (v) => v == null ? "—" : v;
+        const dl = (v) => v == null ? "—" : v.toFixed(3);
+        body = d.rows.map(r => {
+          const ce = r.ce || {}, pe = r.pe || {};
+          const ceItm = r.strike < spot, peItm = r.strike > spot;
+          const isAtm = r.strike === d.atmStrike;
+          return `<tr class="${isAtm ? 'oc-atm' : ''}">
+            <td class="${ceItm?'oc-itm':''}">${dl(ce.delta)}</td>
+            <td class="neg ${ceItm?'oc-itm':''}">${g(ce.theta)}</td>
+            <td class="${ceItm?'oc-itm':''}">${g(ce.vega)}</td>
+            <td class="${ceItm?'oc-itm':''}">${iv(ce.iv)}</td>
+            <td class="${ceItm?'oc-itm':''}">${px(ce.ltp)}</td>
+            <td class="oc-strike">${r.strike}</td>
+            <td class="${peItm?'oc-itm':''}">${px(pe.ltp)}</td>
+            <td class="${peItm?'oc-itm':''}">${iv(pe.iv)}</td>
+            <td class="${peItm?'oc-itm':''}">${g(pe.vega)}</td>
+            <td class="neg ${peItm?'oc-itm':''}">${g(pe.theta)}</td>
+            <td class="${peItm?'oc-itm':''}">${dl(pe.delta)}</td>
+          </tr>`;
+        }).join("");
+        head = `<th>Δ Delta</th><th>Θ Theta</th><th>ν Vega</th><th>IV</th><th>LTP</th>
           <th class="oc-strike">STRIKE</th>
-          <th>LTP</th><th>IV</th><th>Chg OI</th><th>PUTS OI</th>
-        </tr></thead><tbody>${body}</tbody></table></div>`;
+          <th>LTP</th><th>IV</th><th>ν Vega</th><th>Θ Theta</th><th>Δ Delta</th>`;
+      } else {
+        body = d.rows.map(r => {
+          const ce = r.ce || {}, pe = r.pe || {};
+          const ceItm = r.strike < spot, peItm = r.strike > spot;
+          const isAtm = r.strike === d.atmStrike;
+          const ceW = ((ce.oi || 0) / maxOI * 100).toFixed(0);
+          const peW = ((pe.oi || 0) / maxOI * 100).toFixed(0);
+          return `<tr class="${isAtm ? 'oc-atm' : ''}">
+            <td class="oc-ce-bar ${ceItm?'oc-itm':''}">${cell(ce.oi)}<span style="width:${ceW}%"></span></td>
+            <td class="${chgCls(ce.chgOi)} ${ceItm?'oc-itm':''}">${cell(ce.chgOi)}</td>
+            <td class="${ceItm?'oc-itm':''}">${iv(ce.iv)}</td>
+            <td class="${ceItm?'oc-itm':''}">${px(ce.ltp)}</td>
+            <td class="oc-strike">${r.strike}</td>
+            <td class="${peItm?'oc-itm':''}">${px(pe.ltp)}</td>
+            <td class="${peItm?'oc-itm':''}">${iv(pe.iv)}</td>
+            <td class="${chgCls(pe.chgOi)} ${peItm?'oc-itm':''}">${cell(pe.chgOi)}</td>
+            <td class="oc-pe-bar ${peItm?'oc-itm':''}">${cell(pe.oi)}<span style="width:${peW}%"></span></td>
+          </tr>`;
+        }).join("");
+        head = `<th>CALLS OI</th><th>Chg OI</th><th>IV</th><th>LTP</th>
+          <th class="oc-strike">STRIKE</th>
+          <th>LTP</th><th>IV</th><th>Chg OI</th><th>PUTS OI</th>`;
+      }
+      document.getElementById("ocTable").innerHTML = `<div class="oc-wrap"><table class="oc-table">
+        <thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
     }
 
     function setFutMode(all) {
@@ -1215,6 +1250,14 @@
     }
     document.getElementById("futFast").onclick = () => setFutMode(false);
     document.getElementById("futAll").onclick = () => setFutMode(true);
+    function setOcView(v) {
+      ocView = v;
+      document.getElementById("ocViewGreeks").classList.toggle("active", v === "greeks");
+      document.getElementById("ocViewOi").classList.toggle("active", v === "oi");
+      if (window._ocData) renderOCTable(window._ocData);
+    }
+    document.getElementById("ocViewOi").onclick = () => setOcView("oi");
+    document.getElementById("ocViewGreeks").onclick = () => setOcView("greeks");
     document.getElementById("refreshBtn").onclick = load;
     document.getElementById("fApply").onclick = load;
     document.getElementById("fReset").onclick = () => {

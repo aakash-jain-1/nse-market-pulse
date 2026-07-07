@@ -160,6 +160,9 @@ trading works for any tradable symbol (not just hot-list names).
     F&O names (`get_fno_universe()` / `/api/fno/universe`), with one-click
     **index chips** (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY/NIFTYNXT50). Index
     option chains work through the same equity endpoint.
+  - **Greeks** — Black-Scholes delta/gamma/theta/vega computed per leg from
+    spot/strike/DTE/IV (`_bs_greeks`, r≈6.5%). Grid has an **OI ⇄ Greeks**
+    toggle. (No IV rank yet — needs historical IV we don't store.)
 - **Live sparklines** per row (client-side, accumulate across refreshes).
 - **Stock detail modal** on row click — now shows the **real NSE intraday
   chart** (`getSymbolChartData`, with prev-close line), **5-level market depth**
@@ -231,6 +234,7 @@ trading works for any tradable symbol (not just hot-list names).
   all ~215 F&O names + one-click index option chains.
 - All-F&O futures coverage: per-symbol futures via getSymbolDerivativesData and
   a cached concurrent full-universe sweep behind the Futures-tab "All F&O" toggle.
+- Option Greeks (Black-Scholes) with an OI/Greeks grid toggle in the chain.
 
 ## Futures roadmap (user wants to trade futures)
 

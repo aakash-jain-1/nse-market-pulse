@@ -16,9 +16,56 @@ We reuse the session from nse_client and cache results briefly so we don't
 hammer NSE (which will bot-block aggressive callers).
 """
 
+import math
 import time
 
 import nse_client as nse
+
+RISK_FREE = 0.065  # ~India 10y / T-bill proxy for Black-Scholes
+
+
+def _norm_cdf(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _norm_pdf(x):
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _bs_greeks(spot, strike, dte_days, iv_pct, is_call):
+    """
+    Black-Scholes greeks for a European option. Returns delta, gamma, theta
+    (per day), vega (per 1% vol). Returns Nones if inputs are unusable.
+    """
+    try:
+        if not (spot and strike and dte_days and iv_pct) or iv_pct <= 0 or dte_days <= 0:
+            return {"delta": None, "gamma": None, "theta": None, "vega": None}
+        S, K = float(spot), float(strike)
+        T = dte_days / 365.0
+        sigma = iv_pct / 100.0
+        r = RISK_FREE
+        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        pdf = _norm_pdf(d1)
+        gamma = pdf / (S * sigma * math.sqrt(T))
+        vega = S * pdf * math.sqrt(T) / 100.0
+        disc = math.exp(-r * T)
+        if is_call:
+            delta = _norm_cdf(d1)
+            theta = (-(S * pdf * sigma) / (2 * math.sqrt(T))
+                     - r * K * disc * _norm_cdf(d2)) / 365.0
+        else:
+            delta = _norm_cdf(d1) - 1.0
+            theta = (-(S * pdf * sigma) / (2 * math.sqrt(T))
+                     + r * K * disc * _norm_cdf(-d2)) / 365.0
+        return {
+            "delta": round(delta, 3),
+            "gamma": round(gamma, 5),
+            "theta": round(theta, 2),
+            "vega": round(vega, 3),
+        }
+    except (ValueError, ZeroDivisionError):
+        return {"delta": None, "gamma": None, "theta": None, "vega": None}
 
 NEXT = "/api/NextApi/apiClient/GetQuoteApi?functionName="
 
@@ -329,6 +376,7 @@ def get_option_chain(symbol, expiry=None):
     data = r.json()
 
     underlying = _num(data.get("underlyingValue"))
+    dte = nse._days_to_expiry(expiry)
     rows = []
     ce_tot = pe_tot = 0.0
     for item in data.get("data", []) or []:
@@ -337,6 +385,10 @@ def get_option_chain(symbol, expiry=None):
         strike = _num((ce or pe).get("strikePrice"))
         ce_leg = _leg(ce) if ce else None
         pe_leg = _leg(pe) if pe else None
+        if ce_leg:
+            ce_leg.update(_bs_greeks(underlying, strike, dte, ce_leg["iv"], True))
+        if pe_leg:
+            pe_leg.update(_bs_greeks(underlying, strike, dte, pe_leg["iv"], False))
         if ce_leg and ce_leg["oi"]:
             ce_tot += ce_leg["oi"]
         if pe_leg and pe_leg["oi"]:
