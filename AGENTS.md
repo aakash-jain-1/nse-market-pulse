@@ -172,10 +172,13 @@ trading works for any tradable symbol (not just hot-list names).
   configurable volume multiple (20x/50x/100x) with a rising price.
 - **CSV export** — client-side download of the current view (⬇ CSV button).
 - **Paper trading** (`paper.py`) — virtual portfolio starting at Rs 10,00,000.
-  Buy/Sell from the stock detail modal; 💼 Portfolio button shows holdings,
-  live mark-to-market P&L, and order history. Fills are simulated at the latest
-  price from `nse_client.get_price()`, which merges all live lists into a
-  symbol->LTP map. **Limitation:** only symbols currently in the hot lists
+ Buy/Sell from the stock detail modal; 💼 Portfolio button shows holdings,
+ live mark-to-market P&L, and order history. Fills are simulated at the latest
+ price from `nse_client.get_price()`, which merges all live lists into a
+ symbol->LTP map. **Options too:** `place_option_order()` fills CE/PE at the
+ live premium (from the option chain) via a trade box in the ⛓ Options modal;
+ option positions are tracked per-contract and re-priced live in the portfolio.
+ Quantity is unit-based (lot sizes not enforced). **Limitation:** only symbols currently in the hot lists
   (~100-150) have a price, so only those are tradable. State persists to
   `paper_state.json` (gitignored). This is broker-agnostic by design: swapping
   in a real broker feed later only changes the price/fill source.
@@ -208,9 +211,8 @@ trading works for any tradable symbol (not just hot-list names).
   Plan: keep the paper-trading interface, swap `get_price`/fills for the broker
   feed. Needs the user's API credentials.
 - Phone/LAN access + optional deploy.
-- Paper-trade options (buy/sell CE/PE contracts) from the chain grid. (parked
-  by user request — "keep at last")
-- Use real per-stock quotes to remove the paper-trading hot-list limit fully.
+- IV rank/percentile once the snapshot logger captures ATM IV over time.
+- Enforce option lot sizes in paper trading (currently unit-based).
 - Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
   bits (quotes, historical). See README/analysis for the API landscape.
 
@@ -235,6 +237,7 @@ trading works for any tradable symbol (not just hot-list names).
 - All-F&O futures coverage: per-symbol futures via getSymbolDerivativesData and
   a cached concurrent full-universe sweep behind the Futures-tab "All F&O" toggle.
 - Option Greeks (Black-Scholes) with an OI/Greeks grid toggle in the chain.
+- Paper-trade options: buy/sell CE/PE at live premium from the ⛓ Options modal.
 
 ## Futures roadmap (user wants to trade futures)
 

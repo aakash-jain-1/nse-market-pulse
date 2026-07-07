@@ -110,7 +110,10 @@ def place_order(symbol, side, qty):
                 ) / total_qty
                 pos["qty"] = total_qty
             else:
-                state["positions"][symbol] = {"qty": qty, "avgPrice": price}
+                state["positions"][symbol] = {
+                    "qty": qty, "avgPrice": price, "kind": "equity",
+                    "label": symbol,
+                }
         else:  # SELL
             held = pos["qty"] if pos else 0
             if qty > held:
@@ -137,17 +140,100 @@ def place_order(symbol, side, qty):
         return True, "Order executed", order
 
 
+def place_option_order(underlying, expiry, strike, opt_type, side, qty):
+    """
+    Simulated option order. Fills at the current premium (LTP) from the option
+    chain. Positions are keyed by the full contract so CE/PE and each strike are
+    tracked separately. Quantity is in units (lot sizes are not enforced — this
+    is a simplified paper simulation).
+    """
+    import nse_quote
+
+    underlying = (underlying or "").upper().strip()
+    opt_type = (opt_type or "").upper().strip()
+    side = (side or "").upper().strip()
+    if opt_type not in ("CE", "PE"):
+        return False, "Option type must be CE or PE", None
+    if side not in ("BUY", "SELL"):
+        return False, "Side must be BUY or SELL", None
+    try:
+        qty = int(qty)
+        strike = float(strike)
+    except (TypeError, ValueError):
+        return False, "Invalid strike or quantity", None
+    if qty <= 0:
+        return False, "Quantity must be positive", None
+    if not expiry:
+        return False, "Expiry is required", None
+
+    price = nse_quote.get_option_price(underlying, expiry, strike, opt_type)
+    if price is None or price <= 0:
+        return False, f"No live premium for {underlying} {strike:g}{opt_type} {expiry}", None
+
+    key = f"{underlying}|{expiry}|{strike:g}|{opt_type}"
+    label = f"{underlying} {strike:g}{opt_type} {expiry}"
+
+    with _lock:
+        state = _load()
+        pos = state["positions"].get(key)
+        cost = price * qty
+
+        if side == "BUY":
+            if cost > state["cash"]:
+                return (False,
+                        f"Insufficient virtual cash: need Rs {cost:,.0f}, "
+                        f"have Rs {state['cash']:,.0f}", None)
+            state["cash"] -= cost
+            if pos:
+                total_qty = pos["qty"] + qty
+                pos["avgPrice"] = (pos["avgPrice"] * pos["qty"] + cost) / total_qty
+                pos["qty"] = total_qty
+            else:
+                state["positions"][key] = {
+                    "qty": qty, "avgPrice": price, "kind": "option",
+                    "label": label, "underlying": underlying, "expiry": expiry,
+                    "strike": strike, "optType": opt_type,
+                }
+        else:  # SELL
+            held = pos["qty"] if pos else 0
+            if qty > held:
+                return False, f"Cannot sell {qty} {label}: you hold {held}", None
+            state["cash"] += cost
+            pos["qty"] -= qty
+            if pos["qty"] == 0:
+                del state["positions"][key]
+
+        order = {
+            "time": _now(), "symbol": label, "side": side, "qty": qty,
+            "price": round(price, 2), "value": round(cost, 2),
+        }
+        state["orders"].append(order)
+        _save(state)
+        return True, "Order executed", order
+
+
+def _reprice(key, pos):
+    """Current LTP for a position, re-fetching option premiums as needed."""
+    if pos.get("kind") == "option":
+        import nse_quote
+        p = nse_quote.get_option_price(
+            pos.get("underlying"), pos.get("expiry"),
+            pos.get("strike"), pos.get("optType"),
+        )
+        return p if p is not None else pos["avgPrice"]
+    return nse.get_price_map().get(key, pos["avgPrice"])
+
+
 def portfolio():
     """Return the portfolio with live mark-to-market P&L."""
     with _lock:
         state = _load()
 
-    prices = nse.get_price_map()
     positions = []
     holdings_value = 0.0
     invested = 0.0
-    for sym, pos in state["positions"].items():
-        ltp = prices.get(sym, pos["avgPrice"])
+    for key, pos in state["positions"].items():
+        ltp = _reprice(key, pos)
         mkt = ltp * pos["qty"]
         cost = pos["avgPrice"] * pos["qty"]
         pnl = mkt - cost
@@ -155,7 +241,8 @@ def portfolio():
         invested += cost
         positions.append(
             {
-                "symbol": sym,
+                "symbol": pos.get("label", key),
+                "kind": pos.get("kind", "equity"),
                 "qty": pos["qty"],
                 "avgPrice": round(pos["avgPrice"], 2),
                 "ltp": round(ltp, 2),

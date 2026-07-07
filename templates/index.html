@@ -399,6 +399,18 @@
           <button id="ocViewGreeks" class="fut-toggle">Greeks</button>
         </div>
         <div id="ocTable"><div class="chart-note">Enter an F&amp;O symbol and click Load.</div></div>
+        <div id="ocTradeBox" class="trade-box" style="display:none">
+          <h4>Paper trade this option <span style="color:var(--muted);font-weight:400">(virtual money · units, lots not enforced)</span></h4>
+          <div class="trade-row">
+            <select id="ocTType"><option value="CE">CE (Call)</option><option value="PE">PE (Put)</option></select>
+            <select id="ocTStrike" style="width:110px"></select>
+            <span id="ocTPremium" style="color:var(--muted);font-size:12px;align-self:center"></span>
+            <input type="number" id="ocTQty" min="1" value="50" style="width:80px" />
+            <button class="buy" id="ocTBuy">Buy</button>
+            <button class="sell" id="ocTSell">Sell</button>
+          </div>
+          <div class="trade-msg" id="ocTradeMsg"></div>
+        </div>
         <div class="chart-note" style="margin-top:12px">
           Green rows are in-the-money. ATM strike is highlighted. Bars show OI size.
           <b>PCR</b> &gt; 1 = more puts (potential support/bullish); &lt; 1 = more calls.
@@ -1050,6 +1062,7 @@
         renderOCCharts(d);
         document.getElementById("ocViewToggle").style.display = "flex";
         renderOCTable(d);
+        renderOCTradeBox(d);
         loadOCMulti(sym);
       } catch (e) {
         document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Failed: ${e.message}</div>`;
@@ -1238,6 +1251,53 @@
         <thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
     }
 
+    function renderOCTradeBox(d) {
+      const sel = document.getElementById("ocTStrike");
+      const strikes = d.rows.map(r => r.strike).filter(s => s != null);
+      sel.innerHTML = strikes.map(s =>
+        `<option value="${s}" ${s===d.atmStrike?'selected':''}>${s}${s===d.atmStrike?' (ATM)':''}</option>`).join("");
+      document.getElementById("ocTradeBox").style.display = "block";
+      document.getElementById("ocTradeMsg").textContent = "";
+      updateOcPremium();
+    }
+    function updateOcPremium() {
+      const d = window._ocData;
+      if (!d) return;
+      const strike = parseFloat(document.getElementById("ocTStrike").value);
+      const type = document.getElementById("ocTType").value;
+      const row = d.rows.find(r => r.strike === strike);
+      const leg = row ? (type === "CE" ? row.ce : row.pe) : null;
+      const prem = leg && leg.ltp != null ? leg.ltp : null;
+      document.getElementById("ocTPremium").textContent =
+        prem != null ? `@ ₹${fmtPrice(prem)}` : "(no premium)";
+    }
+    async function placeOptionOrder(side) {
+      const d = window._ocData;
+      if (!d) return;
+      const msg = document.getElementById("ocTradeMsg");
+      const body = {
+        underlying: d.symbol,
+        expiry: d.expiry,
+        strike: parseFloat(document.getElementById("ocTStrike").value),
+        optType: document.getElementById("ocTType").value,
+        side,
+        qty: parseInt(document.getElementById("ocTQty").value, 10),
+      };
+      msg.textContent = "Placing…";
+      try {
+        const r = await fetch("/api/paper/option_order", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body),
+        });
+        const res = await r.json();
+        msg.innerHTML = res.ok
+          ? `<span class="pos">✓ ${side} ${body.qty} ${d.symbol} ${body.strike}${body.optType} @ ₹${fmtPrice(res.order.price)} (₹${fmtNum(res.order.value)})</span>`
+          : `<span class="neg">✗ ${res.message}</span>`;
+      } catch (e) {
+        msg.innerHTML = `<span class="neg">✗ ${e.message}</span>`;
+      }
+    }
+
     function setFutMode(all) {
       futAll = all;
       document.getElementById("futAll").classList.toggle("active", all);
@@ -1258,6 +1318,10 @@
     }
     document.getElementById("ocViewOi").onclick = () => setOcView("oi");
     document.getElementById("ocViewGreeks").onclick = () => setOcView("greeks");
+    document.getElementById("ocTStrike").onchange = updateOcPremium;
+    document.getElementById("ocTType").onchange = updateOcPremium;
+    document.getElementById("ocTBuy").onclick = () => placeOptionOrder("BUY");
+    document.getElementById("ocTSell").onclick = () => placeOptionOrder("SELL");
     document.getElementById("refreshBtn").onclick = load;
     document.getElementById("fApply").onclick = load;
     document.getElementById("fReset").onclick = () => {

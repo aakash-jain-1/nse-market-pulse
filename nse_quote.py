@@ -433,6 +433,21 @@ def get_option_chain(symbol, expiry=None):
     return out
 
 
+def get_option_price(underlying, expiry, strike, opt_type):
+    """Current premium (LTP) for a specific option contract, or None."""
+    try:
+        strike = float(strike)
+        opt_type = (opt_type or "").upper()
+        oc = get_option_chain(underlying, expiry)
+        for r in oc.get("rows", []):
+            if r.get("strike") == strike:
+                leg = r.get("ce") if opt_type == "CE" else r.get("pe")
+                return leg.get("ltp") if leg else None
+    except Exception:
+        pass
+    return None
+
+
 def get_option_summary(symbol):
     """PCR / max-pain / OI across ALL expiries for a symbol, for comparison."""
     symbol = symbol.upper().strip()
