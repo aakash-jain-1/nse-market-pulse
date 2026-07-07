@@ -22,19 +22,31 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 LOG_FILE = os.path.join(DATA_DIR, "snapshots.csv")
+IV_LOG_FILE = os.path.join(DATA_DIR, "iv_log.csv")
 
 FIELDS = [
     "ts", "view", "rank", "symbol", "ltp", "pChange",
     "score", "signalCount", "volMult", "week1volChange", "volume", "value",
 ]
 
-INTERVAL = 60  # seconds between automatic snapshots
+IV_FIELDS = [
+    "ts", "symbol", "expiry", "atmStrike", "atmIV", "ceIV", "peIV",
+    "pcr", "underlying",
+]
+
+INTERVAL = 60      # seconds between automatic snapshots
+IV_INTERVAL = 300  # seconds between ATM-IV captures (heavier, so slower)
+
+# Always-tracked indices + the most-active F&O stocks (liquid, consistent IV).
+IV_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
 
 _lock = threading.Lock()
+_iv_lock = threading.Lock()
 _thread = None
 _running = False
 _last_capture = None
 _last_error = None
+_last_iv_capture = None
 
 
 def _now_ist():
@@ -101,12 +113,71 @@ def capture_snapshot():
     return len(rows)
 
 
+def _iv_watchlist():
+    """Indices (always) + most-active F&O stock underlyings for IV tracking."""
+    syms = list(IV_INDICES)
+    try:
+        for r in nse.get_futures(limit=20):
+            s = r.get("symbol")
+            if s and s not in syms:
+                syms.append(s)
+    except Exception:
+        pass
+    return syms[:25]
+
+
+def capture_iv():
+    """Log the ATM implied volatility (CE/PE avg) for the IV watchlist."""
+    global _last_iv_capture, _last_error
+    import nse_quote
+
+    ts = _now_ist().isoformat(timespec="seconds")
+    rows = []
+    for sym in _iv_watchlist():
+        try:
+            oc = nse_quote.get_option_chain(sym)
+            atm = oc.get("atmStrike")
+            row = next((r for r in oc.get("rows", []) if r.get("strike") == atm), None)
+            if not row:
+                continue
+            ce_iv = (row.get("ce") or {}).get("iv")
+            pe_iv = (row.get("pe") or {}).get("iv")
+            ivs = [v for v in (ce_iv, pe_iv) if v]
+            if not ivs:
+                continue
+            rows.append({
+                "ts": ts, "symbol": sym, "expiry": oc.get("expiry"),
+                "atmStrike": atm, "atmIV": round(sum(ivs) / len(ivs), 2),
+                "ceIV": ce_iv, "peIV": pe_iv, "pcr": oc.get("pcr"),
+                "underlying": oc.get("underlying"),
+            })
+        except Exception:
+            continue
+
+    if not rows:
+        return 0
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with _iv_lock:
+        new_file = not os.path.exists(IV_LOG_FILE)
+        with open(IV_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=IV_FIELDS)
+            if new_file:
+                w.writeheader()
+            w.writerows(rows)
+    _last_iv_capture = ts
+    return len(rows)
+
+
 def _loop():
-    global _last_error
+    global _last_error, _last_iv_capture
+    last_iv = 0.0
     while _running:
         try:
             if is_market_hours():
                 capture_snapshot()
+                if (time.time() - last_iv) >= IV_INTERVAL:
+                    capture_iv()
+                    last_iv = time.time()
         except Exception as e:
             _last_error = str(e)
         # Sleep in small steps so stop() is responsive.
@@ -140,6 +211,8 @@ def _read_rows():
 def status():
     rows = _read_rows()
     times = sorted({r["ts"] for r in rows})
+    iv_rows = _read_iv_rows()
+    iv_times = sorted({r["ts"] for r in iv_rows})
     return {
         "running": _running,
         "marketHours": is_market_hours(),
@@ -151,6 +224,9 @@ def status():
         "lastCapture": _last_capture,
         "lastError": _last_error,
         "logFile": LOG_FILE,
+        "ivSnapshots": len(iv_times),
+        "ivSymbols": len({r["symbol"] for r in iv_rows}),
+        "lastIvCapture": _last_iv_capture,
     }
 
 
@@ -219,3 +295,39 @@ def backtest(view="demand"):
 
     return {"view": view, "symbols": results, "summary": summary,
             "message": None}
+
+
+def _read_iv_rows():
+    if not os.path.exists(IV_LOG_FILE):
+        return []
+    with open(IV_LOG_FILE, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def iv_rank(symbol):
+    """
+    IV rank/percentile for a symbol from logged ATM IV history.
+      ivRank      = where current IV sits between its min & max (0-100%)
+      ivPercentile= share of past observations at or below current IV
+    Needs a couple of samples; the more history logged, the more meaningful.
+    """
+    symbol = (symbol or "").upper().strip()
+    series = [
+        (r["ts"], _to_float(r.get("atmIV")))
+        for r in _read_iv_rows() if r.get("symbol") == symbol
+    ]
+    series = [(t, v) for t, v in series if v is not None]
+    if len(series) < 2:
+        return {"symbol": symbol, "enough": False, "samples": len(series)}
+    series.sort(key=lambda x: x[0])
+    ivs = [v for _, v in series]
+    cur = ivs[-1]
+    lo, hi = min(ivs), max(ivs)
+    rank = 50.0 if hi == lo else (cur - lo) / (hi - lo) * 100
+    pctile = sum(1 for v in ivs if v <= cur) / len(ivs) * 100
+    return {
+        "symbol": symbol, "enough": True, "samples": len(ivs),
+        "currentIV": cur, "minIV": round(lo, 2), "maxIV": round(hi, 2),
+        "ivRank": round(rank, 1), "ivPercentile": round(pctile, 1),
+        "since": series[0][0], "lastTs": series[-1][0],
+    }

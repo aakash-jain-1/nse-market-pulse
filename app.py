@@ -172,6 +172,17 @@ def api_log_backtest():
     return jsonify(snaplog.backtest(view))
 
 
+@app.route("/api/log/iv", methods=["POST"])
+def api_log_iv():
+    n = snaplog.capture_iv()
+    return jsonify({"ok": n > 0, "rowsWritten": n, "status": snaplog.status()})
+
+
+@app.route("/api/iv/rank/<symbol>")
+def api_iv_rank(symbol):
+    return jsonify(snaplog.iv_rank(symbol))
+
+
 @app.route("/api/log/download")
 def api_log_download():
     st = snaplog.status()

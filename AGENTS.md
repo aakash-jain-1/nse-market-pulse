@@ -161,8 +161,11 @@ trading works for any tradable symbol (not just hot-list names).
     **index chips** (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY/NIFTYNXT50). Index
     option chains work through the same equity endpoint.
   - **Greeks** — Black-Scholes delta/gamma/theta/vega computed per leg from
-    spot/strike/DTE/IV (`_bs_greeks`, r≈6.5%). Grid has an **OI ⇄ Greeks**
-    toggle. (No IV rank yet — needs historical IV we don't store.)
+    spot/strike/DTE/IV (`_bs_greeks`, r≈6.5%). Grid has an **OI ⇄ Greeks** toggle.
+  - **IV Rank** — shown in the summary strip when history exists. The snapshot
+    logger captures ATM IV for indices + most-active F&O every 5 min into
+    `data/iv_log.csv`; `snapshot_logger.iv_rank()` (`/api/iv/rank/<sym>`) turns
+    that into an IV rank/percentile. Meaningful once history accumulates.
 - **Live sparklines** per row (client-side, accumulate across refreshes).
 - **Stock detail modal** on row click — now shows the **real NSE intraday
   chart** (`getSymbolChartData`, with prev-close line), **5-level market depth**
@@ -211,7 +214,6 @@ trading works for any tradable symbol (not just hot-list names).
   Plan: keep the paper-trading interface, swap `get_price`/fills for the broker
   feed. Needs the user's API credentials.
 - Phone/LAN access + optional deploy.
-- IV rank/percentile once the snapshot logger captures ATM IV over time.
 - Enforce option lot sizes in paper trading (currently unit-based).
 - Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
   bits (quotes, historical). See README/analysis for the API landscape.
@@ -238,6 +240,8 @@ trading works for any tradable symbol (not just hot-list names).
   a cached concurrent full-universe sweep behind the Futures-tab "All F&O" toggle.
 - Option Greeks (Black-Scholes) with an OI/Greeks grid toggle in the chain.
 - Paper-trade options: buy/sell CE/PE at live premium from the ⛓ Options modal.
+- IV logging (ATM IV → data/iv_log.csv, every 5 min) + IV rank/percentile in the
+  option chain summary.
 
 ## Futures roadmap (user wants to trade futures)
 
