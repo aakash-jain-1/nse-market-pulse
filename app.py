@@ -63,6 +63,25 @@ def api_futures():
     return jsonify(nse.get_futures())
 
 
+@app.route("/api/scanner")
+def api_scanner():
+    def fnum(name):
+        v = request.args.get(name)
+        try:
+            return float(v) if v not in (None, "") else None
+        except ValueError:
+            return None
+
+    return jsonify(nse.get_scanner(
+        direction=request.args.get("direction", "any"),
+        min_abs_change=fnum("minChange"),
+        min_vol_mult=fnum("minVolMult"),
+        min_value_cr=fnum("minValueCr"),
+        oi=request.args.get("oi", "any"),
+        fno_only=request.args.get("fno") == "1",
+    ))
+
+
 @app.route("/api/quote/<symbol>")
 def api_quote(symbol):
     return jsonify(nse_quote.get_quote(symbol))

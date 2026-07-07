@@ -325,6 +325,171 @@ def get_futures(limit=25):
     return out
 
 
+def get_scanner(
+    direction="any",
+    min_abs_change=None,
+    min_vol_mult=None,
+    min_value_cr=None,
+    oi="any",
+    fno_only=False,
+    limit=60,
+):
+    """
+    Unified "in-demand right now" scanner. Aggregates every cheap hot list into
+    one per-symbol record with a composite score and human-readable tags, then
+    applies filters. This is the one-stop board for spotting intraday activity.
+
+    Filters (all optional):
+      direction     : 'up' | 'down' | 'any'   (by % price change)
+      min_abs_change: minimum |% change|
+      min_vol_mult  : minimum volume-vs-average multiple (unusual volume)
+      min_value_cr  : minimum traded value in Rs crore (money flow)
+      oi            : 'any' | 'long' | 'short' (OI buildup direction)
+      fno_only      : only F&O underlyings (present in futures/OI lists)
+    """
+    agg = {}
+
+    def rec(sym):
+        return agg.setdefault(sym, {
+            "symbol": sym, "ltp": None, "pChange": None, "volume": None,
+            "value": None, "volMult": None, "oiSignal": None, "oiKind": None,
+            "changeInOI": None, "basisPct": None, "tags": [], "lists": set(),
+            "score": 0.0, "fno": False,
+        })
+
+    def setk(e, k, v):
+        if v is not None and e.get(k) is None:
+            e[k] = v
+
+    # Unusual volume (the strongest short-term "something's happening" signal).
+    try:
+        for r in get_volume_gainers(limit=40):
+            if not r["symbol"]:
+                continue
+            e = rec(r["symbol"]); e["lists"].add("vol")
+            setk(e, "ltp", r.get("ltp")); setk(e, "pChange", r.get("pChange"))
+            mult = r.get("week1volChange") or 0
+            e["volMult"] = mult
+            e["score"] += min(mult / 10.0, 15.0)
+            if "🔥 Unusual volume" not in e["tags"]:
+                e["tags"].append("🔥 Unusual volume")
+    except Exception:
+        pass
+
+    # Money flow (heavy traded value).
+    try:
+        for i, r in enumerate(get_most_active("value", limit=25)):
+            if not r["symbol"]:
+                continue
+            e = rec(r["symbol"]); e["lists"].add("value")
+            setk(e, "ltp", r.get("ltp")); setk(e, "pChange", r.get("pChange"))
+            e["value"] = r.get("value")
+            e["score"] += (25 - i) * 0.6
+            if "💰 Money flow" not in e["tags"]:
+                e["tags"].append("💰 Money flow")
+    except Exception:
+        pass
+
+    # High absolute volume.
+    try:
+        for i, r in enumerate(get_most_active("volume", limit=25)):
+            if not r["symbol"]:
+                continue
+            e = rec(r["symbol"]); e["lists"].add("volume")
+            setk(e, "ltp", r.get("ltp")); setk(e, "pChange", r.get("pChange"))
+            setk(e, "volume", r.get("volume"))
+            e["score"] += (25 - i) * 0.3
+    except Exception:
+        pass
+
+    # Price momentum (both directions).
+    for kind, tag in (("gainers", "📈 Momentum up"), ("losers", "📉 Momentum down")):
+        try:
+            for r in get_variations(kind, limit=25):
+                if not r["symbol"]:
+                    continue
+                e = rec(r["symbol"]); e["lists"].add(kind)
+                setk(e, "ltp", r.get("ltp")); setk(e, "pChange", r.get("pChange"))
+                setk(e, "volume", r.get("volume"))
+                e["score"] += abs(r.get("pChange") or 0) / 2.0
+                if tag not in e["tags"]:
+                    e["tags"].append(tag)
+        except Exception:
+            pass
+
+    # OI buildup (derivatives conviction).
+    try:
+        for r in get_oi_spurts(limit=40):
+            if not r["symbol"]:
+                continue
+            e = rec(r["symbol"]); e["lists"].add("oi"); e["fno"] = True
+            setk(e, "ltp", r.get("ltp")); setk(e, "pChange", r.get("pChange"))
+            e["oiSignal"] = r.get("signal"); e["oiKind"] = r.get("signalKind")
+            e["changeInOI"] = r.get("changeInOI")
+            if r.get("signalKind") == "buildup":
+                e["score"] += 6
+                if "🟢 " + (r.get("signal") or "") not in e["tags"]:
+                    e["tags"].append("🟢 " + r.get("signal"))
+            elif r.get("signalKind") == "short":
+                e["score"] += 3
+                if "🔴 " + (r.get("signal") or "") not in e["tags"]:
+                    e["tags"].append("🔴 " + r.get("signal"))
+    except Exception:
+        pass
+
+    # Futures basis (adds F&O flag + premium/discount context).
+    try:
+        for r in get_futures(limit=40):
+            if not r["symbol"]:
+                continue
+            e = rec(r["symbol"]); e["fno"] = True
+            setk(e, "ltp", r.get("spot")); setk(e, "pChange", r.get("pChange"))
+            e["basisPct"] = r.get("basisPct")
+    except Exception:
+        pass
+
+    # Multi-list presence bonus: breadth of interest across independent signals.
+    for e in agg.values():
+        n = len(e["lists"])
+        if n >= 3:
+            e["score"] += (n - 2) * 4
+            if "⭐ Multi-signal" not in e["tags"]:
+                e["tags"].insert(0, "⭐ Multi-signal")
+
+    # ---- Filters ----
+    rows = list(agg.values())
+
+    def keep(e):
+        pc = e.get("pChange")
+        if direction == "up" and not (pc is not None and pc >= 0):
+            return False
+        if direction == "down" and not (pc is not None and pc < 0):
+            return False
+        if min_abs_change is not None and (pc is None or abs(pc) < min_abs_change):
+            return False
+        if min_vol_mult is not None and (e.get("volMult") is None or e["volMult"] < min_vol_mult):
+            return False
+        if min_value_cr is not None:
+            v = e.get("value")
+            if v is None or v < min_value_cr * 1e7:
+                return False
+        if oi == "long" and e.get("oiKind") != "buildup":
+            return False
+        if oi == "short" and e.get("oiKind") != "short":
+            return False
+        if fno_only and not e.get("fno"):
+            return False
+        return True
+
+    rows = [e for e in rows if keep(e)]
+    rows.sort(key=lambda x: x["score"], reverse=True)
+    rows = rows[:limit]
+    for e in rows:
+        e["score"] = round(e["score"], 1)
+        e["listCount"] = len(e.pop("lists"))
+    return rows
+
+
 def get_demand_score(limit=25):
     """
     A simple composite "demand" ranking. Stocks that show up across multiple

@@ -125,6 +125,12 @@ trading works for any tradable symbol (not just hot-list names).
 
 ## Feature summary (what's built)
 
+- **Scanner** (default tab, `🔎 Scanner`) — the one-stop "in-demand right now"
+  board. `get_scanner()` aggregates every cheap hot list (volume gainers,
+  most-active value/volume, gainers/losers, OI spurts, futures) into a per-symbol
+  composite score with human-readable **tags** (⭐ Multi-signal, 🔥 Unusual
+  volume, 💰 Money flow, 📈/📉 Momentum, 🟢/🔴 OI buildup). Client-side filter
+  bar → `/api/scanner?direction=&minChange=&minVolMult=&minValueCr=&oi=&fno=1`.
 - **Demand Score** — composite ranking combining volume-gainers (volume
   multiple), most-active-by-value (money flow rank), and top-gainers (% gain).
   See `get_demand_score()`.
@@ -207,6 +213,9 @@ trading works for any tradable symbol (not just hot-list names).
   all-expiry PCR/max-pain summary.
 - Sparkline history + alert state persisted to localStorage (intraday-only, so
   a browser refresh no longer wipes the client-side sparklines).
+- Unified Scanner tab (`get_scanner()`): ranked in-demand board with filters
+  (direction / min %chg / min vol×avg / min value Cr / OI buildup / F&O only)
+  and explanatory tags. Now the default landing tab.
 
 ## Futures roadmap (user wants to trade futures)
 

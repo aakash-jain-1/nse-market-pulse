@@ -144,6 +144,13 @@
     .chart-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
     .chart-box h4 { margin: 0 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
     .chart-note { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+    .scan-filters { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; padding: 12px 4px 16px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+    .scan-filters label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .scan-filters label.chk { gap: 5px; }
+    .scan-filters input[type=number], .scan-filters select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font-size: 12px; }
+    .scan-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+    .scan-tag { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); white-space: nowrap; }
+    .scan-tag.star { background: rgba(240,185,11,0.16); border-color: transparent; color: #f0b90b; font-weight: 700; }
     .depth-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
     .depth-box h4 { margin: 0 0 12px; font-size: 13px; }
     .depth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
@@ -245,6 +252,20 @@
           <p id="panelDesc"></p>
         </div>
         <span id="panelMeta" class="badge" style="display:none"></span>
+      </div>
+      <div id="scanFilters" class="scan-filters" style="display:none">
+        <label>Direction
+          <select id="fDir"><option value="any">Any</option><option value="up">Up only</option><option value="down">Down only</option></select>
+        </label>
+        <label>Min |%chg|<input type="number" id="fChg" min="0" step="0.5" style="width:64px" placeholder="0"></label>
+        <label>Min vol ×avg<input type="number" id="fVol" min="0" step="1" style="width:64px" placeholder="0"></label>
+        <label>Min value (Cr)<input type="number" id="fVal" min="0" step="10" style="width:70px" placeholder="0"></label>
+        <label>OI
+          <select id="fOi"><option value="any">Any</option><option value="long">Long buildup</option><option value="short">Short buildup</option></select>
+        </label>
+        <label class="chk"><input type="checkbox" id="fFno"> F&amp;O only</label>
+        <button id="fApply">Apply</button>
+        <button id="fReset" title="Clear filters">Clear</button>
       </div>
       <div id="tableWrap"><div class="loading">Loading…</div></div>
     </div>
@@ -375,6 +396,8 @@
 
   <script>
     const TABS = [
+      { key: "scanner",    label: "🔎 Scanner", title: "In-Demand Scanner",
+        desc: "One ranked board combining volume spikes, money flow, momentum & OI buildup. Use the filters to hunt for exactly the setup you want." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
         desc: "Composite ranking — stocks appearing across gainers, money-flow & volume spikes rank highest." },
       { key: "volgainers", label: "Volume Gainers", title: "Volume Gainers (unusual activity)",
@@ -393,7 +416,7 @@
         desc: "Where the big money is flowing by rupees traded." },
     ];
 
-    let current = "demand";
+    let current = "scanner";
     let timer = null;
     let soundOn = false;
     // Live price history accumulated across refreshes: { SYMBOL: [{t, price}] }
@@ -488,6 +511,25 @@
       const meta = TABS.find(t => t.key === current);
       document.getElementById("panelTitle").textContent = meta.title;
       document.getElementById("panelDesc").textContent = meta.desc;
+      document.getElementById("scanFilters").style.display =
+        current === "scanner" ? "flex" : "none";
+    }
+
+    function scannerQuery() {
+      const p = new URLSearchParams();
+      const dir = document.getElementById("fDir").value;
+      const chg = document.getElementById("fChg").value;
+      const vol = document.getElementById("fVol").value;
+      const val = document.getElementById("fVal").value;
+      const oi = document.getElementById("fOi").value;
+      if (dir && dir !== "any") p.set("direction", dir);
+      if (chg) p.set("minChange", chg);
+      if (vol) p.set("minVolMult", vol);
+      if (val) p.set("minValueCr", val);
+      if (oi && oi !== "any") p.set("oi", oi);
+      if (document.getElementById("fFno").checked) p.set("fno", "1");
+      const q = p.toString();
+      return q ? "?" + q : "";
     }
 
     function rowStart(i, sym) {
@@ -503,7 +545,21 @@
         return `<div class="empty">No data (market may be closed).</div>`;
 
       let head, body;
-      if (key === "demand") {
+      if (key === "scanner") {
+        head = `<tr><th>Stock</th><th>LTP</th><th>% Chg</th><th>Vol ×Avg</th><th>Value</th><th>Why it's here</th><th>Score</th><th>Trend</th></tr>`;
+        const max = rows[0] ? (rows[0].score || 1) : 1;
+        body = rows.map((r,i) => {
+          const tags = (r.tags || []).map(t =>
+            `<span class="scan-tag${t.indexOf('⭐')>=0?' star':''}">${t}</span>`).join("");
+          return `<tr data-sym="${r.symbol}">
+            ${rowStart(i, r.symbol)}<td>${fmtPrice(r.ltp)}</td>${pctCell(r.pChange)}
+            <td>${r.volMult ? r.volMult.toFixed(1)+"x" : "—"}</td>
+            <td>${r.value ? fmtCr(r.value) : "—"}</td>
+            <td><div class="scan-tags">${tags || "—"}</div></td>
+            <td>${r.score}<span class="score-bar"><i style="width:${Math.max(4,(r.score/max)*100)}%"></i></span></td>
+            <td>${sparkline(r.symbol)}</td></tr>`;
+        }).join("");
+      } else if (key === "demand") {
         head = `<tr><th>Stock</th><th>LTP</th><th>% Chg</th><th>Vol ×Avg</th><th>Signals</th><th>Score</th><th>Trend</th></tr>`;
         const max = rows[0].score || 1;
         body = rows.map((r,i) => `<tr data-sym="${r.symbol}">
@@ -770,7 +826,8 @@
       const dot = document.getElementById("liveDot");
       dot.style.background = "var(--accent)";
       try {
-        const res = await fetch("/api/" + current);
+        const url = "/api/" + current + (current === "scanner" ? scannerQuery() : "");
+        const res = await fetch(url);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         window._lastRows = data;
@@ -1125,6 +1182,16 @@
     }
 
     document.getElementById("refreshBtn").onclick = load;
+    document.getElementById("fApply").onclick = load;
+    document.getElementById("fReset").onclick = () => {
+      document.getElementById("fDir").value = "any";
+      document.getElementById("fChg").value = "";
+      document.getElementById("fVol").value = "";
+      document.getElementById("fVal").value = "";
+      document.getElementById("fOi").value = "any";
+      document.getElementById("fFno").checked = false;
+      load();
+    };
     document.getElementById("csvBtn").onclick = exportCSV;
     document.getElementById("portfolioBtn").onclick = openPortfolio;
     document.getElementById("ocBtn").onclick = () => openOptionChain();
