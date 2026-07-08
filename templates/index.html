@@ -144,6 +144,12 @@
     .chart-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
     .chart-box h4 { margin: 0 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
     .chart-note { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+    #mChart { position: relative; cursor: crosshair; }
+    .chart-cross { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,0.35); pointer-events: none; transform: translateX(-0.5px); }
+    .chart-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); pointer-events: none; transform: translate(-50%,-50%); box-shadow: 0 0 6px rgba(0,0,0,0.5); }
+    .chart-tip { position: absolute; pointer-events: none; background: rgba(12,16,24,0.95); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 11px; line-height: 1.35; white-space: nowrap; z-index: 5; }
+    .chart-tip b { font-size: 13px; display: block; }
+    .chart-tip span { color: var(--muted); }
     .scan-filters { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; padding: 12px 4px 16px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
     .scan-filters label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
     .scan-filters label.chk { gap: 5px; }
@@ -153,6 +159,72 @@
     .scan-tag.star { background: rgba(240,185,11,0.16); border-color: transparent; color: #f0b90b; font-weight: 700; }
     .fut-toggle { font-size: 12px; padding: 5px 12px; border-radius: 6px; }
     .fut-toggle.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .fut-mom { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+    @media (max-width: 720px) { .fut-mom { grid-template-columns: 1fr; } }
+    .mom-col { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+    .mom-col.bull { border-top: 2px solid var(--green); }
+    .mom-col.bear { border-top: 2px solid var(--red); }
+    .mom-col h4 { margin: 0 0 10px; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+    .mom-col.bull h4 { color: var(--green); }
+    .mom-col.bear h4 { color: var(--red); }
+    .mom-row { display: grid; grid-template-columns: 20px 1fr auto auto; align-items: center; gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--border); cursor: pointer; }
+    .mom-row:last-child { border-bottom: none; }
+    .mom-row:hover { background: rgba(255,255,255,0.03); }
+    .mom-rank { color: var(--muted); font-size: 11px; text-align: right; }
+    .mom-sym { font-weight: 600; font-size: 13px; }
+    .mom-chg { font-size: 12px; font-weight: 600; text-align: right; }
+    .mom-str { position: relative; width: 54px; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+    .mom-str > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
+    .mom-col.bull .mom-str > i { background: var(--green); }
+    .mom-col.bear .mom-str > i { background: var(--red); }
+    .mom-empty { color: var(--muted); font-size: 12px; padding: 8px 4px; }
+    .mom-meta { grid-column: 2 / 5; font-size: 10px; color: var(--muted); margin-top: -4px; padding-bottom: 4px; }
+    .reco-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 820px) { .reco-cols { grid-template-columns: 1fr; } }
+    .reco-colhead { font-size: 13px; font-weight: 700; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+    .reco-colhead.long { color: var(--green); }
+    .reco-colhead.short { color: var(--red); }
+    .reco-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; cursor: pointer; transition: border-color .15s; }
+    .reco-card:hover { border-color: var(--accent); }
+    .reco-card.long { border-left: 3px solid var(--green); }
+    .reco-card.short { border-left: 3px solid var(--red); }
+    .reco-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .reco-sym { font-size: 16px; font-weight: 700; }
+    .reco-sym .fno-badge { font-size: 9px; font-weight: 700; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; margin-left: 6px; vertical-align: middle; }
+    .reco-conv { text-align: right; font-size: 11px; color: var(--muted); }
+    .reco-conv b { display: block; font-size: 15px; }
+    .reco-conv.High b { color: var(--green); }
+    .reco-conv.Medium b { color: #f0b90b; }
+    .reco-conv.Low b { color: var(--muted); }
+    .reco-plan { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 8px 0; }
+    .reco-plan .cell { background: var(--panel); border: 1px solid var(--border); border-radius: 7px; padding: 5px 7px; text-align: center; }
+    .reco-plan .cell .k { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .3px; }
+    .reco-plan .cell .v { font-size: 13px; font-weight: 700; margin-top: 2px; }
+    .reco-reasons { list-style: none; margin: 6px 0 0; padding: 0; }
+    .reco-reasons li { font-size: 11.5px; color: var(--text); padding: 2px 0 2px 14px; position: relative; }
+    .reco-reasons li::before { content: "•"; position: absolute; left: 2px; color: var(--accent); }
+    .reco-empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+    .has-info { cursor: help; text-decoration: underline dotted; text-decoration-color: var(--muted); text-underline-offset: 3px; }
+    .dd-search { display: flex; gap: 8px; margin-bottom: 16px; }
+    .dd-search input { flex: 1; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 14px; }
+    .dd-bias { display: flex; align-items: center; gap: 14px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+    .dd-bias-badge { font-size: 20px; font-weight: 800; padding: 8px 16px; border-radius: 10px; }
+    .dd-bias-badge.Bullish { background: rgba(38,208,124,0.16); color: var(--green); }
+    .dd-bias-badge.Bearish { background: rgba(255,92,104,0.16); color: var(--red); }
+    .dd-bias-badge.Neutral { background: var(--panel); color: var(--muted); }
+    .dd-gauge { flex: 1; }
+    .dd-gauge-track { height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--red), #66707e 50%, var(--green)); position: relative; }
+    .dd-gauge-track > i { position: absolute; top: -4px; width: 4px; height: 16px; background: #fff; border-radius: 2px; transform: translateX(-50%); box-shadow: 0 0 6px rgba(0,0,0,.6); }
+    .dd-gauge-labels { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 5px; }
+    .dd-levels { display: flex; gap: 10px; }
+    .dd-lvl { text-align: center; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; }
+    .dd-lvl .k { font-size: 9px; color: var(--muted); text-transform: uppercase; }
+    .dd-lvl .v { font-size: 15px; font-weight: 700; }
+    .dd-notes { list-style: none; margin: 0 0 16px; padding: 0; }
+    .dd-notes li { font-size: 12.5px; padding: 5px 0 5px 16px; position: relative; border-bottom: 1px solid var(--border); }
+    .dd-notes li::before { content: "▸"; position: absolute; left: 0; color: var(--accent); }
+    .dd-section-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin: 18px 0 8px; }
+    .dd-dr { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
     .depth-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
     .depth-box h4 { margin: 0 0 12px; font-size: 13px; }
     .depth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
@@ -239,6 +311,7 @@
         <button id="soundBtn" title="Toggle sound">🔔 Sound</button>
         <button id="refreshBtn">↻ Refresh</button>
         <button id="csvBtn" title="Download current view as CSV">⬇ CSV</button>
+        <button id="ddBtn" title="Deep-dive analysis of any stock">🔬 Analyze</button>
         <button id="portfolioBtn" title="Paper trading portfolio">💼 Portfolio</button>
         <button id="ocBtn" title="Option chain">⛓ Options</button>
         <button id="logBtn" title="Snapshot log & backtest">📊 Log</button>
@@ -257,6 +330,10 @@
           <p id="panelDesc"></p>
         </div>
         <span id="panelMeta" class="badge" style="display:none"></span>
+      </div>
+      <div id="recoBar" class="scan-filters" style="display:none">
+        <label class="chk"><input type="checkbox" id="recoFno"> F&amp;O only (shortable / positional)</label>
+        <span style="color:var(--muted);font-size:11px">Educational signal summary — not a buy/sell recommendation. Always use a stop-loss.</span>
       </div>
       <div id="scanFilters" class="scan-filters" style="display:none">
         <label>Direction
@@ -278,6 +355,7 @@
         <button id="futAll" class="fut-toggle">All F&amp;O (~215)</button>
         <span id="futHint" style="color:var(--muted);font-size:11px"></span>
       </div>
+      <div id="futMomentum" class="fut-mom" style="display:none"></div>
       <div id="tableWrap"><div class="loading">Loading…</div></div>
     </div>
     <div class="hint">
@@ -295,6 +373,7 @@
       <div class="modal-head">
         <h3 id="mSym">—</h3>
         <div style="display:flex;gap:8px;align-items:center">
+          <button id="mAnalyze" title="Deep-dive analysis">🔬 Analyze</button>
           <button id="mOptions" title="View option chain">⛓ Options</button>
           <button class="close" id="mClose">✕</button>
         </div>
@@ -316,6 +395,24 @@
           </div>
           <div class="trade-msg" id="mTradeMsg"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Deep-dive analysis modal -->
+  <div class="overlay" id="ddOverlay">
+    <div class="modal" style="width:min(900px,95vw)">
+      <div class="modal-head">
+        <h3>🔬 Stock Deep-Dive</h3>
+        <button class="close" id="ddClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="dd-search">
+          <input list="ddSymbols" id="ddInput" placeholder="Enter NSE symbol (e.g. RELIANCE, TCS, INFY)" autocomplete="off" />
+          <datalist id="ddSymbols"></datalist>
+          <button id="ddGo">Analyze</button>
+        </div>
+        <div id="ddContent"><div class="chart-note" style="padding:20px 0">Enter a stock symbol and hit Analyze — you'll get 30/60/90-day history, delivery &amp; volume trends, the live F&amp;O/options picture, and a "what to watch today" read.</div></div>
       </div>
     </div>
   </div>
@@ -427,6 +524,10 @@
 
   <script>
     const TABS = [
+      { key: "futures",    label: "⚡ Futures", title: "Stock Futures — Basis & OI",
+        desc: "Futures with premium/discount to spot and OI buildup. The Momentum panel ranks the strongest bullish/bearish movers (price move × OI activity). Toggle 'All F&O' to cover the whole ~215-name universe." },
+      { key: "recos",      label: "💡 Ideas", title: "Trade Ideas — Long / Short",
+        desc: "Ranked LONG & SHORT setups derived from live signals (momentum, OI buildup, unusual volume, money flow), each with a conviction score, reasons and an entry/stop/target plan. Signal summary — NOT investment advice." },
       { key: "scanner",    label: "🔎 Scanner", title: "In-Demand Scanner",
         desc: "One ranked board combining volume spikes, money flow, momentum & OI buildup. Use the filters to hunt for exactly the setup you want." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
@@ -435,8 +536,6 @@
         desc: "Trading far above their average volume — the classic 'something's happening' signal." },
       { key: "oispurts",   label: "F&O Open Interest", title: "Open Interest Spurts (F&O)",
         desc: "Where derivatives traders are building positions. Price up + OI up = long buildup." },
-      { key: "futures",    label: "⚡ Futures", title: "Stock Futures — Basis & OI",
-        desc: "Futures with premium/discount to spot and OI buildup. Toggle 'All F&O' to cover the whole ~215-name universe. Premium = bullish carry, discount = bearish." },
       { key: "gainers",    label: "Top Gainers", title: "Top Gainers",
         desc: "Biggest price risers right now — momentum / strength." },
       { key: "losers",     label: "Top Losers", title: "Top Losers",
@@ -447,7 +546,7 @@
         desc: "Where the big money is flowing by rupees traded." },
     ];
 
-    let current = "scanner";
+    let current = "futures";
     let futAll = false;  // Futures tab: false = most-active feed, true = full F&O sweep
     let ocView = "oi";   // Option-chain grid: "oi" or "greeks"
     let timer = null;
@@ -502,6 +601,65 @@
       return `<td class="${cls}">${p >= 0 ? "+" : ""}${p.toFixed(2)}%</td>`;
     };
 
+    // Plain-English meaning of each column / metric, incl. whether up = bullish
+    // or bearish. Applied as hover tooltips to table headers and metric labels.
+    const COL_INFO = {
+      "Stock": "The stock's trading symbol on NSE.",
+      "Underlying": "The cash-market stock underlying this derivative.",
+      "LTP": "Last Traded Price — the most recent price it changed hands at.",
+      "Fut LTP": "Last traded price of the futures contract.",
+      "Spot": "Current cash-market (underlying) price. Futures are priced off this.",
+      "% Chg": "% change vs yesterday's close. Positive (green) = buyers in control / bullish; negative (red) = sellers / bearish.",
+      "Prev Close": "Yesterday's closing price — the baseline for today's % change.",
+      "Volume": "Shares traded today. Higher = more interest/liquidity behind the move.",
+      "Today Vol": "Shares traded so far today.",
+      "1W Avg Vol": "Average daily volume over the last week — the baseline for 'unusual'.",
+      "vs Avg": "Today's volume ÷ its recent average. >1 = above-normal activity; a big spike often precedes/confirms a move.",
+      "Value": "Rupee value traded (price × qty). High value = big money flow / conviction.",
+      "Latest OI": "Open Interest — number of derivative contracts currently open. Rising OI = fresh positions being built.",
+      "OI": "Open Interest — total outstanding futures contracts. Rising = new money entering.",
+      "OI Change": "Change in open interest vs the previous session. Positive = fresh positions added.",
+      "OI %": "Percentage change in open interest. Big + = strong fresh positioning.",
+      "Basis": "Futures price − spot price. Positive (premium) = bullish carry; negative (discount) = bearish.",
+      "Basis %": "Basis as a % of spot. Premium = market willing to pay up to be long; discount = bearish/tight liquidity.",
+      "Expiry": "The contract's expiry date. Nearer expiry = more liquid, less time value.",
+      "Signal": "OI + price read: Long buildup (price↑+OI↑, bullish), Short buildup (price↓+OI↑, bearish), Short covering (price↑+OI↓, bullish), Long unwinding (price↓+OI↓, bearish).",
+      "Signals": "How many independent hot-lists this stock appears in. More = broader interest.",
+      "Score": "Composite demand score across all signals. Higher = more 'in demand' right now.",
+      "Trend": "Live intraday sparkline built from price ticks since you opened the page.",
+      "Delivery %": "% of traded volume actually taken to demat (not squared off intraday). High delivery = investment-style buying (more durable); low = speculative churn.",
+      "VWAP": "Volume-Weighted Average Price today. Price above VWAP = intraday strength; below = weakness.",
+      "Day Range": "Today's low–high band.",
+      "52W Range": "The 52-week low–high band — where today sits in the yearly picture.",
+      "Demand Score": "Composite ranking across gainers, money-flow and volume spikes. Higher = stronger short-term demand.",
+      "OI % Change": "Percentage change in open interest for this underlying.",
+      "Conviction": "Model confidence in the idea (0–99), from how many aligned signals fire. Higher = stronger edge.",
+      "Entry": "Suggested reference entry (the current price).",
+      "Stop": "Suggested stop-loss — exit if it goes against you to cap the loss.",
+      "Target": "Suggested profit target (2× the risk to the stop).",
+      "R:R": "Reward-to-risk ratio. 1:2 means risking 1 to make 2.",
+      "30d return": "Price change over the last 30 trading days (~6 weeks). Positive = uptrend.",
+      "60d return": "Price change over the last 60 trading days (~3 months).",
+      "90d return": "Price change over the last 90 trading days (~4.5 months).",
+      "20-DMA": "20-day moving average. Price above = short-term uptrend; below = downtrend.",
+      "50-DMA": "50-day moving average. The medium-term trend line.",
+      "Vol ratio": "Latest day's volume ÷ 20-day average. >1.5 = notable pickup in activity.",
+      "Avg delivery": "Average delivery % over 20 days. High = genuine accumulation vs intraday churn.",
+      "Volatility": "Annualized volatility from daily moves. Higher = bigger swings / wider stops needed.",
+      "From high": "How far below the 90-day high (near 0% = breakout watch).",
+      "From low": "How far above the 90-day low (near 0% = support test / oversold).",
+      "PCR": "Put-Call Ratio (put OI ÷ call OI). >1 = put-heavy (often supportive/bullish); <0.7 = call-heavy (often resistance/bearish).",
+      "Max Pain": "Strike where option buyers lose the most — price often gravitates here near expiry.",
+    };
+
+    function annotateInfo(root) {
+      if (!root) return;
+      root.querySelectorAll("th, .k").forEach(el => {
+        const info = COL_INFO[el.textContent.trim()];
+        if (info) { el.title = info; el.classList.add("has-info"); }
+      });
+    }
+
     function recordPrice(sym, price) {
       if (!sym || price == null) return;
       const h = history[sym] || (history[sym] = []);
@@ -548,6 +706,10 @@
         current === "scanner" ? "flex" : "none";
       document.getElementById("futMode").style.display =
         current === "futures" ? "flex" : "none";
+      document.getElementById("recoBar").style.display =
+        current === "recos" ? "flex" : "none";
+      if (current !== "futures")
+        document.getElementById("futMomentum").style.display = "none";
     }
 
     function scannerQuery() {
@@ -739,6 +901,7 @@
         add("OI % Change", `<span class="${rowData.oiPctChange>=0?'pos':'neg'}">${rowData.oiPctChange>=0?'+':''}${rowData.oiPctChange.toFixed(1)}%</span>`);
       if (rowData.score != null) add("Demand Score", rowData.score);
       document.getElementById("mMetrics").innerHTML = metrics.join("");
+      annotateInfo(document.getElementById("mMetrics"));
 
       // Show the session sparkline immediately, then upgrade to the real
       // intraday chart + market depth from NSE's per-stock endpoints.
@@ -760,13 +923,26 @@
             "No intraday chart available (market may be closed). Showing this-session trend above.";
           return;
         }
-        document.getElementById("mChart").innerHTML = realChart(d.points, d.prevClose);
-        const t0 = new Date(d.points[0].t), t1 = new Date(d.points[d.points.length-1].t);
+        const chartEl = document.getElementById("mChart");
+        chartEl.innerHTML = realChart(d.points, d.prevClose);
+        attachChartHover(chartEl, d.points, d.prevClose);
         document.getElementById("mNote").textContent =
-          `Real NSE intraday · ${d.points.length} points · ${t0.toLocaleTimeString("en-IN")}–${t1.toLocaleTimeString("en-IN")}`;
+          `Real NSE intraday · ${d.points.length} points · ${istTime(d.points[0].t)}–${istTime(d.points[d.points.length-1].t)}`;
       } catch (e) {
         document.getElementById("mNote").textContent = "Chart unavailable: " + e.message;
       }
+    }
+
+    // NSE's chart timestamps are IST wall-clock baked into the epoch as if it
+    // were UTC. Reading the UTC components gives the correct IST time regardless
+    // of the browser's own timezone (a plain toLocale* would double the offset).
+    function istTime(ms) {
+      const d = new Date(ms);
+      let hh = d.getUTCHours();
+      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+      const ampm = hh >= 12 ? "PM" : "AM";
+      let h12 = hh % 12; if (h12 === 0) h12 = 12;
+      return `${h12}:${mm} ${ampm}`;
     }
 
     function realChart(points, prevClose, w = 580, h = 200) {
@@ -796,6 +972,50 @@
       </svg>`;
     }
 
+    // Crosshair + tooltip on the intraday chart. The SVG stretches to fill its
+    // container, so we map the mouse X (as a fraction of the box width) to the
+    // nearest data point and place the marker in pixel space.
+    function attachChartHover(el, points, prevClose, w = 580, h = 200) {
+      if (!points || points.length < 2) return;
+      const ys = points.map(p => p.price);
+      let min = Math.min(...ys), max = Math.max(...ys);
+      if (prevClose) { min = Math.min(min, prevClose); max = Math.max(max, prevClose); }
+      const rng = (max - min) || 1;
+      const n = points.length;
+      const yv = v => h - 20 - ((v - min) / rng) * (h - 40);
+
+      const cross = document.createElement("div"); cross.className = "chart-cross";
+      const dot = document.createElement("div"); dot.className = "chart-dot";
+      const tip = document.createElement("div"); tip.className = "chart-tip";
+      el.append(cross, dot, tip);
+      const hide = () => { cross.style.display = dot.style.display = tip.style.display = "none"; };
+      hide();
+
+      el.onmousemove = (e) => {
+        const rect = el.getBoundingClientRect();
+        if (!rect.width) return;
+        let frac = (e.clientX - rect.left) / rect.width;
+        frac = Math.max(0, Math.min(1, frac));
+        const idx = Math.round(frac * (n - 1));
+        const p = points[idx];
+        const px = (idx / (n - 1)) * rect.width;
+        const py = (yv(p.price) / h) * rect.height;
+        cross.style.display = dot.style.display = tip.style.display = "block";
+        cross.style.left = px + "px";
+        dot.style.left = px + "px"; dot.style.top = py + "px";
+        const tm = istTime(p.t);
+        const chg = prevClose ? ((p.price - prevClose) / prevClose * 100) : null;
+        const chgHtml = chg == null ? "" :
+          ` <span class="${chg>=0?'pos':'neg'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span>`;
+        tip.innerHTML = `<b>₹${p.price.toFixed(2)}${chgHtml}</b><span>${tm}</span>`;
+        let tx = px + 12;
+        if (tx > rect.width - 96) tx = px - 96;
+        tip.style.left = Math.max(2, tx) + "px";
+        tip.style.top = Math.max(2, py - 40) + "px";
+      };
+      el.onmouseleave = hide;
+    }
+
     async function loadDepth(sym) {
       try {
         const q = await (await fetch("/api/quote/" + encodeURIComponent(sym))).json();
@@ -809,8 +1029,10 @@
           add("Day Range", `${fmtPrice(q.dayLow)}–${fmtPrice(q.dayHigh)}`);
         if (q.yearHigh != null && q.yearLow != null)
           add("52W Range", `${fmtPrice(q.yearLow)}–${fmtPrice(q.yearHigh)}`);
-        if (extra.length)
+        if (extra.length) {
           document.getElementById("mMetrics").insertAdjacentHTML("beforeend", extra.join(""));
+          annotateInfo(document.getElementById("mMetrics"));
+        }
 
         const bids = q.depth.bids, asks = q.depth.asks;
         const hasDepth = bids.some(b => b.qty) || asks.some(a => a.qty);
@@ -856,12 +1078,103 @@
       </svg>`;
     }
 
+    // Momentum classification for a futures row. Uses price direction + the
+    // OI-buildup signal to decide bullish vs bearish, and a strength score that
+    // blends the price move with OI activity (fresh buildups weigh more).
+    function futMomentum(r) {
+      const chg = r.pChange || 0;
+      const oi = r.oi || 0;
+      const dOi = r.changeInOI || 0;
+      const oiPct = oi ? (dOi / oi) * 100 : 0;
+      let dir = null;
+      if (r.signal === "Long buildup" || r.signal === "Short covering") dir = "bull";
+      else if (r.signal === "Short buildup" || r.signal === "Long unwinding") dir = "bear";
+      else dir = chg >= 0 ? "bull" : "bear";
+      const fresh = (r.signal === "Long buildup" || r.signal === "Short buildup") ? 1.3 : 1;
+      const strength = (Math.abs(chg) + Math.abs(oiPct) * 0.4) * fresh;
+      return { dir, strength, oiPct, signal: r.signal };
+    }
+
+    function renderFutMomentum(rows) {
+      const panel = document.getElementById("futMomentum");
+      if (!Array.isArray(rows) || !rows.length) { panel.style.display = "none"; return; }
+      const enriched = rows
+        .filter(r => r.pChange != null || r.changeInOI != null)
+        .map(r => ({ r, m: futMomentum(r) }));
+      const bull = enriched.filter(x => x.m.dir === "bull").sort((a,b) => b.m.strength - a.m.strength).slice(0, 8);
+      const bear = enriched.filter(x => x.m.dir === "bear").sort((a,b) => b.m.strength - a.m.strength).slice(0, 8);
+      const maxStr = Math.max(1, ...enriched.map(x => x.m.strength));
+
+      const col = (items, kind) => {
+        const title = kind === "bull" ? "🟢 Bullish momentum" : "🔴 Bearish momentum";
+        if (!items.length) return `<div class="mom-col ${kind}"><h4>${title}</h4><div class="mom-empty">No ${kind === "bull" ? "bullish" : "bearish"} movers right now.</div></div>`;
+        const list = items.map((x, i) => {
+          const r = x.r, m = x.m;
+          const w = Math.max(6, (m.strength / maxStr) * 100);
+          const oiTxt = m.oiPct ? `${m.oiPct >= 0 ? "+" : ""}${m.oiPct.toFixed(1)}% OI` : "";
+          const sig = r.signal && r.signal !== "OI n/a" ? r.signal : "";
+          const meta = [sig, oiTxt].filter(Boolean).join(" · ");
+          return `<div class="mom-row" data-sym="${r.symbol}">
+              <span class="mom-rank">${i+1}</span>
+              <span class="mom-sym">${r.symbol}</span>
+              <span class="mom-chg ${(r.pChange??0)>=0?'pos':'neg'}">${r.pChange==null?'—':(r.pChange>=0?'+':'')+r.pChange.toFixed(2)+'%'}</span>
+              <span class="mom-str"><i style="width:${w}%"></i></span>
+              ${meta ? `<span class="mom-meta">${meta}</span>` : ""}
+            </div>`;
+        }).join("");
+        return `<div class="mom-col ${kind}"><h4>${title}</h4>${list}</div>`;
+      };
+
+      panel.innerHTML = col(bull, "bull") + col(bear, "bear");
+      panel.style.display = "grid";
+      panel.querySelectorAll("[data-sym]").forEach(el =>
+        el.onclick = () => openDetail(el.getAttribute("data-sym")));
+    }
+
+    function recoCard(idea) {
+      const dir = idea.direction === "LONG" ? "long" : "short";
+      const fno = idea.fno ? `<span class="fno-badge">F&O</span>` : "";
+      const pc = idea.pChange;
+      const pcHtml = pc == null ? "" :
+        `<span class="${pc>=0?'pos':'neg'}" style="font-size:12px;font-weight:600">${pc>=0?'+':''}${pc.toFixed(2)}%</span>`;
+      const reasons = (idea.reasons || []).map(r => `<li>${r}</li>`).join("");
+      return `<div class="reco-card ${dir}" data-sym="${idea.symbol}">
+        <div class="reco-top">
+          <div><span class="reco-sym">${idea.symbol}</span>${fno} ${pcHtml}</div>
+          <div class="reco-conv ${idea.rating}">Conviction<b>${idea.conviction}</b>${idea.rating}</div>
+        </div>
+        <div class="reco-plan">
+          <div class="cell"><div class="k">Entry</div><div class="v">₹${fmtPrice(idea.entry)}</div></div>
+          <div class="cell"><div class="k">Stop</div><div class="v neg">₹${fmtPrice(idea.stop)}</div></div>
+          <div class="cell"><div class="k">Target</div><div class="v pos">₹${fmtPrice(idea.target)}</div></div>
+          <div class="cell"><div class="k">R:R</div><div class="v">1:${idea.rr}</div></div>
+        </div>
+        <ul class="reco-reasons">${reasons}</ul>
+      </div>`;
+    }
+
+    function renderRecos(data) {
+      const longs = data.longs || [], shorts = data.shorts || [];
+      const colHtml = (items, kind, title) => {
+        const inner = items.length
+          ? items.map(recoCard).join("")
+          : `<div class="reco-empty">No ${kind} setups with a clean edge right now.</div>`;
+        return `<div><h3 class="reco-colhead ${kind}">${title}</h3>${inner}</div>`;
+      };
+      return `<div class="reco-cols">
+        ${colHtml(longs, "long", "🟢 Long ideas (buy)")}
+        ${colHtml(shorts, "short", "🔴 Short ideas (sell)")}
+      </div>`;
+    }
+
     async function load() {
       const wrap = document.getElementById("tableWrap");
       const dot = document.getElementById("liveDot");
       dot.style.background = "var(--accent)";
       try {
         let url = "/api/" + current + (current === "scanner" ? scannerQuery() : "");
+        if (current === "recos")
+          url = "/api/recommendations" + (document.getElementById("recoFno").checked ? "?fno=1" : "");
         if (current === "futures" && futAll) {
           url = "/api/futures/all";
           if (!window._futAllLoaded)
@@ -871,10 +1184,25 @@
         const data = await res.json();
         if (current === "futures" && futAll) window._futAllLoaded = true;
         if (data.error) throw new Error(data.error);
+        if (current === "recos") {
+          window._lastRows = (data.longs || []).concat(data.shorts || []);
+          wrap.innerHTML = renderRecos(data);
+          annotateInfo(wrap);
+          wrap.querySelectorAll("[data-sym]").forEach(el =>
+            el.onclick = () => openDetail(el.getAttribute("data-sym")));
+          document.getElementById("futMomentum").style.display = "none";
+          document.getElementById("updated").textContent =
+            "Updated " + new Date().toLocaleTimeString("en-IN");
+          dot.style.background = "var(--green)";
+          return;
+        }
         window._lastRows = data;
         wrap.innerHTML = renderTable(current, data);
+        annotateInfo(wrap);
         wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
           tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
+        if (current === "futures") renderFutMomentum(data);
+        else document.getElementById("futMomentum").style.display = "none";
         document.getElementById("updated").textContent =
           "Updated " + new Date().toLocaleTimeString("en-IN");
         dot.style.background = "var(--green)";
@@ -1031,6 +1359,134 @@
           <td class="${r.forwardReturnPct>=0?'pos':'neg'}">${r.forwardReturnPct>=0?'+':''}${r.forwardReturnPct}%</td>
           <td>${r.sightings}</td>
         </tr>`).join("") + `</tbody></table>`;
+    }
+
+    // ---- Stock deep-dive ----
+    function openDeepDive(sym) {
+      document.getElementById("ddOverlay").classList.add("show");
+      if (sym) {
+        document.getElementById("ddInput").value = sym;
+        loadDeepDive(sym);
+      } else {
+        document.getElementById("ddInput").focus();
+      }
+    }
+
+    async function loadDeepDive(sym) {
+      sym = (sym || document.getElementById("ddInput").value || "").toUpperCase().trim();
+      if (!sym) return;
+      const box = document.getElementById("ddContent");
+      box.innerHTML = `<div class="loading">Digging into ${sym} — history, delivery, F&amp;O & options…</div>`;
+      try {
+        const d = await (await fetch("/api/deepdive/" + encodeURIComponent(sym))).json();
+        if (d.error) { box.innerHTML = `<div class="loading err">${d.error}</div>`; return; }
+        box.innerHTML = renderDeepDive(d);
+        annotateInfo(box);
+      } catch (e) {
+        box.innerHTML = `<div class="loading err">Failed: ${e.message}</div>`;
+      }
+    }
+
+    function ddChart(series, w = 840, h = 220) {
+      const closes = series.map(p => p.close).filter(v => v != null);
+      if (closes.length < 2) return `<div class="chart-note">Not enough history to chart.</div>`;
+      const min = Math.min(...closes), max = Math.max(...closes), rng = (max - min) || 1;
+      const vols = series.map(p => p.volume || 0);
+      const vmax = Math.max(...vols) || 1;
+      const n = series.length;
+      const x = i => (i / (n - 1)) * w;
+      const py = v => 12 + (1 - (v - min) / rng) * (h - 52);
+      const volH = 34;
+      const bars = series.map((p, i) => {
+        const bh = (p.volume || 0) / vmax * volH;
+        const bw = Math.max(1, w / n - 1);
+        return `<rect x="${(x(i) - bw / 2).toFixed(1)}" y="${(h - 18 - bh).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="#5b6b82" opacity="0.25"/>`;
+      }).join("");
+      const coords = series.map((p, i) => `${x(i).toFixed(1)},${py(p.close).toFixed(1)}`).join(" ");
+      const up = closes[closes.length - 1] >= closes[0];
+      const color = up ? "#26d07c" : "#ff5c68";
+      return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        ${bars}
+        <polyline fill="none" stroke="${color}" stroke-width="1.8" points="${coords}"/>
+        <text x="4" y="12" fill="#8b98a9" font-size="11">₹${max.toFixed(1)}</text>
+        <text x="4" y="${(h-22).toFixed(0)}" fill="#8b98a9" font-size="11">₹${min.toFixed(1)}</text>
+        <text x="${w-4}" y="12" fill="#8b98a9" font-size="10" text-anchor="end">${series[n-1].date || ""}</text>
+        <text x="4" y="${h-4}" fill="#8b98a9" font-size="10">${series[0].date || ""} · grey bars = volume</text>
+      </svg>`;
+    }
+
+    function renderDeepDive(d) {
+      const s = d.stats, a = d.analysis, dv = d.derivatives, o = d.options;
+      const pos = v => v == null ? "—" : `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v}%</span>`;
+      // Bias gauge: map score -100..100 to 0..100% left position.
+      const gaugePos = ((a.score + 100) / 200 * 100).toFixed(0);
+      const lvl = (k, v) => `<div class="dd-lvl"><div class="k">${k}</div><div class="v">${v==null?"—":"₹"+fmtPrice(v)}</div></div>`;
+      const card = (k, v) => `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+
+      const statsHtml = [
+        card("30d return", pos(s.ret30)),
+        card("60d return", pos(s.ret60)),
+        card("90d return", pos(s.ret90)),
+        card("20-DMA", s.sma20==null?"—":"₹"+fmtPrice(s.sma20)),
+        card("50-DMA", s.sma50==null?"—":"₹"+fmtPrice(s.sma50)),
+        card("Vol ratio", s.volRatio==null?"—":s.volRatio+"x"),
+        card("Avg delivery", s.avgDeliv20==null?"—":s.avgDeliv20+"%"),
+        card("Volatility", s.annVolPct==null?"—":s.annVolPct+"%"),
+        card("From high", pos(s.pctFromHigh)),
+        card("From low", pos(s.pctFromLow)),
+      ].join("");
+
+      let derivHtml = `<div class="chart-note">No live futures data (thin pre-market or non-F&O).</div>`;
+      if (dv) {
+        const cls = dv.signalKind === "buildup" ? "buildup" : dv.signalKind === "short" ? "short" : "neutral";
+        derivHtml = `<div class="dd-dr">
+          ${card("Fut LTP", dv.ltp==null?"—":"₹"+fmtPrice(dv.ltp))}
+          ${card("Basis %", pos(dv.basisPct))}
+          ${card("OI", fmtNum(dv.oi))}
+          ${card("Signal", `<span class="badge ${cls}">${dv.signal||"—"}</span>`)}
+        </div>`;
+      }
+
+      let optHtml = `<div class="chart-note">No live option chain (market closed or non-F&O).</div>`;
+      if (o) {
+        optHtml = `<div class="dd-dr">
+          ${card("PCR", o.pcr==null?"—":o.pcr)}
+          ${card("Max Pain", o.maxPain==null?"—":"₹"+fmtPrice(o.maxPain))}
+          ${card("Support", o.supportStrike==null?"—":"₹"+fmtPrice(o.supportStrike))}
+          ${card("Resistance", o.resistanceStrike==null?"—":"₹"+fmtPrice(o.resistanceStrike))}
+        </div>`;
+      }
+
+      return `
+        <div class="dd-bias">
+          <div class="dd-bias-badge ${a.bias}">${a.bias}</div>
+          <div class="dd-gauge">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:6px">${d.symbol} · ₹${fmtPrice(s.lastClose)} · bias score ${a.score>0?'+':''}${a.score}</div>
+            <div class="dd-gauge-track"><i style="left:${gaugePos}%"></i></div>
+            <div class="dd-gauge-labels"><span>Bearish</span><span>Neutral</span><span>Bullish</span></div>
+          </div>
+          <div class="dd-levels">
+            ${lvl("Support", a.support)}
+            ${lvl("Resistance", a.resistance)}
+          </div>
+        </div>
+
+        <div class="dd-section-title">What to watch today</div>
+        <ul class="dd-notes">${(a.notes||[]).map(x=>`<li>${x}</li>`).join("") || "<li>No standout signals right now.</li>"}</ul>
+
+        <div class="dd-section-title">Price &amp; volume (last ${d.series.length} sessions)</div>
+        <div class="chart-box">${ddChart(d.series)}</div>
+
+        <div class="dd-section-title">Key stats</div>
+        <div class="metrics">${statsHtml}</div>
+
+        <div class="dd-section-title">Futures (live)</div>
+        ${derivHtml}
+        <div class="dd-section-title">Options (live${o&&o.expiry?` · exp ${o.expiry}`:""})</div>
+        ${optHtml}
+
+        <div class="chart-note" style="margin-top:16px">Educational analysis from public NSE data — not investment advice. NSE's historical OI feed is blocked, so the F&amp;O/options view is the live snapshot.</div>
+      `;
     }
 
     // ---- Option chain ----
@@ -1340,6 +1796,7 @@
     document.getElementById("ocTSell").onclick = () => placeOptionOrder("SELL");
     document.getElementById("refreshBtn").onclick = load;
     document.getElementById("fApply").onclick = load;
+    document.getElementById("recoFno").onchange = load;
     document.getElementById("fReset").onclick = () => {
       document.getElementById("fDir").value = "any";
       document.getElementById("fChg").value = "";
@@ -1390,6 +1847,20 @@
     document.getElementById("mOptions").onclick = () => {
       if (window._detailSym) openOptionChain(window._detailSym);
     };
+    document.getElementById("mAnalyze").onclick = () => {
+      if (window._detailSym) {
+        document.getElementById("overlay").classList.remove("show");
+        openDeepDive(window._detailSym);
+      }
+    };
+    document.getElementById("ddBtn").onclick = () => openDeepDive();
+    document.getElementById("ddGo").onclick = () => loadDeepDive();
+    document.getElementById("ddInput").onkeydown = (e) => { if (e.key === "Enter") loadDeepDive(); };
+    document.getElementById("ddClose").onclick =
+      () => document.getElementById("ddOverlay").classList.remove("show");
+    document.getElementById("ddOverlay").onclick = (e) => {
+      if (e.target.id === "ddOverlay") e.currentTarget.classList.remove("show");
+    };
     document.getElementById("pfClose").onclick =
       () => document.getElementById("pfOverlay").classList.remove("show");
     document.getElementById("pfOverlay").onclick = (e) => {
@@ -1420,8 +1891,9 @@
       try {
         const d = await (await fetch("/api/fno/universe")).json();
         const all = [...(d.indices || []), ...(d.stocks || [])];
-        document.getElementById("ocSymbols").innerHTML =
-          all.map(s => `<option value="${s}">`).join("");
+        const opts = all.map(s => `<option value="${s}">`).join("");
+        document.getElementById("ocSymbols").innerHTML = opts;
+        document.getElementById("ddSymbols").innerHTML = opts;
         document.getElementById("ocIndexPicks").innerHTML =
           `<span style="color:var(--muted);font-size:11px;align-self:center;margin-right:4px">Indices:</span>` +
           (d.indices || []).map(s => `<button data-oc="${s}">${s}</button>`).join("");

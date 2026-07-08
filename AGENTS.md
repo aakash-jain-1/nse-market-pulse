@@ -90,6 +90,8 @@ The frontend polls `/api/<view>` and renders tables client-side.
 | OI spurts (underlyings) | `/api/live-analysis-oi-spurts-underlyings` |
 | Most-active stock futures | `/api/liveEquity-derivatives?index=stock_fut` (has underlying+pChange+OI+lastPrice+underlyingValue+expiry; ~20 rows) |
 | Intraday chart (OLD, empty) | `/api/chart-databyindex?index=<SYMBOL>EQN` |
+| Daily history (OHLC+vol+delivery%) | `/api/historicalOR/generateSecurityWiseHistoricalData?from=DD-MM-YYYY&to=DD-MM-YYYY&symbol=<SYM>&type=priceVolumeDeliverable&series=EQ` — Referer `/get-quote/equity?symbol=<SYM>`. **Caps at ~70 trading days from `to`**, so `get_stock_history()` fetches back-to-back windows and merges. Powers the deep-dive. |
+| Historical F&O / OI-over-time | `/api/historical/fo/derivatives` & `/api/historical/foCPV` → **503 / blocked**. No reliable historical OI; deep-dive uses the live OI snapshot instead. |
 
 ### NextApi gateway (NEW — the big unlock, `nse_quote.py`)
 The current NSE website uses a newer gateway that DOES work from our warmed
@@ -127,7 +129,26 @@ trading works for any tradable symbol (not just hot-list names).
 
 ## Feature summary (what's built)
 
-- **Scanner** (default tab, `🔎 Scanner`) — the one-stop "in-demand right now"
+- **Stock Deep-Dive** (`🔬 Analyze` header button, or from the detail modal) —
+  type any NSE symbol → `get_stock_deepdive()` (`/api/deepdive/<sym>`). Pulls
+  ~90 trading days of daily history (`get_stock_history()`, chunked), computes
+  30/60/90-day returns, 20/50-DMA, 90-day high/low + distance, volume ratio,
+  avg + trend of delivery %, annualized volatility. Adds the live futures
+  (basis/OI/signal) and options (PCR/max-pain/support-resistance) snapshot, then
+  `_analyze_stock()` synthesizes a bias (score -100..100), plain-English "what to
+  watch today" notes and key support/resistance levels. Price+volume chart in a
+  modal. Educational, not advice.
+- **Column/param tooltips** — hover any table header or metric label for a
+  plain-English meaning incl. whether up = bullish/bearish (`COL_INFO` map +
+  `annotateInfo()` in the frontend; dotted underline affordance).
+- **Trade Ideas** (`💡 Ideas`) — ranked LONG/SHORT setups from
+  `get_recommendations()` (`/api/recommendations?fno=1`). Builds on the scanner
+  aggregate: `_build_idea()` scores a bull/bear net from price momentum + OI
+  buildup signal + unusual volume + multi-signal breadth, emits a conviction
+  (0-99, High/Med/Low), plain-English reasons, and an entry/stop/target plan
+  (stop scales with the day's move, target = 2× risk → 1:2 R:R). Two columns of
+  cards, click to open the detail modal. Educational only — NOT advice.
+- **Scanner** (`🔎 Scanner`) — the one-stop "in-demand right now"
   board. `get_scanner()` aggregates every cheap hot list (volume gainers,
   most-active value/volume, gainers/losers, OI spurts, futures) into a per-symbol
   composite score with human-readable **tags** (⭐ Multi-signal, 🔥 Unusual
@@ -220,6 +241,21 @@ trading works for any tradable symbol (not just hot-list names).
 
 ## Done recently
 
+- **Stock Deep-Dive** (`get_stock_deepdive()` / `get_stock_history()` /
+  `_analyze_stock()`): 30/60/90-day history + delivery/volume/volatility stats,
+  live F&O/options snapshot, and a synthesized bias + levels + today's read.
+  Discovered the working daily-history endpoint (`generateSecurityWiseHistorical
+  Data`, capped ~70 trading days/req → fetched in chunks).
+- **Column tooltips** (`COL_INFO` / `annotateInfo`): hover any header/metric for
+  its meaning + up=good/bad guidance.
+- **Futures tab is now first + the default** landing tab.
+- **Trade Ideas tab** (`get_recommendations()` / `_build_idea()`): ranked
+  LONG/SHORT setups with conviction score, reasons and entry/stop/target.
+- **Futures Momentum panel**: on the Futures tab, two columns ranking the
+  strongest bullish/bearish movers (price move × OI activity), client-side.
+- **Intraday chart crosshair**: hover the detail-modal chart for price/%chg/time
+  tooltip. Fixed the +5:30h label bug (NSE bakes IST into the epoch as UTC — read
+  UTC components via `istTime()` instead of `toLocaleTimeString`).
 - OI % change column + CSV export.
 - Paper trading engine (see feature summary).
 - Snapshot logging + forward-return backtest (see feature summary).

@@ -510,6 +510,398 @@ def get_scanner(
     return rows
 
 
+def _build_idea(e):
+    """
+    Turn one aggregated scanner record into a directional LONG/SHORT trade idea
+    with a conviction score, plain-English reasons and a simple risk plan
+    (entry / stop / target). Returns None when there isn't a clean directional
+    edge. This is a signal summary, NOT investment advice.
+    """
+    ltp = e.get("ltp")
+    pc = e.get("pChange")
+    if ltp is None or ltp <= 0:
+        return None
+
+    sig = e.get("oiSignal")
+    vm = e.get("volMult") or 0
+    tags = e.get("tags") or []
+    reasons = []
+    bull = bear = 0.0
+
+    # Price momentum (capped so one huge move can't dominate everything).
+    if pc is not None:
+        if pc > 0:
+            bull += min(abs(pc), 8)
+            reasons.append(f"Price up {pc:+.2f}% today")
+        elif pc < 0:
+            bear += min(abs(pc), 8)
+            reasons.append(f"Price down {pc:+.2f}% today")
+
+    # OI buildup = derivatives conviction; fresh positions weigh most.
+    if sig == "Long buildup":
+        bull += 6
+        reasons.append("Long buildup — rising price with rising OI (fresh longs)")
+    elif sig == "Short covering":
+        bull += 3
+        reasons.append("Short covering — shorts exiting into strength")
+    elif sig == "Short buildup":
+        bear += 6
+        reasons.append("Short buildup — falling price with rising OI (fresh shorts)")
+    elif sig == "Long unwinding":
+        bear += 3
+        reasons.append("Long unwinding — longs exiting into weakness")
+
+    # Unusual volume amplifies whichever way price is moving.
+    if vm >= 2:
+        boost = min(vm / 3.0, 5.0)
+        if pc is not None and pc >= 0:
+            bull += boost
+        elif pc is not None and pc < 0:
+            bear += boost
+        reasons.append(f"Unusual volume ~{vm:.1f}x 1-week average")
+
+    if "💰 Money flow" in tags:
+        reasons.append("Heavy traded value (money flow)")
+
+    lc = e.get("listCount") or len(e.get("lists") or [])
+    if lc >= 3:
+        breadth = (lc - 2) * 1.5
+        if pc is not None and pc >= 0:
+            bull += breadth
+        elif pc is not None and pc < 0:
+            bear += breadth
+        reasons.append(f"Shows up across {lc} independent signals")
+
+    net = bull - bear
+    if abs(net) < 2 or not reasons:
+        return None
+
+    direction = "LONG" if net > 0 else "SHORT"
+    conviction = int(min(round(abs(net) / 22.0 * 100), 99))
+    rating = "High" if conviction >= 66 else "Medium" if conviction >= 40 else "Low"
+
+    # Risk plan: stop scales with how much it's already moved (more volatile =>
+    # wider stop), target is 2x the risk (1:2 reward-to-risk).
+    move = abs(pc) if pc is not None else 1.0
+    stop_pct = max(1.0, min(move * 0.6, 3.0))
+    tgt_pct = stop_pct * 2
+    if direction == "LONG":
+        stop = ltp * (1 - stop_pct / 100)
+        target = ltp * (1 + tgt_pct / 100)
+    else:
+        stop = ltp * (1 + stop_pct / 100)
+        target = ltp * (1 - tgt_pct / 100)
+
+    return {
+        "symbol": e["symbol"],
+        "direction": direction,
+        "conviction": conviction,
+        "rating": rating,
+        "ltp": round(ltp, 2),
+        "pChange": pc,
+        "entry": round(ltp, 2),
+        "stop": round(stop, 2),
+        "target": round(target, 2),
+        "stopPct": round(stop_pct, 2),
+        "targetPct": round(tgt_pct, 2),
+        "rr": round(tgt_pct / stop_pct, 1),
+        "reasons": reasons,
+        "fno": e.get("fno", False),
+        "oiSignal": sig,
+        "volMult": round(vm, 1) if vm else None,
+    }
+
+
+def get_recommendations(fno_only=False, limit=10):
+    """
+    Ranked LONG / SHORT trade ideas derived from the live signal aggregate.
+    Each idea carries a conviction score, plain-English reasons and a simple
+    entry/stop/target plan. Educational signal summary — NOT investment advice.
+    """
+    rows = get_scanner(limit=250)
+    ideas = []
+    for e in rows:
+        if fno_only and not e.get("fno"):
+            continue
+        idea = _build_idea(e)
+        if idea:
+            ideas.append(idea)
+
+    longs = sorted([i for i in ideas if i["direction"] == "LONG"],
+                   key=lambda x: x["conviction"], reverse=True)[:limit]
+    shorts = sorted([i for i in ideas if i["direction"] == "SHORT"],
+                    key=lambda x: x["conviction"], reverse=True)[:limit]
+    return {
+        "longs": longs,
+        "shorts": shorts,
+        "count": len(longs) + len(shorts),
+        "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+_hist_cache = {}
+_HIST_TTL = 900  # daily history barely changes intraday; cache 15 min
+
+
+def get_stock_history(symbol, chunks=3, chunk_days=80):
+    """
+    Daily OHLC + volume + delivery% history via NSE's securityArchives endpoint
+    (the one historical source that isn't blocked). Returns an ascending list of
+    {date, iso, open, high, low, close, prevClose, vwap, volume, value, trades,
+    delivQty, delivPct}. Cached ~15 min.
+
+    NSE caps each request to ~70 trading days from `to` (ignoring an older
+    `from`), so we fetch several back-to-back windows and merge to reach ~130
+    trading days — enough for 90-day returns and a 50-DMA.
+    """
+    from datetime import timedelta
+    symbol = symbol.upper().strip()
+    key = (symbol, chunks, chunk_days)
+    hit = _hist_cache.get(key)
+    if hit and (time.time() - hit[0]) < _HIST_TTL:
+        return hit[1]
+
+    s = get_session()
+    s.get(BASE + "/get-quote/equity?symbol=" + symbol, timeout=15)
+    ref = {"Referer": BASE + "/get-quote/equity?symbol=" + symbol}
+
+    merged = {}
+    end = datetime.now()
+    for _ in range(chunks):
+        start = end - timedelta(days=chunk_days)
+        f, t = start.strftime("%d-%m-%Y"), end.strftime("%d-%m-%Y")
+        url = (f"/api/historicalOR/generateSecurityWiseHistoricalData?from={f}&to={t}"
+               f"&symbol={symbol}&type=priceVolumeDeliverable&series=EQ")
+        try:
+            r = s.get(BASE + url, headers=ref, timeout=20)
+            r.raise_for_status()
+            rows = r.json().get("data", []) or []
+        except Exception:
+            rows = []
+        for d in rows:
+            iso = d.get("CH_TIMESTAMP")
+            if not iso or iso in merged:
+                continue
+            merged[iso] = {
+                "date": d.get("mTIMESTAMP"),
+                "iso": iso,
+                "open": _num(d.get("CH_OPENING_PRICE")),
+                "high": _num(d.get("CH_TRADE_HIGH_PRICE")),
+                "low": _num(d.get("CH_TRADE_LOW_PRICE")),
+                "close": _num(d.get("CH_CLOSING_PRICE")),
+                "prevClose": _num(d.get("CH_PREVIOUS_CLS_PRICE")),
+                "vwap": _num(d.get("VWAP")),
+                "volume": _num(d.get("CH_TOT_TRADED_QTY")),
+                "value": _num(d.get("CH_TOT_TRADED_VAL")),
+                "trades": _num(d.get("CH_TOTAL_TRADES")),
+                "delivQty": _num(d.get("COP_DELIV_QTY")),
+                "delivPct": _num(d.get("COP_DELIV_PERC")),
+            }
+        end = start - timedelta(days=1)
+
+    out = [x for x in merged.values() if x["close"] is not None]
+    out.sort(key=lambda x: x.get("iso") or "")
+    _hist_cache[key] = (time.time(), out)
+    return out
+
+
+def _mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else None
+
+
+def _pct(a, b):
+    return (a / b - 1) * 100 if (a is not None and b) else None
+
+
+def get_stock_deepdive(symbol):
+    """
+    Everything about one stock in one place: 30/60/90-day price/volume/delivery
+    history + derived stats, the live derivatives (futures basis + OI buildup)
+    and options (PCR / max-pain / support-resistance) picture, and a synthesized
+    "what to watch today" read (bias + key levels). Educational, not advice.
+
+    NOTE: NSE's historical F&O (OI-over-time) endpoint is blocked, so the OI
+    view is the live snapshot; intraday OI history is what snapshot_logger keeps.
+    """
+    import math
+    symbol = symbol.upper().strip()
+    hist = get_stock_history(symbol)
+    if not hist or len(hist) < 5:
+        return {"symbol": symbol, "error": "No historical data (check the symbol; only EQ series supported)."}
+
+    closes = [d["close"] for d in hist]
+    highs = [d["high"] for d in hist if d["high"] is not None]
+    lows = [d["low"] for d in hist if d["low"] is not None]
+    vols = [d["volume"] or 0 for d in hist]
+    delivs = [d["delivPct"] for d in hist if d["delivPct"] is not None]
+    last = closes[-1]
+
+    def ret_over(nb):
+        return _pct(last, closes[-1 - nb]) if len(closes) > nb else None
+
+    stats = {
+        "lastClose": round(last, 2),
+        "ret30": round(ret_over(30), 2) if ret_over(30) is not None else None,
+        "ret60": round(ret_over(60), 2) if ret_over(60) is not None else None,
+        "ret90": round(ret_over(90), 2) if ret_over(90) is not None else None,
+        "sma20": round(_mean(closes[-20:]), 2) if len(closes) >= 20 else None,
+        "sma50": round(_mean(closes[-50:]), 2) if len(closes) >= 50 else None,
+        "high90": round(max(highs[-90:]), 2) if highs else None,
+        "low90": round(min(lows[-90:]), 2) if lows else None,
+        "avgVol20": round(_mean(vols[-20:])) if len(vols) >= 5 else None,
+        "lastVol": vols[-1],
+        "avgDeliv20": round(_mean(delivs[-20:]), 1) if delivs else None,
+        "lastDeliv": delivs[-1] if delivs else None,
+    }
+    stats["volRatio"] = round(stats["lastVol"] / stats["avgVol20"], 2) if stats.get("avgVol20") else None
+    stats["pctFromHigh"] = round(_pct(last, stats["high90"]), 2) if stats.get("high90") else None
+    stats["pctFromLow"] = round(_pct(last, stats["low90"]), 2) if stats.get("low90") else None
+
+    # Delivery trend: recent 5 days vs the prior 15 (rising delivery into a rally
+    # = genuine accumulation rather than pure intraday churn).
+    if len(delivs) >= 20:
+        stats["delivTrend"] = round(_mean(delivs[-5:]) - _mean(delivs[-20:-5]), 1)
+    else:
+        stats["delivTrend"] = None
+
+    # Annualized volatility from daily log-ish returns.
+    rets = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes)) if closes[i - 1]]
+    if len(rets) >= 10:
+        mu = _mean(rets)
+        var = _mean([(x - mu) ** 2 for x in rets])
+        stats["annVolPct"] = round((var ** 0.5) * math.sqrt(252) * 100, 1)
+    else:
+        stats["annVolPct"] = None
+
+    # Live derivatives + options (best-effort; may be thin pre-market).
+    import nse_quote
+    deriv = None
+    try:
+        deriv = nse_quote.get_near_future(symbol)
+    except Exception:
+        pass
+    options = None
+    try:
+        oc = nse_quote.get_option_chain(symbol)
+        if oc and not oc.get("error"):
+            sup = oc.get("support") or []
+            res = oc.get("resistance") or []
+            options = {
+                "expiry": oc.get("expiry"), "pcr": oc.get("pcr"),
+                "maxPain": oc.get("maxPain"), "atm": oc.get("atmStrike"),
+                "supportStrike": sup[0]["strike"] if sup else None,
+                "resistanceStrike": res[0]["strike"] if res else None,
+                "supportList": sup[:3], "resistanceList": res[:3],
+            }
+    except Exception:
+        pass
+
+    analysis = _analyze_stock(symbol, last, stats, deriv, options)
+
+    # Trim series to ~90 points for the client chart.
+    series = [
+        {"date": d["date"], "close": d["close"], "volume": d["volume"], "delivPct": d["delivPct"]}
+        for d in hist[-90:]
+    ]
+    return {
+        "symbol": symbol,
+        "series": series,
+        "stats": stats,
+        "derivatives": deriv,
+        "options": options,
+        "analysis": analysis,
+        "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _analyze_stock(symbol, last, stats, deriv, options):
+    """Synthesize a bias (score -100..100), reasons and key levels for today."""
+    score = 0.0
+    notes = []
+
+    sma20, sma50 = stats.get("sma20"), stats.get("sma50")
+    if sma20 and sma50:
+        if last > sma20 > sma50:
+            score += 25; notes.append(f"Uptrend: price ₹{last:g} > 20-DMA ₹{sma20:g} > 50-DMA ₹{sma50:g}")
+        elif last < sma20 < sma50:
+            score -= 25; notes.append(f"Downtrend: price ₹{last:g} < 20-DMA ₹{sma20:g} < 50-DMA ₹{sma50:g}")
+        elif last > sma20:
+            score += 10; notes.append(f"Price above 20-DMA (₹{sma20:g}) — short-term strength")
+        elif last < sma20:
+            score -= 10; notes.append(f"Price below 20-DMA (₹{sma20:g}) — short-term weakness")
+
+    r30 = stats.get("ret30")
+    if r30 is not None:
+        score += max(-15, min(15, r30 * 0.8))
+        notes.append(f"1-month return {r30:+.1f}%")
+
+    # Delivery: high & rising delivery supports a real move.
+    dp, dt = stats.get("avgDeliv20"), stats.get("delivTrend")
+    if dp is not None:
+        if dp >= 55:
+            notes.append(f"High delivery ({dp:.0f}% avg) — investment-style buying, less speculative")
+            score += 6
+        elif dp <= 35:
+            notes.append(f"Low delivery ({dp:.0f}% avg) — largely intraday/speculative")
+    if dt is not None and abs(dt) >= 5:
+        notes.append(f"Delivery% {'rising' if dt > 0 else 'falling'} ({dt:+.0f} pts vs prior weeks)")
+        score += 4 if dt > 0 else -4
+
+    # Volume surge.
+    vr = stats.get("volRatio")
+    if vr and vr >= 1.5:
+        notes.append(f"Volume {vr:.1f}x its 20-day average — heightened interest")
+
+    # Position within range.
+    pfh, pfl = stats.get("pctFromHigh"), stats.get("pctFromLow")
+    if pfh is not None and pfh > -3:
+        notes.append(f"Near 90-day high (only {pfh:+.1f}% away) — breakout watch")
+        score += 5
+    if pfl is not None and pfl < 3:
+        notes.append(f"Near 90-day low ({pfl:+.1f}% above) — support test / oversold watch")
+        score -= 5
+
+    # Derivatives OI buildup.
+    if deriv and deriv.get("signal") and deriv.get("signal") != "OI n/a":
+        sig, kind = deriv.get("signal"), deriv.get("signalKind")
+        notes.append(f"Futures: {sig} (basis {deriv.get('basisPct')}% )")
+        score += 12 if kind == "buildup" else -8 if kind == "short" else 0
+
+    # Options positioning.
+    if options and options.get("pcr") is not None:
+        pcr = options["pcr"]
+        if pcr >= 1.2:
+            notes.append(f"Option PCR {pcr} — put-heavy (often supportive / bullish)")
+            score += 6
+        elif pcr <= 0.7:
+            notes.append(f"Option PCR {pcr} — call-heavy (often resistance / bearish)")
+            score -= 6
+        else:
+            notes.append(f"Option PCR {pcr} — balanced")
+
+    score = max(-100, min(100, round(score)))
+    bias = "Bullish" if score >= 20 else "Bearish" if score <= -20 else "Neutral"
+
+    # Key levels for today: blend recent structure with option walls.
+    supports = [x for x in [stats.get("sma20"), stats.get("low90"),
+                            options.get("supportStrike") if options else None] if x and x < last]
+    resistances = [x for x in [stats.get("high90"),
+                               options.get("resistanceStrike") if options else None] if x and x > last]
+    if sma20 and sma20 > last:
+        resistances.append(sma20)
+    support = round(max(supports), 2) if supports else None
+    resistance = round(min(resistances), 2) if resistances else None
+
+    return {
+        "bias": bias,
+        "score": score,
+        "notes": notes,
+        "support": support,
+        "resistance": resistance,
+    }
+
+
 _all_fut_cache = {"ts": 0.0, "rows": None}
 _ALL_FUT_TTL = 90  # seconds; a full sweep is expensive so cache aggressively
 

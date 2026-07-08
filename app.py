@@ -92,6 +92,18 @@ def api_scanner():
     ))
 
 
+@app.route("/api/recommendations")
+def api_recommendations():
+    return jsonify(nse.get_recommendations(
+        fno_only=request.args.get("fno") == "1",
+    ))
+
+
+@app.route("/api/deepdive/<symbol>")
+def api_deepdive(symbol):
+    return jsonify(nse.get_stock_deepdive(symbol))
+
+
 @app.route("/api/quote/<symbol>")
 def api_quote(symbol):
     return jsonify(nse_quote.get_quote(symbol))
