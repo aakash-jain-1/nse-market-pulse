@@ -91,7 +91,7 @@ The frontend polls `/api/<view>` and renders tables client-side.
 | Most-active stock futures | `/api/liveEquity-derivatives?index=stock_fut` (has underlying+pChange+OI+lastPrice+underlyingValue+expiry; ~20 rows) |
 | Intraday chart (OLD, empty) | `/api/chart-databyindex?index=<SYMBOL>EQN` |
 | Daily history (OHLC+vol+delivery%) | `/api/historicalOR/generateSecurityWiseHistoricalData?from=DD-MM-YYYY&to=DD-MM-YYYY&symbol=<SYM>&type=priceVolumeDeliverable&series=EQ` — Referer `/get-quote/equity?symbol=<SYM>`. **Caps at ~70 trading days from `to`**, so `get_stock_history()` fetches back-to-back windows and merges. Powers the deep-dive. |
-| Historical F&O / OI-over-time | `/api/historical/fo/derivatives` & `/api/historical/foCPV` → **503 / blocked**. No reliable historical OI; deep-dive uses the live OI snapshot instead. |
+| Historical F&O OI-over-time + lot size | `/api/historicalOR/foCPV?from=DD-MM-YYYY&to=DD-MM-YYYY&instrumentType=FUTSTK&symbol=<SYM>&year=YYYY&expiryDate=DD-MON-YYYY` (UPPERCASE month) — Referer `/report-detail/fo_eq_security`. **Works.** Returns daily `FH_OPEN_INT`, `FH_CHANGE_IN_OI`, `FH_CLOSING_PRICE`, `FH_UNDERLYING_VALUE`, `FH_MARKET_LOT`. `get_futures_oi_history()` powers the deep-dive OI chart. Use `instrumentType=OPTSTK&optionType=CE/PE&strikePrice=` for option OI. NOTE: near-month OI inflates ~10 sessions before/after rollover, so trend reads use a short (~5-session) window. (The `/api/historical/...` path 503s — must be `historicalOR`.) |
 
 ### NextApi gateway (NEW — the big unlock, `nse_quote.py`)
 The current NSE website uses a newer gateway that DOES work from our warmed
@@ -246,6 +246,9 @@ trading works for any tradable symbol (not just hot-list names).
   live F&O/options snapshot, and a synthesized bias + levels + today's read.
   Discovered the working daily-history endpoint (`generateSecurityWiseHistorical
   Data`, capped ~70 trading days/req → fetched in chunks).
+- **Historical futures OI** (`get_futures_oi_history()` via `historicalOR/foCPV`):
+  real OI-over-time chart + lot size in the deep-dive; short-window OI/price read
+  to avoid rollover false signals.
 - **Column tooltips** (`COL_INFO` / `annotateInfo`): hover any header/metric for
   its meaning + up=good/bad guidance.
 - **Futures tab is now first + the default** landing tab.

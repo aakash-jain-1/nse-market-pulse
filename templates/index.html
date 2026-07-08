@@ -650,6 +650,9 @@
       "From low": "How far above the 90-day low (near 0% = support test / oversold).",
       "PCR": "Put-Call Ratio (put OI ÷ call OI). >1 = put-heavy (often supportive/bullish); <0.7 = call-heavy (often resistance/bearish).",
       "Max Pain": "Strike where option buyers lose the most — price often gravitates here near expiry.",
+      "Lot size": "Contracts trade in fixed lots. One lot = this many shares (the minimum F&O trade size).",
+      "Support": "Nearest level below price where buyers have historically stepped in (from structure + option OI).",
+      "Resistance": "Nearest level above price where sellers have historically capped moves.",
     };
 
     function annotateInfo(root) {
@@ -1415,6 +1418,26 @@
       </svg>`;
     }
 
+    function ddOiChart(hist, w = 840, h = 170) {
+      const ois = hist.map(p => p.oi).filter(v => v != null);
+      if (ois.length < 2) return `<div class="chart-note">Not enough OI history.</div>`;
+      const min = Math.min(...ois), max = Math.max(...ois), rng = (max - min) || 1;
+      const n = hist.length;
+      const x = i => (i / (n - 1)) * w;
+      const y = v => 12 + (1 - (v - min) / rng) * (h - 42);
+      const coords = hist.map((p, i) => `${x(i).toFixed(1)},${y(p.oi).toFixed(1)}`).join(" ");
+      const up = ois[ois.length - 1] >= ois[0];
+      const color = "#e0a90b"; // OI up/down isn't inherently good/bad → neutral amber
+      const area = `0,${h - 18} ${coords} ${w},${h - 18}`;
+      return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <polygon points="${area}" fill="${color}" opacity="0.08"/>
+        <polyline fill="none" stroke="${color}" stroke-width="1.8" points="${coords}"/>
+        <text x="4" y="12" fill="#8b98a9" font-size="11">${fmtNum(Math.round(max))}</text>
+        <text x="4" y="${h-22}" fill="#8b98a9" font-size="11">${fmtNum(Math.round(min))}</text>
+        <text x="4" y="${h-4}" fill="#8b98a9" font-size="10">${hist[0].date||""} → ${hist[n-1].date||""} · open interest ${up?"rising":"falling"}</text>
+      </svg>`;
+    }
+
     function renderDeepDive(d) {
       const s = d.stats, a = d.analysis, dv = d.derivatives, o = d.options;
       const pos = v => v == null ? "—" : `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v}%</span>`;
@@ -1443,6 +1466,8 @@
           ${card("Fut LTP", dv.ltp==null?"—":"₹"+fmtPrice(dv.ltp))}
           ${card("Basis %", pos(dv.basisPct))}
           ${card("OI", fmtNum(dv.oi))}
+          ${card("Lot size", d.lotSize==null?"—":fmtNum(d.lotSize))}
+          ${s.oiPriceRead ? card("OI read ("+s.oiTrendDays+"d)", `<span class="badge ${['Long buildup','Short covering'].includes(s.oiPriceRead)?'buildup':'short'}">${s.oiPriceRead}</span>`) : ""}
           ${card("Signal", `<span class="badge ${cls}">${dv.signal||"—"}</span>`)}
         </div>`;
       }
@@ -1476,6 +1501,10 @@
 
         <div class="dd-section-title">Price &amp; volume (last ${d.series.length} sessions)</div>
         <div class="chart-box">${ddChart(d.series)}</div>
+
+        ${d.oiHistory && d.oiHistory.length > 1 ? `
+        <div class="dd-section-title">Futures open interest — near contract${dv&&dv.expiry?` (exp ${dv.expiry})`:""}</div>
+        <div class="chart-box">${ddOiChart(d.oiHistory)}</div>` : ""}
 
         <div class="dd-section-title">Key stats</div>
         <div class="metrics">${statsHtml}</div>

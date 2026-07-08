@@ -705,6 +705,65 @@ def get_stock_history(symbol, chunks=3, chunk_days=80):
     return out
 
 
+_focpv_cache = {}
+
+
+def get_futures_oi_history(symbol, expiry, calendar_days=55):
+    """
+    Daily futures OI history for one contract via NSE's historicalOR/foCPV
+    endpoint (the working historical-derivatives feed; needs the
+    /report-detail/fo_eq_security referer and an UPPERCASE expiry like
+    '28-JUL-2026'). Returns ascending [{date, close, spot, oi, changeOi,
+    volume, lot}]. Cached ~15 min.
+    """
+    from datetime import timedelta, datetime as _dt
+    symbol = symbol.upper().strip()
+    if not expiry:
+        return []
+    exp = expiry.upper()
+    key = (symbol, exp, calendar_days)
+    hit = _focpv_cache.get(key)
+    if hit and (time.time() - hit[0]) < _HIST_TTL:
+        return hit[1]
+
+    to = datetime.now()
+    frm = to - timedelta(days=calendar_days)
+    f, t = frm.strftime("%d-%m-%Y"), to.strftime("%d-%m-%Y")
+    url = (f"/api/historicalOR/foCPV?from={f}&to={t}&instrumentType=FUTSTK"
+           f"&symbol={symbol}&year={to.year}&expiryDate={exp}")
+    s = get_session()
+    ref = {"Referer": BASE + "/report-detail/fo_eq_security"}
+    try:
+        r = s.get(BASE + url, headers=ref, timeout=25)
+        r.raise_for_status()
+        rows = r.json().get("data", []) or []
+    except Exception:
+        rows = []
+
+    out = []
+    for d in rows:
+        out.append({
+            "date": d.get("FH_TIMESTAMP"),
+            "close": _num(d.get("FH_CLOSING_PRICE")),
+            "spot": _num(d.get("FH_UNDERLYING_VALUE")),
+            "oi": _num(d.get("FH_OPEN_INT")),
+            "changeOi": _num(d.get("FH_CHANGE_IN_OI")),
+            "volume": _num(d.get("FH_TOT_TRADED_QTY")),
+            "lot": _num(d.get("FH_MARKET_LOT")),
+        })
+
+    def _order(x):
+        try:
+            return _dt.strptime(x["date"], "%d-%b-%Y")
+        except Exception:
+            return _dt.min
+
+    out = [x for x in out if x["oi"] is not None]
+    out.sort(key=_order)
+    _focpv_cache[key] = (time.time(), out)
+    return out
+
+
 def _mean(xs):
     xs = [x for x in xs if x is not None]
     return sum(xs) / len(xs) if xs else None
@@ -797,6 +856,35 @@ def get_stock_deepdive(symbol):
     except Exception:
         pass
 
+    # Historical futures OI for the near contract (real OI-over-time now that
+    # historicalOR/foCPV works). Gives an OI trend + lot size.
+    oi_history = []
+    lot_size = None
+    if deriv and deriv.get("expiry"):
+        try:
+            oi_history = get_futures_oi_history(symbol, deriv["expiry"])
+            if oi_history:
+                lot_size = oi_history[-1].get("lot")
+        except Exception:
+            pass
+
+    # Recent OI trend (last ~5 sessions) vs price → buildup / unwinding read.
+    # Kept short so the Jun→Jul rollover (which mechanically inflates near-month
+    # OI as the contract becomes front-month) doesn't masquerade as conviction.
+    if len(oi_history) >= 4:
+        w = oi_history[-min(5, len(oi_history)):]
+        oi0, oi1 = w[0]["oi"], w[-1]["oi"]
+        px0, px1 = w[0]["close"], w[-1]["close"]
+        stats["oiChangePctRecent"] = round(_pct(oi1, oi0), 1) if oi0 else None
+        stats["oiTrendDays"] = len(w)
+        if oi0 and px0:
+            oi_up = oi1 >= oi0
+            px_up = px1 >= px0
+            stats["oiPriceRead"] = ("Long buildup" if oi_up and px_up else
+                                    "Short buildup" if oi_up and not px_up else
+                                    "Short covering" if not oi_up and px_up else
+                                    "Long unwinding")
+
     analysis = _analyze_stock(symbol, last, stats, deriv, options)
 
     # Trim series to ~90 points for the client chart.
@@ -807,6 +895,8 @@ def get_stock_deepdive(symbol):
     return {
         "symbol": symbol,
         "series": series,
+        "oiHistory": oi_history,
+        "lotSize": lot_size,
         "stats": stats,
         "derivatives": deriv,
         "options": options,
@@ -867,6 +957,14 @@ def _analyze_stock(symbol, last, stats, deriv, options):
         sig, kind = deriv.get("signal"), deriv.get("signalKind")
         notes.append(f"Futures: {sig} (basis {deriv.get('basisPct')}% )")
         score += 12 if kind == "buildup" else -8 if kind == "short" else 0
+
+    # Historical OI trend read (last ~10 sessions of the near contract).
+    read = stats.get("oiPriceRead")
+    if read:
+        chg = stats.get("oiChangePctRecent")
+        chg_txt = f"{chg:+.0f}% OI" if chg is not None else "OI"
+        notes.append(f"{read} over last {stats.get('oiTrendDays')} sessions ({chg_txt})")
+        score += 8 if read in ("Long buildup", "Short covering") else -8
 
     # Options positioning.
     if options and options.get("pcr") is not None:
