@@ -33,9 +33,30 @@ import strategies as strat
 
 IST = timezone(timedelta(hours=5, minutes=30))
 STATE_FILE = os.path.join(os.path.dirname(__file__), "sim_state.json")
-NOTIONAL = 100_000.0   # virtual rupees per idea (equal weighting)
+NOTIONAL = 100_000.0   # fallback notional when a trade has no usable stop
+RISK_PER_TRADE = 2_000.0   # fixed rupees risked per trade (position sizing unit)
+MAX_NOTIONAL = 500_000.0   # cap so a very tight stop can't blow up position size
 DEFAULT_MAX_SESSIONS = 3
 STATE_VERSION = 2
+
+
+def size_position(entry, stop):
+    """
+    Risk-based sizing: pick a quantity so that hitting the stop loses exactly
+    RISK_PER_TRADE rupees (per-share risk = |entry - stop|). Capped by
+    MAX_NOTIONAL. Falls back to flat NOTIONAL when there's no usable stop.
+    Returns (qty, notional). This is what makes each trade risk the same, so
+    equity curves / expectancy are comparable across strategies.
+    """
+    if not entry or entry <= 0:
+        return 0.0, 0.0
+    risk_per_share = abs(entry - stop) if stop else 0
+    if risk_per_share > 0:
+        qty = RISK_PER_TRADE / risk_per_share
+        qty = min(qty, MAX_NOTIONAL / entry)
+    else:
+        qty = NOTIONAL / entry
+    return qty, round(qty * entry, 2)
 
 _lock = threading.RLock()
 
@@ -136,6 +157,7 @@ def _open_trade(idea, strategy_id, regime_label):
     if not entry:
         return None
     direction = idea["direction"]
+    qty, notional = size_position(entry, idea.get("stop"))
     return {
         "id": f"{strategy_id}|{idea['symbol']}|{direction}|"
               f"{datetime.now(IST).strftime('%Y%m%d%H%M%S')}",
@@ -152,14 +174,16 @@ def _open_trade(idea, strategy_id, regime_label):
         "stopPct": idea.get("stopPct"),
         "targetPct": idea.get("targetPct"),
         "rr": idea.get("rr"),
-        "qty": NOTIONAL / entry,
-        "notional": NOTIONAL,
+        "qty": qty,
+        "notional": notional,
+        "risk": RISK_PER_TRADE,
         "status": "OPEN",
         "ltp": round(entry, 2),
         "mfePct": 0.0,
         "maePct": 0.0,
         "pnl": 0.0,
         "pnlPct": 0.0,
+        "rMultiple": 0.0,
         "openedAt": _now(),
         "openedDate": _today(),
         "regimeAtEntry": regime_label,
@@ -218,6 +242,7 @@ def _refresh_trade(state, t):
     t["pnl"] = round(t["qty"] * (px - t["entry"]) *
                      (1 if t["direction"] == "LONG" else -1), 2)
     t["pnlPct"] = round(_move_pct(t, px), 2)
+    t["rMultiple"] = round(t["pnl"] / t.get("risk", RISK_PER_TRADE), 2)
 
 
 def update(ctx=None):
@@ -474,6 +499,7 @@ def _scorecard(trades):
     n = len(closed)
     realized = sum(t["pnl"] for t in closed)
     unreal = sum(t["pnl"] for t in open_t)
+    total_r = sum(t.get("rMultiple") or 0 for t in closed)
     today = _today()
     today_closed = [t for t in closed if (t.get("closedAt") or "").startswith(today)]
     today_wins = sum(1 for t in today_closed if t["status"] == "TARGET")
@@ -487,6 +513,8 @@ def _scorecard(trades):
         "realizedPnl": round(realized, 2),
         "unrealizedPnl": round(unreal, 2),
         "totalPnl": round(realized + unreal, 2),
+        "totalR": round(total_r, 2),
+        "expectancyR": round(total_r / n, 2) if n else None,
         "todayClosed": len(today_closed),
         "todayWinRate": round(today_wins / len(today_closed) * 100, 1) if today_closed else None,
     }

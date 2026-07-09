@@ -371,7 +371,7 @@
         <label class="chk"><input type="checkbox" id="simAuto"> Auto (market hours)</label>
         <button id="simReset" class="sell" style="padding:6px 12px">Reset</button>
         <button id="simBacktest" style="padding:6px 12px">⏮ Backtest history</button>
-        <span style="color:var(--muted);font-size:11px">Each idea sized ₹1L · target=right, stop=wrong · multi-day hold (≤3 sessions).</span>
+        <span style="color:var(--muted);font-size:11px">Risk-based sizing: each trade risks ₹2,000 to its stop · target=right, stop=wrong · multi-day hold (≤3 sessions). Expectancy in R.</span>
       </div>
       <div id="scanFilters" class="scan-filters" style="display:none">
         <label>Direction
@@ -1360,6 +1360,7 @@
           <div class="strat-desc">${s.description}</div>
           <div class="strat-row"><span class="k">Win rate</span><span class="${wrCls}">${wr} <span style="color:var(--muted)">(${s.target}✓/${s.stop}✗)</span></span></div>
           <div class="strat-row"><span class="k">Open / Closed</span><span>${s.open} / ${s.closed}</span></div>
+          <div class="strat-row"><span class="k" title="Average profit per trade in units of risk (R). Positive = the strategy makes money after accounting for stop-loss risk. >0.2R is good.">Expectancy</span><span class="${(s.expectancyR||0)>=0?'pos':'neg'}">${s.expectancyR==null?"—":_sgn(s.expectancyR)+s.expectancyR+"R"}</span></div>
           <div class="strat-row"><span class="k">Total P&amp;L</span><span class="${pnlCls}">${_sgn(s.totalPnl)}₹${fmtNum(s.totalPnl)}</span></div>
           <div class="strat-row"><span class="k">Best for</span><span style="color:var(--muted)">${(s.regimeFit||[]).join(", ")}</span></div>
         </div>`;
@@ -1398,12 +1399,13 @@
           <td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.exitPrice)}</td>
           <td>${outcome(t.status)}</td>
           <td class="${t.pnlPct>=0?'pos':'neg'}">${_sgn(t.pnlPct)}${t.pnlPct}%</td>
+          <td class="${(t.rMultiple||0)>=0?'pos':'neg'}">${t.rMultiple==null?"—":_sgn(t.rMultiple)+t.rMultiple+"R"}</td>
           <td class="${t.pnl>=0?'pos':'neg'}">${_sgn(t.pnl)}₹${fmtNum(t.pnl)}</td>
           <td style="color:var(--muted);font-size:11px;white-space:nowrap">${simDT(t.openedAt)}</td>
           <td style="color:var(--muted);font-size:11px;white-space:nowrap">${simDT(t.closedAt)}</td></tr>`).join("");
       const closedTable = (det.closed || []).length
         ? `<h3 class="reco-colhead short" style="margin-top:14px">Closed (${sc.closed}) — outcomes</h3>
-           <table class="tbl"><thead><tr><th>Symbol</th><th>Dir</th><th>Conv</th><th>Regime@entry</th><th>Entry</th><th>Exit</th><th>Outcome</th><th>P&amp;L%</th><th>P&amp;L</th><th>Opened</th><th>Closed</th></tr></thead>
+           <table class="tbl"><thead><tr><th>Symbol</th><th>Dir</th><th>Conv</th><th>Regime@entry</th><th>Entry</th><th>Exit</th><th>Outcome</th><th>P&amp;L%</th><th title="Profit in units of risk. +1R = made what you risked; -1R = hit the stop.">R</th><th>P&amp;L</th><th>Opened</th><th>Closed</th></tr></thead>
            <tbody>${closedRows}</tbody></table>` : "";
 
       return `<div style="border-top:1px solid var(--border);margin:6px 0 4px;padding-top:12px">${head}${openTable}${closedTable}
@@ -1542,6 +1544,7 @@
           <td class="pos">${s.target}</td><td class="neg">${s.stop}</td><td style="color:var(--muted)">${s.expired}</td>
           <td class="${s.winRate>=50?'pos':'neg'}">${wr}</td>
           <td class="${(s.avgPnlPct||0)>=0?'pos':'neg'}">${s.avgPnlPct==null?"—":_sgn(s.avgPnlPct)+s.avgPnlPct+"%"}</td>
+          <td class="${(s.expectancyR||0)>=0?'pos':'neg'}">${s.expectancyR==null?"—":_sgn(s.expectancyR)+s.expectancyR+"R"}</td>
           <td class="${s.equity.final>=0?'pos':'neg'}">${_sgn(s.equity.final)}₹${fmtNum(s.equity.final)}</td>
           <td>${miniSpark(s.equity.points, 110, 26)}</td></tr>`;
       }).join("");
@@ -1551,7 +1554,7 @@
       return `<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:12px">
         <h3 class="reco-colhead">Offline backtest — strategies replayed over history</h3>
         <div class="chart-note">${bt.cycles} cycles across ${(bt.days||[]).length} day(s) · ${simDT(bt.range.from)} → ${simDT(bt.range.to)} · entry: ${bt.entryMode} · hold ≤${bt.maxSessions} sessions. Same generators as the live sim, replayed on archived context.</div>
-        <table class="tbl"><thead><tr><th>Strategy</th><th>Trades</th><th>Closed</th><th>✓Tgt</th><th>✗Stop</th><th>⏱Exp</th><th>Win%</th><th>Avg%/trade</th><th>Realized P&amp;L</th><th>Equity</th></tr></thead>
+        <table class="tbl"><thead><tr><th>Strategy</th><th>Trades</th><th>Closed</th><th>✓Tgt</th><th>✗Stop</th><th>⏱Exp</th><th>Win%</th><th>Avg%/trade</th><th title="Expectancy: average profit per trade in units of risk (R). >0 = edge.">Exp. R</th><th>Realized P&amp;L</th><th>Equity</th></tr></thead>
         <tbody>${rows}</tbody></table>
         ${lbGrid}</div>`;
     }

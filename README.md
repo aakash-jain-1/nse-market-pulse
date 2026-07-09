@@ -248,6 +248,10 @@ flowchart LR
 - **Entry modes:** `continuous` (take fresh ideas each cycle, deduped) or `open`
   (one snapshot near the open).
 - **Exit:** target / stop, else time-expire after `maxSessions` (default 3).
+- **Risk-based sizing:** every trade risks a fixed ₹2,000 to its stop (position
+  size = risk ÷ stop-distance, notional-capped), so results are reported in
+  **R-multiples** and **expectancy** (avg R/trade) — a fair comparison across
+  strategies regardless of price or stop width.
 - **Regime leaderboard:** aggregates every trade by *regime × strategy* to answer
   "which strategy wins on a recovery day vs a trend-up day", and picks a
   **strategy-of-the-day**.

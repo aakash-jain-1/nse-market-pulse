@@ -284,12 +284,20 @@ trading works for any tradable symbol (not just hot-list names).
     breadth (`nse.get_index_snapshot()` → `/api/allIndices`, cached 30s) + the
     prior session's move.
   - **Per-strategy sims** (`sim.py` v2, `sim_state.json` version-gated): `take()`
-    snapshots each strategy's ideas (flat ₹1L, dedup by symbol+direction);
+    snapshots each strategy's ideas (risk-based sizing via `size_position()`:
+    each trade risks a fixed ₹2,000 to its stop, notional-capped at ₹5L; dedup
+    one entry per symbol+direction per strategy per day);
     `update()` marks to market and closes on target/stop **or a multi-day
     horizon** (`maxSessions`, default 3, then time-expire); entry mode is
     **selectable** — `continuous` (auto-take all day) or `open` (one snapshot/
     day). `daily_rollup()` stores each day's regime + per-strategy win-rate/P&L →
     `daily_matrix()` powers a **day × strategy heatmap**.
+  - **Risk-based sizing + expectancy**: `sim.size_position(entry, stop)` sizes
+    every trade to a fixed ₹2,000 risk (per-share risk = |entry-stop|), so each
+    trade's outcome is measured in **R-multiples** (+1R = made what you risked,
+    -1R = hit the stop). Scorecards expose `expectancyR` (avg R/trade) — the
+    honest cross-strategy comparison — alongside rupee P&L. The backtester shares
+    the exact same sizing.
   - **Regime leaderboard + strategy-of-the-day** (`regime_leaderboard()`,
     `strategy_of_the_day()`, `equity_curves()` → `leaderboard_bundle()`):
     aggregates every trade by **regime-at-entry × strategy** (avg %/trade, win%,

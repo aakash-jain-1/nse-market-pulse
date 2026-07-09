@@ -19,9 +19,10 @@ Educational forward-/back-test of signal quality — NOT investment advice.
 """
 
 import db
+import sim
 import strategies as strat
 
-NOTIONAL = 100_000.0
+RISK_PER_TRADE = sim.RISK_PER_TRADE
 DEFAULT_MAX_SESSIONS = 3
 _REGIME_ORDER = ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"]
 
@@ -66,6 +67,7 @@ def _resolve(t, px, sessions):
         t["pnlPct"] = round(_move_pct(t["direction"], t["entry"], exit_px), 2)
         t["pnl"] = round(t["qty"] * (exit_px - t["entry"]) *
                          (1 if t["direction"] == "LONG" else -1), 2)
+        t["rMultiple"] = round(t["pnl"] / RISK_PER_TRADE, 2)
         return True
     return False
 
@@ -76,6 +78,7 @@ def _scorecard(trades):
     wins = sum(1 for t in closed if t["status"] == "TARGET")
     n = len(closed)
     realized = sum(t["pnl"] for t in closed)
+    total_r = sum(t.get("rMultiple") or 0 for t in closed)
     avg_pct = sum(t["pnlPct"] for t in closed) / n if n else None
     return {
         "trades": len(trades), "open": len(open_t), "closed": n,
@@ -84,6 +87,8 @@ def _scorecard(trades):
         "winRate": round(wins / n * 100, 1) if n else None,
         "avgPnlPct": round(avg_pct, 2) if avg_pct is not None else None,
         "realizedPnl": round(realized, 2),
+        "totalR": round(total_r, 2),
+        "expectancyR": round(total_r / n, 2) if n else None,
     }
 
 
@@ -176,6 +181,7 @@ def run(strategy_ids=None, since_day=None, max_sessions=DEFAULT_MAX_SESSIONS,
                     t["pnlPct"] = round(_move_pct(t["direction"], t["entry"], px), 2)
                     t["pnl"] = round(t["qty"] * (px - t["entry"]) *
                                      (1 if t["direction"] == "LONG" else -1), 2)
+                    t["rMultiple"] = round(t["pnl"] / RISK_PER_TRADE, 2)
 
             # 2) take fresh ideas (respect entry mode)
             if entry_mode == "open" and ts not in first_cycle_of_day:
@@ -192,13 +198,15 @@ def run(strategy_ids=None, since_day=None, max_sessions=DEFAULT_MAX_SESSIONS,
                 entry = idea.get("entry") or idea.get("ltp")
                 if key in taken or not entry:
                     continue
+                qty, _ = sim.size_position(entry, idea.get("stop"))
                 books[sid].append({
                     "symbol": idea["symbol"], "direction": idea["direction"],
                     "conviction": idea.get("conviction"), "entry": round(entry, 2),
                     "stop": idea.get("stop"), "target": idea.get("target"),
-                    "qty": NOTIONAL / entry, "maxSessions": max_sessions,
+                    "qty": qty, "maxSessions": max_sessions,
                     "status": "OPEN", "ltp": round(entry, 2), "pnl": 0.0, "pnlPct": 0.0,
-                    "openedTs": ts, "openedDay": day, "regimeAtEntry": c["regime"],
+                    "rMultiple": 0.0, "openedTs": ts, "openedDay": day,
+                    "regimeAtEntry": c["regime"],
                     "exitPrice": None, "closedTs": None, "closedDay": None,
                 })
                 taken.add(key)
@@ -219,7 +227,7 @@ def run(strategy_ids=None, since_day=None, max_sessions=DEFAULT_MAX_SESSIONS,
         "range": {"from": cycles[0]["ts"], "to": cycles[-1]["ts"]},
         "maxSessions": max_sessions,
         "entryMode": entry_mode,
-        "notional": NOTIONAL,
+        "riskPerTrade": RISK_PER_TRADE,
         "strategies": strat_out,
         "leaderboard": _leaderboard(books, ids, names),
     }
