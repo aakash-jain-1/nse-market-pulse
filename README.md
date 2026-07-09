@@ -97,7 +97,7 @@ flowchart LR
         APP["app.py<br/>thin JSON routes"]
         CORE["nse_client.py<br/>session + hot lists + scanner + ideas"]
         QUOTE["nse_quote.py<br/>quotes · charts · option chain · Greeks"]
-        STRAT["strategies.py<br/>7 generators + regime detector"]
+        STRAT["strategies.py<br/>9 generators + regime detector"]
         SIM["sim.py<br/>per-strategy forward-test"]
         BT["backtest_strategies.py<br/>offline replay"]
         PAPER["paper.py<br/>virtual portfolio"]
@@ -149,7 +149,7 @@ flowchart TB
         direction TB
         NC["nse_client.py<br/>• warmed requests.Session (TTL 300s)<br/>• hot lists → normalized dicts<br/>• get_scanner / _build_idea / get_demand_score<br/>• get_price (symbol→LTP map)"]
         NQ["nse_quote.py<br/>• NextApi gateway<br/>• quote / depth / intraday chart<br/>• option chain + Black-Scholes Greeks"]
-        ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime()<br/>• 7 generators"]
+        ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime()<br/>• 9 generators"]
         SM["sim.py<br/>• per-strategy ledgers<br/>• take/update/summary<br/>• daily rollup + regime leaderboard"]
         BK["backtest_strategies.py<br/>• virtual-clock replay<br/>• scorecards + equity curves"]
         PP["paper.py<br/>• equity/futures/option fills<br/>• MTM P&L"]
@@ -207,7 +207,7 @@ sequenceDiagram
 The **Sim** tab turns the Ideas engine into a **library of strategies**, each
 forward-tested in parallel and compared against the day's **market regime**.
 
-**The 7 strategies** (`strategies.py`):
+**The 9 strategies** (`strategies.py`):
 
 | id | Name | Edge |
 |---|---|---|
@@ -216,8 +216,14 @@ forward-tested in parallel and compared against the day's **market regime**.
 | `meanrev` | Mean-Reversion Bounce | Buy oversold liquid names, fade over-extended spikes |
 | `vol_breakout` | Volume Breakout | ≥5× average-volume explosions in the move's direction |
 | `high52w` | 52-Week-High Momentum | Nearness to 52wH (George–Hwang anchoring edge) |
-| `vwap` | VWAP Trend | Price vs the institutional VWAP benchmark |
+| `vwap` | VWAP Trend | Price vs the day's cumulative VWAP benchmark |
 | `delivery` | Delivery% Accumulation | High delivery % = real conviction (accumulation/distribution) |
+| `orb` | Opening-Range Breakout | Break of the first 15-min range (09:15–09:30) with volume (minute candles) |
+| `ivwap` | Intraday VWAP Reclaim | True session VWAP from minute candles: hold above/reject below |
+
+> `orb` and `ivwap` need minute candles (`ctx["candles"]`), so they run in the
+> live forward-sim; they're inert in the offline backtest, which replays the
+> trimmed `context_log` (candles aren't archived).
 
 **Regime detection** classifies each day from NIFTY %change + advance/decline
 breadth + the prior session's move:
@@ -393,7 +399,7 @@ nse-market-pulse/
 ├── app.py                  # Flask server + JSON API (thin routes) — port 5055
 ├── nse_client.py           # NSE session mgmt + hot lists + scanner + ideas (CORE)
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
-├── strategies.py           # 7 strategy generators + market-regime detector
+├── strategies.py           # 9 strategy generators + market-regime detector
 ├── sim.py                  # Multi-strategy forward-tester + regime leaderboard
 ├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
 ├── backtest_strategies.py  # Offline backtester (replays strategies, OHLCV exits)

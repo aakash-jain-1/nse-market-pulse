@@ -86,6 +86,32 @@ def build_context(fno_only=False):
     except Exception:
         pass
     ctx["quotes"] = quotes
+
+    # Intraday 5-min OHLCV for the same candidate set — powers the candle-based
+    # strategies (Opening-Range Breakout, intraday VWAP). 5-min keeps payloads
+    # light while still capturing the opening range (09:15-09:30) and VWAP path.
+    # NOTE: candles are intentionally NOT stored in context_log (see
+    # snapshot_logger._trim_context), so these strategies run in the live
+    # forward-sim but are inert in the offline backtest.
+    candles = {}
+    try:
+        import concurrent.futures as cf
+        import nse_quote
+
+        def _c(s):
+            try:
+                d = nse_quote.get_ohlc(s, interval=5)
+                return s, (d.get("points") or []) if not d.get("error") else []
+            except Exception:
+                return s, []
+
+        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            for s, pts in ex.map(_c, cand):
+                if pts:
+                    candles[s] = pts
+    except Exception:
+        pass
+    ctx["candles"] = candles
     return ctx
 
 
@@ -417,6 +443,111 @@ def gen_delivery(ctx):
     return ideas
 
 
+def _min_of(p):
+    """Minute-of-day (IST) for a candle, via the baked-epoch convention."""
+    import intrabar
+    dt = intrabar.candle_dt(p["t"])
+    return dt.hour * 60 + dt.minute
+
+
+def gen_orb(ctx):
+    """
+    H — Opening-Range Breakout: the first 15 minutes (09:15-09:30) set the day's
+    opening range; a decisive break of that range, confirmed by volume, tends to
+    run. LONG on a break above the OR high, SHORT below the OR low. Stop at the
+    opposite end of the range, target = one range width projected (needs the
+    minute candles in ctx['candles'], so it's a live/forward-sim strategy).
+    """
+    ideas = []
+    OR_END = 9 * 60 + 30
+    for sym, pts in ctx.get("candles", {}).items():
+        if len(pts) < 4:
+            continue
+        orbars = [p for p in pts if p.get("h") is not None and _min_of(p) <= OR_END]
+        rest = [p for p in pts if _min_of(p) > OR_END and p.get("c") is not None]
+        if len(orbars) < 2 or not rest:
+            continue
+        orh = max(p["h"] for p in orbars)
+        orl = min(p["l"] for p in orbars if p.get("l") is not None)
+        if not orh or not orl or orh <= orl:
+            continue
+        rng = orh - orl
+        ltp = rest[-1]["c"]
+        if not ltp:
+            continue
+        # Volume confirmation: latest bar vs the opening-range average.
+        or_vol = sum(p.get("v") or 0 for p in orbars) / len(orbars) or 1
+        vmult = (rest[-1].get("v") or 0) / or_vol
+
+        if ltp > orh:
+            ext = (ltp - orh) / orh * 100
+            conv = 32 + min(ext * 25, 35) + min(vmult * 8, 25)
+            stop_pct = max(0.4, min((ltp - orl * 0.999) / ltp * 100, 3.0))
+            tgt_pct = max(stop_pct, rng / ltp * 100)
+            reasons = [f"Broke above opening range (OR {orl:.1f}-{orh:.1f})",
+                       f"{ext:.2f}% past the OR high",
+                       f"Vol {vmult:.1f}x the opening-range average"]
+            idea = _mk_idea(sym, "LONG", ltp, conv, reasons, stop_pct, tgt_pct,
+                            fno=_is_fno(sym))
+            if idea:
+                ideas.append(idea)
+        elif ltp < orl:
+            ext = (orl - ltp) / orl * 100
+            conv = 32 + min(ext * 25, 35) + min(vmult * 8, 25)
+            stop_pct = max(0.4, min((orh * 1.001 - ltp) / ltp * 100, 3.0))
+            tgt_pct = max(stop_pct, rng / ltp * 100)
+            reasons = [f"Broke below opening range (OR {orl:.1f}-{orh:.1f})",
+                       f"{ext:.2f}% past the OR low",
+                       f"Vol {vmult:.1f}x the opening-range average"]
+            idea = _mk_idea(sym, "SHORT", ltp, conv, reasons, stop_pct, tgt_pct,
+                            fno=_is_fno(sym))
+            if idea:
+                ideas.append(idea)
+    return ideas
+
+
+def gen_ivwap(ctx):
+    """
+    I — Intraday VWAP Reclaim: a TRUE session VWAP computed from the minute
+    candles (sum(typical*vol)/sum(vol)), unlike the quote's single cumulative
+    number used by the 'vwap' strategy. LONG when price sits above VWAP and the
+    last few candles are rising (holding the reclaim); SHORT below with falling
+    candles. Tight intraday 1:2.
+    """
+    ideas = []
+    for sym, pts in ctx.get("candles", {}).items():
+        usable = [p for p in pts if p.get("v") and None not in
+                  (p.get("h"), p.get("l"), p.get("c"))]
+        if len(usable) < 6:
+            continue
+        num = sum((p["h"] + p["l"] + p["c"]) / 3 * p["v"] for p in usable)
+        den = sum(p["v"] for p in usable)
+        if den <= 0:
+            continue
+        vwap = num / den
+        ltp = usable[-1]["c"]
+        if not ltp:
+            continue
+        dist = (ltp - vwap) / vwap * 100
+        closes = [p["c"] for p in usable[-4:]]
+        rising = closes[-1] > closes[0]
+        if dist > 0.15 and rising:
+            conv = 20 + min(dist * 10, 45) + 15
+            reasons = [f"Price {dist:+.2f}% above session VWAP {vwap:.1f}",
+                       "Holding above VWAP, last candles rising"]
+            idea = _mk_idea(sym, "LONG", ltp, conv, reasons, 1.0, 2.0, fno=_is_fno(sym))
+            if idea:
+                ideas.append(idea)
+        elif dist < -0.15 and not rising:
+            conv = 20 + min(abs(dist) * 10, 45) + 15
+            reasons = [f"Price {dist:+.2f}% below session VWAP {vwap:.1f}",
+                       "Rejected at VWAP, last candles falling"]
+            idea = _mk_idea(sym, "SHORT", ltp, conv, reasons, 1.0, 2.0, fno=_is_fno(sym))
+            if idea:
+                ideas.append(idea)
+    return ideas
+
+
 STRATEGIES = [
     {"id": "momentum", "name": "Multi-Signal Momentum",
      "description": "Go with today's move when confirmed by unusual volume + OI buildup + breadth (1:2 RR).",
@@ -439,6 +570,12 @@ STRATEGIES = [
     {"id": "delivery", "name": "Delivery% Accumulation",
      "description": "High delivery% = real conviction: up day = accumulation (LONG), down day = distribution (SHORT).",
      "regimeFit": ["Trend-Up", "Range"], "generate": gen_delivery},
+    {"id": "orb", "name": "Opening-Range Breakout",
+     "description": "Break of the first 15-min range (09:15-09:30) with volume: above OR high = LONG, below OR low = SHORT.",
+     "regimeFit": ["Trend-Up", "Trend-Down", "Mixed"], "generate": gen_orb},
+    {"id": "ivwap", "name": "Intraday VWAP Reclaim",
+     "description": "True session VWAP from minute candles: holding above + rising = LONG, rejected below + falling = SHORT.",
+     "regimeFit": ["Trend-Up", "Trend-Down"], "generate": gen_ivwap},
 ]
 
 STRATEGY_MAP = {s["id"]: s for s in STRATEGIES}

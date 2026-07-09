@@ -30,7 +30,7 @@ NSE/
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
 ├── nse_quote.py       # Per-stock quote/chart/depth (NextApi) + OHLCV candles (charting)
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
-├── strategies.py      # Strategy library (7 generators) + market-regime detector
+├── strategies.py      # Strategy library (9 generators) + market-regime detector
 ├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
 ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
 ├── backtest_strategies.py # Offline backtester: replays strategies, resolves on OHLCV
@@ -294,16 +294,21 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
 - **Multi-strategy Sim + regime-aware daily comparison** (`strategies.py` +
   `sim.py`, 🧪 Sim tab): the Sim now forward-tests **4 strategies in parallel**,
   each with its **own ledger**, so we can see which one fits which market day.
-  - **Strategies** (`strategies.py`, 7): `momentum` (the original multi-signal
+  - **Strategies** (`strategies.py`, 9): `momentum` (the original multi-signal
     engine), `oi_smart` (F&O OI positioning), `meanrev` (contrarian oversold
     bounce / fade), `vol_breakout` (≥5× volume explosions), `high52w`
     (nearness-to-52-week-high momentum, George-Hwang), `vwap` (price vs the
-    institutional VWAP benchmark), `delivery` (high delivery% = accumulation/
-    distribution). Each is `{id,name,description,regimeFit,generate(ctx)}`
-    returning ideas in `_build_idea` shape. `build_context()` fetches all live
-    lists ONCE — including a bounded, concurrent per-symbol quote fetch
-    (`ctx["quotes"]`, ~45 liquid names) that feeds VWAP / 52wH / delivery — and
-    every generator reuses it.
+    day's cumulative VWAP), `delivery` (high delivery% = accumulation/
+    distribution), `orb` (Opening-Range Breakout: break of the 09:15-09:30 range
+    with volume), `ivwap` (Intraday VWAP Reclaim: true session VWAP from minute
+    candles). Each is `{id,name,description,regimeFit,generate(ctx)}` returning
+    ideas in `_build_idea` shape. `build_context()` fetches all live lists ONCE —
+    including a bounded, concurrent per-symbol quote fetch (`ctx["quotes"]`, ~45
+    liquid names, feeds VWAP/52wH/delivery) AND 5-min candles for the same set
+    (`ctx["candles"]`, feeds orb/ivwap) — and every generator reuses it.
+    **`orb`/`ivwap` need `ctx["candles"]`, which is NOT archived in `context_log`
+    (`_trim_context`), so they run in the live forward-sim but are inert in the
+    offline backtest.**
   - **Regime detector** (`detect_regime`): tags each day Trend-Up / Trend-Down /
     Recovery / Pullback / Range / Mixed from NIFTY %change + advance-decline
     breadth (`nse.get_index_snapshot()` → `/api/allIndices`, cached 30s) + the
