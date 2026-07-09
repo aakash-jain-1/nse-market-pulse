@@ -36,7 +36,7 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (6 strategies)
 ├── test_intrabar.py   # Unit tests for the intrabar resolver
-├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD-bar cache)
+├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
@@ -399,6 +399,16 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     because ~8 months of history is already stored. `_cached_bars`/`_cached_oi_rows`
     are the read-through wrappers; `?refresh=1` (or the "force refresh" checkbox)
     bypasses the cache. `run()` reports `cache:{barsHit,barsFetched,ttlHours,store}`.
+    **Minute-accurate mode** (`?resolve=intrabar`, "minute-accurate" checkbox): a
+    second pass re-resolves every daily trade on REAL 1-min candles via
+    `intrabar.resolve` (true intraday path — which-came-first, wick timing, MFE/MAE)
+    instead of the daily high/low; entry stays at the signal-day close. Minute bars
+    are pulled once per symbol for the window (`_prefetch_minutes` → `nse_quote.get_ohlc`)
+    and cached in `db.min_bars` (PK symbol,t-ms; 12h TTL via `eod_meta` kind `min`).
+    Trades older than NSE's ~30-40d minute retention keep the daily resolution;
+    `run()` reports `resolve` + `resolved:{intrabar,daily}` + `cache.minCache`. In
+    practice it closely CONFIRMS the daily numbers here (stop/target 9% apart → ~0%
+    same-day both-touched), so it's a fidelity/validation toggle, not a rewrite.
   - **Intrabar resolution** (`intrabar.py`): the sims used to decide target/stop
     against a single LTP per cycle (60s live, 5-min backtest), which misses wicks
     and detects exits late. `intrabar.resolve(trade, bars, risk, max_sessions)`
@@ -419,7 +429,7 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     time-to-exit stats. On demand via `/api/ohlc/<sym>?from=&to=` (baked epochs);
     no storage — trades are within NSE's ~30-40 day 1-min retention.
   - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,performance,
-    backtest[?resolve=intrabar|ltp],backtest_daily[?days=&universe=&maxHold=],
+    backtest[?resolve=intrabar|ltp],backtest_daily[?days=&universe=&maxHold=&refresh=&resolve=daily|intrabar],
     regime,take,auto,mode,reset}`. Still SEPARATE from the manual paper account.
 - **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
   notional), long **and** short with netting/flip-through-zero, MTM on live

@@ -233,11 +233,13 @@ def api_sim_backtest():
 def api_sim_backtest_daily():
     """Daily-bar historical backtest over REAL NSE end-of-day history."""
     import backtest_daily as btd
+    resolve = request.args.get("resolve", "daily")
     return jsonify(btd.run(
         days=int(request.args.get("days", 30)),
         universe_size=int(request.args.get("universe", 40)),
         max_hold=int(request.args.get("maxHold", 5)),
         force=request.args.get("refresh") in ("1", "true", "yes"),
+        resolve="intrabar" if resolve == "intrabar" else "daily",
     ))
 
 

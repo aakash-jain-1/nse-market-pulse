@@ -142,6 +142,12 @@ def init():
                     symbol TEXT, kind TEXT, fetched_at TEXT, last_d TEXT, n INTEGER,
                     PRIMARY KEY (symbol, kind)
                 )""")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS min_bars (
+                    symbol TEXT, t INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL,
+                    PRIMARY KEY (symbol, t)
+                )""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_min_bars_sym ON min_bars(symbol)")
         _import_legacy_csv()
         _initialized = True
 
@@ -425,10 +431,13 @@ def eod_stats():
                       "MIN(d) a, MAX(d) z FROM eod_bars").fetchone()
         o = c.execute("SELECT COUNT(*) rows, COUNT(DISTINCT symbol) syms "
                       "FROM eod_oi").fetchone()
+        m = c.execute("SELECT COUNT(*) rows, COUNT(DISTINCT symbol) syms "
+                      "FROM min_bars").fetchone()
     return {
         "bars": {"rows": b["rows"] or 0, "symbols": b["syms"] or 0,
                  "from": b["a"], "to": b["z"]},
         "oi": {"rows": o["rows"] or 0, "symbols": o["syms"] or 0},
+        "min": {"rows": m["rows"] or 0, "symbols": m["syms"] or 0},
     }
 
 
@@ -437,6 +446,45 @@ def eod_clear():
         c.execute("DELETE FROM eod_bars")
         c.execute("DELETE FROM eod_oi")
         c.execute("DELETE FROM eod_meta")
+        c.execute("DELETE FROM min_bars")
+
+
+# ----------------------------------------------------------------------------
+# Minute-bar cache (1-min OHLCV for intrabar-accurate historical resolution)
+# ----------------------------------------------------------------------------
+def min_bars_get(symbol, from_t=None, to_t=None):
+    """Ascending 1-min candles {t,o,h,l,c,v} (t = ms) in the optional [from_t, to_t]."""
+    q, args = "SELECT t,o,h,l,c,v FROM min_bars WHERE symbol=?", [symbol.upper()]
+    if from_t is not None:
+        q += " AND t>=?"; args.append(int(from_t))
+    if to_t is not None:
+        q += " AND t<=?"; args.append(int(to_t))
+    q += " ORDER BY t"
+    with _conn() as c:
+        return [{"t": r["t"], "o": r["o"], "h": r["h"], "l": r["l"],
+                 "c": r["c"], "v": r["v"]} for r in c.execute(q, args)]
+
+
+def min_bars_put(symbol, points):
+    symbol = symbol.upper()
+    rows = [(symbol, int(p["t"]), _num_or_none(p.get("o")), _num_or_none(p.get("h")),
+             _num_or_none(p.get("l")), _num_or_none(p.get("c")), _num_or_none(p.get("v")))
+            for p in points if p.get("t") is not None]
+    if not rows:
+        return 0
+    with _write_lock, _conn() as c:
+        c.executemany(
+            "INSERT OR REPLACE INTO min_bars (symbol,t,o,h,l,c,v) "
+            "VALUES (?,?,?,?,?,?,?)", rows)
+    return len(rows)
+
+
+def min_bars_span(symbol):
+    """(min_t, max_t, count) for a symbol's cached minute bars."""
+    with _conn() as c:
+        r = c.execute("SELECT MIN(t) a, MAX(t) z, COUNT(*) n FROM min_bars "
+                      "WHERE symbol=?", (symbol.upper(),)).fetchone()
+    return (r["a"], r["z"], r["n"] or 0)
 
 
 # ----------------------------------------------------------------------------

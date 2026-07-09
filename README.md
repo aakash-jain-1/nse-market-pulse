@@ -290,6 +290,14 @@ flowchart LR
   `eod_oi`, 12h freshness TTL) stores the daily history: the first full sweep is
   ~3 min, then repeat runs and wider look-backs (60/90d) are near-instant with zero
   re-fetching. "Force refresh" re-pulls from NSE.
+  - **Minute-accurate mode** ("minute-accurate" checkbox / `resolve=intrabar`):
+    re-resolves each trade on **real 1-minute candles** (`intrabar.py`) so exits
+    follow the true intraday path — which-came-first, wick timing, MFE/MAE — rather
+    than the daily high/low. Minute bars are cached in `min_bars` (limited to NSE's
+    ~30–40 day retention; older trades fall back to daily). Reports how many trades
+    resolved on candles vs fell back. It typically **confirms** the daily numbers
+    (stop/target far enough apart that same-day both-touch is rare), so it's a
+    fidelity/validation toggle.
 - **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
   entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
 
@@ -359,6 +367,15 @@ erDiagram
         real oi
         real changeOi
     }
+    MIN_BARS {
+        text symbol PK
+        int t PK "epoch ms"
+        real o
+        real h
+        real l
+        real c
+        real v
+    }
 ```
 
 - `snapshots` — the demand/volume-gainers board, one row per symbol per snapshot.
@@ -376,6 +393,8 @@ erDiagram
   so they're kept forever; `eod_meta` tracks per-symbol fetch time for a 12h
   freshness TTL. This makes full-universe repeat runs and 60/90-day look-backs
   near-instant (no re-fetching NSE).
+- `min_bars` — cached **1-minute OHLCV** (keyed `(symbol, t)`, t in ms) powering
+  the daily backtest's minute-accurate mode; also 12h TTL via `eod_meta`.
 - WAL mode + indexes on `view/ts/symbol/day`. Legacy `snapshots.csv` / `iv_log.csv`
   are auto-imported on first run.
 
@@ -445,7 +464,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads |
 | `GET /api/sim/performance` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
-| `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1]` | Daily-bar historical backtest over real NSE EOD data (6 strategies); SQLite-cached, `refresh=1` re-pulls |
+| `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar]` | Daily-bar historical backtest over real NSE EOD (6 strategies); SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves exits on real 1-min candles |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |

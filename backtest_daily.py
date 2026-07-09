@@ -26,7 +26,9 @@ import concurrent.futures as cf
 from datetime import datetime, timedelta, timezone
 
 import db
+import intrabar
 import nse_client as nse
+import nse_quote
 from sim import RISK_PER_TRADE, size_position
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -186,6 +188,81 @@ def _cached_oi_rows(sym, expiry, force):
         db.eod_meta_set(sym, kind, _now(), rows[-1]["d"], len(rows))
         return rows, False
     return db.eod_oi_get(sym, expiry), False
+
+
+# ----------------------------------------------------------------------------
+# Intrabar (minute-accurate) historical resolution
+# ----------------------------------------------------------------------------
+def _baked_s(date_iso, hour=0, minute=0):
+    """Epoch-SECONDS for an IST wall-clock date/time, baked-as-UTC the way
+    charting.nseindia.com expects (see nse_quote._baked_epoch)."""
+    dt = datetime.strptime(date_iso, "%Y-%m-%d").replace(hour=hour, minute=minute)
+    return int(dt.replace(tzinfo=timezone.utc).timestamp())
+
+
+def _cached_minutes(sym, need_from_s, need_to_s, force):
+    """1-min candles for [need_from_s, need_to_s]: SQLite if fresh & covering the
+    lower bound, else fetch the window from NSE + upsert. (from_cache bool.)"""
+    lo_ms, hi_ms = need_from_s * 1000, need_to_s * 1000
+    if not force:
+        meta = db.eod_meta_get(sym, "min")
+        if meta and _fresh(meta.get("fetched_at")):
+            a, _z, n = db.min_bars_span(sym)
+            if n and a is not None and a <= lo_ms + 86400_000:   # lower bound covered
+                return db.min_bars_get(sym, lo_ms, hi_ms), True
+    try:
+        d = nse_quote.get_ohlc(sym, interval=1, from_ts=need_from_s, to_ts=need_to_s)
+        pts = (d.get("points") or []) if not d.get("error") else []
+    except Exception:
+        pts = []
+    if pts:
+        db.min_bars_put(sym, pts)
+        last_d = intrabar.candle_dt(pts[-1]["t"]).strftime("%Y-%m-%d")
+        db.eod_meta_set(sym, "min", _now(), last_d, len(pts))
+        return db.min_bars_get(sym, lo_ms, hi_ms), False
+    return db.min_bars_get(sym, lo_ms, hi_ms), False
+
+
+def _prefetch_minutes(symbols, need_from_s, need_to_s, force):
+    out, stats = {}, {"hit": 0, "fetched": 0}
+
+    def _one(sym):
+        return sym, _cached_minutes(sym, need_from_s, need_to_s, force)
+
+    with cf.ThreadPoolExecutor(max_workers=6) as pool:
+        for sym, (pts, hit) in pool.map(_one, symbols):
+            out[sym] = pts
+            stats["hit" if hit else "fetched"] += 1
+    return out, stats
+
+
+def _reresolve_intrabar(t, bars_min, max_hold, date_index):
+    """Re-resolve a daily trade on real minute candles, overwriting its outcome.
+    Entry stays at the signal day's close; exits use the true intraday path.
+    Returns 'intrabar' if resolved on candles, else 'daily' (kept as-is)."""
+    if not bars_min:
+        return "daily"
+    view = {
+        "direction": t["direction"], "entry": t["entry"], "stop": t["stop"],
+        "target": t["target"], "qty": t["qty"],
+        "openedTs": t["openedDate"] + " 15:30:00",   # entered at the signal-day close
+    }
+    status = intrabar.resolve(view, bars_min, RISK_PER_TRADE, max_sessions=max_hold)
+    if status in (None, "OPEN"):
+        return "daily"   # candles ran out mid-horizon → trust the daily resolution
+    t["status"] = status
+    t["exitPrice"] = view.get("exitPrice")
+    t["pnl"] = view.get("pnl")
+    t["pnlPct"] = view.get("pnlPct")
+    t["rMultiple"] = view.get("rMultiple")
+    t["mfePct"] = view.get("mfePct")
+    t["maePct"] = view.get("maePct")
+    t["minsToExit"] = view.get("minsToExit")
+    cd = view.get("closedDay")
+    t["closedDate"] = cd
+    if cd and cd in date_index:
+        t["holdDays"] = date_index[cd] - t["openIdx"]
+    return "intrabar"
 
 
 def _universe(size):
@@ -377,6 +454,7 @@ def _median(xs):
 def _scorecard(trades):
     closed = [t for t in trades if t["status"] in ("TARGET", "STOP", "EXPIRED")]
     wins = [t for t in closed if t["status"] == "TARGET"]
+    profitable = [t for t in closed if (t["pnl"] or 0) > 0]   # ended positive
     n = len(closed)
     total_r = sum(t["rMultiple"] for t in closed)
     realized = sum(t["pnl"] for t in closed)
@@ -392,6 +470,8 @@ def _scorecard(trades):
         "target": len(wins), "stop": sum(1 for t in closed if t["status"] == "STOP"),
         "expired": sum(1 for t in closed if t["status"] == "EXPIRED"),
         "winRate": round(len(wins) / n * 100, 1) if n else None,
+        "profit": len(profitable),
+        "profitRate": round(len(profitable) / n * 100, 1) if n else None,
         "avgPnlPct": round(avg_pct, 2) if avg_pct is not None else None,
         "totalR": round(total_r, 2), "expectancyR": round(total_r / n, 2) if n else None,
         "realizedPnl": round(realized, 2),
@@ -401,7 +481,7 @@ def _scorecard(trades):
 
 
 def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
-        include_oi=True, force=False):
+        include_oi=True, force=False, resolve="daily"):
     db.init()
     days = max(5, min(int(days), 120))
     universe_size = max(5, min(int(universe_size), 260))
@@ -445,6 +525,27 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
             if t["openedDate"] < first_iso:
                 first_iso = t["openedDate"]
 
+    # Optional pass: re-resolve each daily trade on REAL 1-min candles so the
+    # exit uses the true intraday path (which-came-first, wick timing, MFE/MAE)
+    # instead of the daily high/low. Trades whose window predates NSE's ~30-40d
+    # minute retention silently keep the daily resolution.
+    resolved = {"intrabar": 0, "daily": 0}
+    min_cache = None
+    if resolve == "intrabar":
+        need_from_s = _baked_s(first_iso)
+        to_dt = last_dt + timedelta(days=max_hold + 2)
+        need_to_s = min(_baked_s(to_dt.strftime("%Y-%m-%d"), 23, 59),
+                        nse_quote._baked_now())
+        syms = sorted({t["symbol"] for ts in by_strat.values() for t in ts})
+        minutes, min_cache = _prefetch_minutes(syms, need_from_s, need_to_s, force)
+        date_index = {sym: {b["d"]: i for i, b in enumerate(bars)}
+                      for sym, bars in hist.items()}
+        for ts in by_strat.values():
+            for t in ts:
+                tag = _reresolve_intrabar(t, minutes.get(t["symbol"]) or [],
+                                          max_hold, date_index.get(t["symbol"], {}))
+                resolved[tag] += 1
+
     rows = []
     all_trades = []
     for s in STRATS:
@@ -462,6 +563,8 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
     bars_counts = [len(b) for b in hist.values()]
     return {
         "mode": "daily",
+        "resolve": resolve,
+        "resolved": resolved,
         "days": days,
         "range": {"from": cutoff_iso, "to": last_iso, "firstTrade": first_iso},
         "maxHold": max_hold,
@@ -471,7 +574,8 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
         "barsMedian": _median(bars_counts),
         "oiExpiry": expiry,
         "oiNames": sum(1 for v in ois.values() if v),
-        "cache": {**cache, "ttlHours": CACHE_TTL_HOURS, "store": db.eod_stats()},
+        "cache": {**cache, "ttlHours": CACHE_TTL_HOURS, "minCache": min_cache,
+                  "store": db.eod_stats()},
         "strategies": rows,
         "totals": _scorecard(all_trades),
         "notCovered": NOT_COVERED,
