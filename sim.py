@@ -73,7 +73,7 @@ def _today():
 def _default_state():
     return {
         "version": STATE_VERSION,
-        "auto": False,
+        "auto": True,   # sims run automatically on startup (no user input needed)
         "entryMode": "continuous",
         "maxSessions": DEFAULT_MAX_SESSIONS,
         "strategies": {s["id"]: {"trades": []} for s in strat.STRATEGIES},
@@ -99,7 +99,7 @@ def _load():
         st.setdefault("lastAutoDate", {})
         st.setdefault("entryMode", "continuous")
         st.setdefault("maxSessions", DEFAULT_MAX_SESSIONS)
-        st.setdefault("auto", False)
+        st.setdefault("auto", True)
         return st
     except Exception:
         return _default_state()

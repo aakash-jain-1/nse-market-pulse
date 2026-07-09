@@ -607,7 +607,7 @@
       { key: "recos",      label: "💡 Ideas", title: "Trade Ideas — Long / Short",
         desc: "Ranked LONG & SHORT setups derived from live signals (momentum, OI buildup, unusual volume, money flow), each with a conviction score, reasons and an entry/stop/target plan. Signal summary — NOT investment advice." },
       { key: "sim",        label: "🧪 Sim", title: "Recommendation Simulator — did the ideas work?",
-        desc: "Forward-test of the Ideas engine: 'buy' the recommendations at their entry and track each against its own target/stop. Hit target = right, hit stop = wrong. Take ideas manually, or turn on Auto to snapshot fresh ideas every minute during market hours. Educational — NOT advice." },
+        desc: "Forward-test of the Ideas engine: 'buy' the recommendations at their entry and track each against its own target/stop. Hit target = right, hit stop = wrong. Runs automatically from startup — Auto snapshots fresh ideas every minute during market hours (you can also Take manually). Educational — NOT advice." },
       { key: "scanner",    label: "🔎 Scanner", title: "In-Demand Scanner",
         desc: "One ranked board combining volume spikes, money flow, momentum & OI buildup. Use the filters to hunt for exactly the setup you want." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
@@ -1825,7 +1825,7 @@
       const pick = renderSimPick(sum.pick);
       const cards = renderSimCards(sum);
       const hint = anyTrades ? "" :
-        `<div class="loading">No simulated trades yet. Click <b>“Take all strategies ▶”</b> to snapshot every strategy's live ideas, or turn on <b>Auto</b>. Each strategy is then tracked independently so you can compare — day by day — which one fits the regime.</div>`;
+        `<div class="loading"><b>Auto is on</b> — every strategy snapshots its live ideas automatically each minute during market hours (09:15–15:30 IST); no action needed. Each is tracked independently so you can compare, day by day, which one fits the regime. (Outside market hours there are no live prices yet.) You can also <b>“Take all strategies ▶”</b> now.</div>`;
       const detail = sum.detail ? renderSimTrades(sum.detail)
         : `<div class="chart-note" style="margin:2px 0 6px">Click a strategy card above to see its open &amp; closed trades.</div>`;
       return banner + pick + cards + hint + detail + renderSimLeaderboard(lb) +

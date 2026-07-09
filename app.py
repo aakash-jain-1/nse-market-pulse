@@ -16,6 +16,7 @@ origin and hijacks requests. A fresh port sidesteps that stale cache.
 import os
 
 from flask import Flask, jsonify, render_template, request, send_file
+from werkzeug.exceptions import HTTPException
 
 import nse_client as nse
 import nse_quote
@@ -316,8 +317,19 @@ def api_log_download():
     return send_file(out, as_attachment=True, download_name="nse_snapshots.csv")
 
 
+@app.route("/favicon.ico")
+def favicon():
+    # No icon to serve; 204 avoids a 404/500 and the browser console noise.
+    return ("", 204)
+
+
 @app.errorhandler(Exception)
 def handle_error(e):
+    # Preserve real HTTP status codes (404/405/...) instead of masking every
+    # error as 500 — otherwise a missing route like /favicon.ico shows up as a
+    # 500 in the console.
+    if isinstance(e, HTTPException):
+        return jsonify({"error": e.description}), e.code
     return jsonify({"error": str(e)}), 500
 
 
@@ -329,5 +341,9 @@ if __name__ == "__main__":
     # background logger there to avoid two loggers writing the same file.
     import os
     if not DEBUG or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        # Sims run automatically from startup — force auto ON regardless of any
+        # persisted state, so it never waits for the user to flip the toggle.
+        import sim
+        sim.set_auto(True)
         snaplog.start()
     app.run(debug=DEBUG, port=5055)
