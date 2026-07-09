@@ -1376,7 +1376,7 @@
         const toT = t.targetPct || 1, toS = Math.abs(t.stopPct || 1);
         const prog = t.pnlPct >= 0 ? Math.min(100, t.pnlPct / toT * 100) : Math.max(-100, t.pnlPct / toS * 100);
         return `<tr data-sym="${t.symbol}" style="cursor:pointer">
-          <td class="sym">${t.symbol}</td><td>${dirTag(t)}</td><td>${t.conviction ?? "—"}</td>
+          <td class="sym">${t.symbol} ${drillBtn(t.symbol)}</td><td>${dirTag(t)}</td><td>${t.conviction ?? "—"}</td>
           <td style="color:var(--muted);font-size:11px;white-space:nowrap">${simDT(t.openedAt)}</td>
           <td style="color:var(--muted);font-size:11px">${t.regimeAtEntry||""}</td>
           <td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.ltp)}</td>
@@ -1393,7 +1393,7 @@
         : s === "STOP" ? `<span class="neg">✗ STOP</span>`
         : `<span style="color:var(--muted)">⏱ EXPIRED</span>`;
       const closedRows = (det.closed || []).map(t => `<tr data-sym="${t.symbol}" style="cursor:pointer">
-          <td class="sym">${t.symbol}</td><td>${dirTag(t)}</td><td>${t.conviction ?? "—"}</td>
+          <td class="sym">${t.symbol} ${drillBtn(t.symbol)}</td><td>${dirTag(t)}</td><td>${t.conviction ?? "—"}</td>
           <td style="color:var(--muted);font-size:11px">${t.regimeAtEntry||""}</td>
           <td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.exitPrice)}</td>
           <td>${outcome(t.status)}</td>
