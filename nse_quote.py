@@ -201,6 +201,109 @@ def get_ltp(symbol):
         return None
 
 
+# ----------------------------------------------------------------------------
+# Real OHLCV candles via NSE's charting backend (charting.nseindia.com)
+# ----------------------------------------------------------------------------
+# Unlike the NextApi chart (price-only), this feed returns proper OHLC + VOLUME.
+# It's keyed by an internal "scripcode" token, which we resolve once per symbol
+# via the symbol-search endpoint and cache (tokens are static). Requests are
+# on-demand (opening a chart) and session-scoped, so payloads are ~20 KB.
+_CHARTING = "https://charting.nseindia.com/v1"
+_CHARTING_REF = {"Referer": "https://charting.nseindia.com/", "Accept": "*/*"}
+_token_cache = {}    # symbol -> scripcode (str)
+_OHLC_TTL = 30       # seconds
+
+
+def _charting_get(path):
+    """GET a charting.nseindia.com path (reusing the warmed session; retry once)."""
+    url = _CHARTING + path
+    try:
+        r = nse.get_session().get(url, headers=_CHARTING_REF, timeout=20)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        r = nse.get_session(force=True).get(url, headers=_CHARTING_REF, timeout=20)
+        r.raise_for_status()
+        return r.json()
+
+
+def get_token(symbol, series="EQ"):
+    """Resolve symbol -> charting scripcode (token), cached. None if not found."""
+    symbol = symbol.upper().strip()
+    want = f"{symbol}-{series}"
+    if symbol in _token_cache:
+        return _token_cache[symbol]
+    try:
+        data = _charting_get(
+            f"/exchanges/symbolsDynamic?symbol={symbol}&exchange=NSE"
+        ).get("data", []) or []
+    except Exception:
+        return None
+    # Prefer the exact "<SYM>-EQ" equity row, else any "<SYM>-" match.
+    row = next((r for r in data if r.get("symbol") == want), None)
+    if not row:
+        row = next((r for r in data if (r.get("symbol") or "").startswith(symbol + "-")), None)
+    token = row.get("scripcode") if row else None
+    if token:
+        _token_cache[symbol] = token
+    return token
+
+
+def _ist_session_start_epoch():
+    import datetime as _dt
+    ist = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+    now = _dt.datetime.now(ist)
+    return int(now.replace(hour=9, minute=15, second=0, microsecond=0).timestamp())
+
+
+def get_ohlc(symbol, interval=1, chart_type="I", days=None):
+    """
+    Real OHLC + volume candles.
+      interval   : minutes per candle (1/5/15/…) for intraday
+      chart_type : 'I' intraday (default) or 'D' daily
+      days       : lookback window; intraday defaults to the current session,
+                   daily defaults to ~180 days.
+    Returns {symbol, token, interval, chartType, points:[{t,o,h,l,c,v}]}.
+    """
+    symbol = symbol.upper().strip()
+    key = ("ohlc", symbol, interval, chart_type, days)
+    hit = _cache.get(key)
+    if hit and (time.time() - hit[0]) < _OHLC_TTL:
+        return hit[1]
+
+    token = get_token(symbol)
+    now = int(time.time())
+    if chart_type == "D":
+        frm = now - (days or 180) * 86400
+    elif days:
+        frm = now - days * 86400
+    else:
+        frm = _ist_session_start_epoch()
+
+    out = {"symbol": symbol, "token": token, "interval": interval,
+           "chartType": chart_type, "points": []}
+    if not token:
+        out["error"] = "token-not-found"
+        return out
+
+    try:
+        data = _charting_get(
+            f"/charts/symbolHistoricalData?token={token}&fromDate={frm}&toDate={now}"
+            f"&symbol={symbol}-EQ&symbolType=Equity&chartType={chart_type}"
+            f"&timeInterval={interval}"
+        )
+        for c in data.get("data", []) or []:
+            out["points"].append({
+                "t": c.get("time"), "o": _num(c.get("open")), "h": _num(c.get("high")),
+                "l": _num(c.get("low")), "c": _num(c.get("close")),
+                "v": _num(c.get("volume")),
+            })
+    except Exception as e:
+        out["error"] = str(e)
+    _cache[key] = (time.time(), out)
+    return out
+
+
 def _oc_referer(symbol):
     return {"Referer": nse.BASE + "/get-quote/optionchain/" + symbol}
 

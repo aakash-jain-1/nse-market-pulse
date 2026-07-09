@@ -121,7 +121,7 @@ session, **as long as we send a stock-specific Referer**
 | Purpose | functionName | Notes |
 |---------|--------------|-------|
 | Full quote + 5-level market depth | `getSymbolData&marketType=N&series=EQ&symbol=X` | LTP in `tradeInfo.lastPrice`; change/open/high/low in `metaData`; depth in `orderBook`; delivery % in `tradeInfo.deliveryToTradedQuantity` |
-| Real intraday chart | `getSymbolChartData&symbol=<X>EQN&days=1D` | `grapthData` = `[[ts_ms, price, phase, ...], ...]` (400+ pts/day) |
+| Real intraday chart (price-only) | `getSymbolChartData&symbol=<X>EQN&days=1D` | `grapthData` = `[[ts_ms, price, phase, ...], ...]` (400+ pts/day). **No volume** — superseded by the OHLCV feed below for the modal chart; kept as fallback. |
 | Company meta | `getMetaData&symbol=X` | |
 | Option expiries/strikes | `getOptionChainDropdown&symbol=X` | `expiryDates`, `strikePrice` lists |
 | Per-symbol futures + options | `getSymbolDerivativesData&symbol=X` | `data[]` of contracts; futures = `instrumentType` FUTSTK/FUTIDX (has lastPrice, OI, chgOI, volume, underlyingValue). Covers the WHOLE F&O universe, unlike the 20-row `stock_fut` feed. Referer: `/get-quote/derivatives?symbol=X`. |
@@ -131,6 +131,28 @@ session, **as long as we send a stock-specific Referer**
 This finally gives real charts, per-stock quotes for ANY symbol, and market
 depth. `nse_client.get_price()` falls back to `nse_quote.get_ltp()` so paper
 trading works for any tradable symbol (not just hot-list names).
+
+### Real OHLCV candles (`charting.nseindia.com`) — `nse_quote.get_ohlc()`
+Separate host that serves proper **OHLC + VOLUME** candles (the NextApi chart is
+price-only). Keyed by an internal `scripcode` **token**, resolved once per symbol
+and cached (`get_token()`), then fetched on demand and cached ~30s.
+
+| Purpose | Endpoint |
+|---------|----------|
+| Symbol → token lookup | `/v1/exchanges/symbolsDynamic?symbol=<SYM>&exchange=NSE` → match `data[].symbol == "<SYM>-EQ"`, take `scripcode` |
+| OHLCV candles | `/v1/charts/symbolHistoricalData?token=<t>&fromDate=<epoch_s>&toDate=<epoch_s>&symbol=<SYM>-EQ&symbolType=Equity&chartType=<I\|D>&timeInterval=<min>` |
+
+- `chartType=I` = intraday (`timeInterval` = 1/5/15 min); `chartType=D` = daily.
+- `fromDate=0` returns everything NSE retains (~30–40 days of 1-min). Intraday
+  default = current session start (09:15 IST); daily default = ~120–180 days.
+- **We do NOT store these ourselves** — NSE is the historical store; we query the
+  window we need on demand. (Our SQLite `db.py` only persists things NSE does NOT
+  keep: composite scores, hot-list rankings, strategy context, ATM IV.)
+- Uses `Referer: https://charting.nseindia.com/`; reuses the warmed session.
+- Exposed at `GET /api/ohlc/<symbol>?interval=<n>&type=<I|D>&days=<n>`.
+- Frontend: detail-modal chart is now **candlesticks + a volume histogram** with
+  a 1m/5m/15m/1D selector and OHLCV+time hover; falls back to the price-only line
+  chart when a symbol has no token (e.g. renamed/non-equity).
 
 **Note on symbol renames:** some underlyings changed tickers (e.g. TATAMOTORS →
 `TMPV`); use the current F&O symbol. Non-F&O symbols return "no expiries".
@@ -206,10 +228,11 @@ trading works for any tradable symbol (not just hot-list names).
     `data/iv_log.csv`; `snapshot_logger.iv_rank()` (`/api/iv/rank/<sym>`) turns
     that into an IV rank/percentile. Meaningful once history accumulates.
 - **Live sparklines** per row (client-side, accumulate across refreshes).
-- **Stock detail modal** on row click — now shows the **real NSE intraday
-  chart** (`getSymbolChartData`, with prev-close line), **5-level market depth**
-  (`orderBook`), and enriched metrics (delivery %, VWAP, day/52W range). Falls
-  back to the session sparkline when the real chart isn't available.
+- **Stock detail modal** on row click — shows a **real OHLCV candlestick chart
+  with a volume histogram** (`charting.nseindia.com`, 1m/5m/15m/1D selector,
+  OHLCV+time hover), **5-level market depth** (`orderBook`), and enriched metrics
+  (delivery %, VWAP, day/52W range). Falls back to the price-only line chart
+  (`getSymbolChartData`) and then the session sparkline when unavailable.
 - **Alerts** — desktop notification + sound beep when a stock crosses a
   configurable volume multiple (20x/50x/100x) with a rising price.
 - **CSV export** — client-side download of the current view (⬇ CSV button).
@@ -346,6 +369,8 @@ trading works for any tradable symbol (not just hot-list names).
   LONG/SHORT setups with conviction score, reasons and entry/stop/target.
 - **Futures Momentum panel**: on the Futures tab, two columns ranking the
   strongest bullish/bearish movers (price move × OI activity), client-side.
+- **OHLCV candlesticks + volume**: detail-modal chart is real candles with a
+  volume histogram (1m/5m/15m/1D), hover shows O/H/L/C/%chg/volume/time.
 - **Intraday chart crosshair**: hover the detail-modal chart for price/%chg/time
   tooltip. Fixed the +5:30h label bug (NSE bakes IST into the epoch as UTC — read
   UTC components via `istTime()` instead of `toLocaleTimeString`).

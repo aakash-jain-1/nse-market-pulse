@@ -145,6 +145,10 @@
     .chart-box h4 { margin: 0 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
     .chart-note { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
     #mChart { position: relative; cursor: crosshair; }
+    .ivbtn { background:var(--panel2,#1b2431); color:var(--muted); border:1px solid var(--border,#2a3446);
+      border-radius:6px; padding:2px 9px; font-size:11px; cursor:pointer; }
+    .ivbtn:hover { color:var(--fg,#e6edf3); }
+    .ivbtn.on { background:var(--accent,#3b82f6); color:#fff; border-color:transparent; }
     .chart-cross { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,0.35); pointer-events: none; transform: translateX(-0.5px); }
     .chart-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); pointer-events: none; transform: translate(-50%,-50%); box-shadow: 0 0 6px rgba(0,0,0,0.5); }
     .chart-tip { position: absolute; pointer-events: none; background: rgba(12,16,24,0.95); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 11px; line-height: 1.35; white-space: nowrap; z-index: 5; }
@@ -419,7 +423,15 @@
       <div class="modal-body">
         <div class="metrics" id="mMetrics"></div>
         <div class="chart-box">
-          <h4 id="mChartTitle">Intraday price</h4>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+            <h4 id="mChartTitle" style="margin:0">Intraday</h4>
+            <div id="mChartCtrls" style="display:flex;gap:4px">
+              <button class="ivbtn" data-iv="1">1m</button>
+              <button class="ivbtn" data-iv="5">5m</button>
+              <button class="ivbtn" data-iv="15">15m</button>
+              <button class="ivbtn" data-iv="D">1D</button>
+            </div>
+          </div>
           <div id="mChart"></div>
           <div class="chart-note" id="mNote"></div>
         </div>
@@ -975,11 +987,12 @@
 
       // Show the session sparkline immediately, then upgrade to the real
       // intraday chart + market depth from NSE's per-stock endpoints.
-      document.getElementById("mChartTitle").textContent = "Intraday price";
+      document.getElementById("mChartTitle").textContent = "Intraday";
       document.getElementById("mChart").innerHTML = bigChart(sym);
-      document.getElementById("mNote").textContent = "Loading real intraday chart…";
+      document.getElementById("mNote").textContent = "Loading real OHLCV chart…";
       document.getElementById("mDepth").innerHTML = "";
       document.getElementById("overlay").classList.add("show");
+      wireChartCtrls(sym);
       loadRealChart(sym);
       loadDepth(sym);
       setupFutBox(sym);
@@ -1037,23 +1050,146 @@
       }
     }
 
+    // Interval selector state for the detail-modal chart.
+    window._chartIv = window._chartIv || "5";
+
+    function wireChartCtrls(sym) {
+      document.querySelectorAll("#mChartCtrls .ivbtn").forEach(b => {
+        b.classList.toggle("on", b.dataset.iv === window._chartIv);
+        b.onclick = () => {
+          window._chartIv = b.dataset.iv;
+          document.querySelectorAll("#mChartCtrls .ivbtn")
+            .forEach(x => x.classList.toggle("on", x === b));
+          loadRealChart(sym);
+        };
+      });
+    }
+
     async function loadRealChart(sym) {
+      const chartEl = document.getElementById("mChart");
+      const note = document.getElementById("mNote");
+      const iv = window._chartIv;
+      const daily = iv === "D";
+      const qs = daily ? "type=D&days=120" : ("interval=" + iv);
       try {
-        const d = await (await fetch("/api/chart/" + encodeURIComponent(sym))).json();
+        const d = await (await fetch(`/api/ohlc/${encodeURIComponent(sym)}?${qs}`)).json();
         if (window._detailSym !== sym) return;  // user moved on
-        if (d.error || !d.points || d.points.length < 2) {
-          document.getElementById("mNote").textContent =
-            "No intraday chart available (market may be closed). Showing this-session trend above.";
+        const pts = d.points || [];
+        if (!d.error && pts.length >= 2) {
+          chartEl.innerHTML = ohlcChart(pts);
+          attachOhlcHover(chartEl, pts, daily);
+          const kind = daily ? "daily" : iv + "m";
+          note.textContent =
+            `Real NSE OHLCV · ${kind} · ${pts.length} candles · ` +
+            (daily ? `${istDate(pts[0].t)}–${istDate(pts[pts.length-1].t)}`
+                   : `${istTime(pts[0].t)}–${istTime(pts[pts.length-1].t)}`);
           return;
         }
-        const chartEl = document.getElementById("mChart");
-        chartEl.innerHTML = realChart(d.points, d.prevClose);
-        attachChartHover(chartEl, d.points, d.prevClose);
-        document.getElementById("mNote").textContent =
-          `Real NSE intraday · ${d.points.length} points · ${istTime(d.points[0].t)}–${istTime(d.points[d.points.length-1].t)}`;
+        // Fallback: price-only line chart from the NextApi feed.
+        const c = await (await fetch("/api/chart/" + encodeURIComponent(sym))).json();
+        if (window._detailSym !== sym) return;
+        if (c.error || !c.points || c.points.length < 2) {
+          note.textContent = d.error === "token-not-found"
+            ? "No OHLCV feed for this symbol. Showing this-session trend above."
+            : "No intraday chart available (market may be closed). Showing this-session trend above.";
+          return;
+        }
+        chartEl.innerHTML = realChart(c.points, c.prevClose);
+        attachChartHover(chartEl, c.points, c.prevClose);
+        note.textContent =
+          `Real NSE intraday (price only) · ${c.points.length} points · ${istTime(c.points[0].t)}–${istTime(c.points[c.points.length-1].t)}`;
       } catch (e) {
-        document.getElementById("mNote").textContent = "Chart unavailable: " + e.message;
+        note.textContent = "Chart unavailable: " + e.message;
       }
+    }
+
+    function istDate(ms) {
+      const d = new Date(ms);
+      const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      return `${d.getUTCDate()} ${mon[d.getUTCMonth()]}`;
+    }
+
+    // Candlestick + volume-histogram renderer for real OHLCV. The SVG stretches
+    // horizontally (preserveAspectRatio none); price occupies the top band and
+    // volume a short band at the bottom.
+    function ohlcChart(pts, w = 580, h = 210) {
+      const n = pts.length;
+      const priceBot = h - 46, top = 8;          // price band; volume below
+      const volTop = priceBot + 6, volBot = h - 2;
+      let lo = Infinity, hi = -Infinity, vmax = 0;
+      for (const p of pts) {
+        if (p.l != null) lo = Math.min(lo, p.l);
+        if (p.h != null) hi = Math.max(hi, p.h);
+        if (p.v != null) vmax = Math.max(vmax, p.v);
+      }
+      const rng = (hi - lo) || 1;
+      const y = v => top + (1 - (v - lo) / rng) * (priceBot - top);
+      const vy = v => volBot - (v / (vmax || 1)) * (volBot - volTop);
+      const step = w / n, bw = Math.max(1, step * 0.62);
+      let bars = "";
+      for (let i = 0; i < n; i++) {
+        const p = pts[i];
+        if (p.o == null) continue;
+        const cx = i * step + step / 2;
+        const up = p.c >= p.o;
+        const col = up ? "#26d07c" : "#ff5c68";
+        const yO = y(p.o), yC = y(p.c);
+        const bodyTop = Math.min(yO, yC), bodyH = Math.max(1, Math.abs(yC - yO));
+        bars += `<line x1="${cx.toFixed(1)}" y1="${y(p.h).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${y(p.l).toFixed(1)}" stroke="${col}" stroke-width="1"/>`;
+        bars += `<rect x="${(cx-bw/2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${bw.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${col}"/>`;
+        if (p.v != null) {
+          const vh = volBot - vy(p.v);
+          bars += `<rect x="${(cx-bw/2).toFixed(1)}" y="${vy(p.v).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0.5,vh).toFixed(1)}" fill="${col}" opacity="0.45"/>`;
+        }
+      }
+      return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <line x1="0" y1="${priceBot}" x2="${w}" y2="${priceBot}" stroke="#2a3446" stroke-width="1"/>
+        ${bars}
+        <text x="4" y="16" fill="#8b98a9" font-size="11">₹${hi.toFixed(2)}</text>
+        <text x="4" y="${(priceBot-3).toFixed(1)}" fill="#8b98a9" font-size="11">₹${lo.toFixed(2)}</text>
+        <text x="4" y="${(volTop+10).toFixed(1)}" fill="#8b98a9" font-size="9">Vol ${fmtNum(vmax)}</text>
+      </svg>`;
+    }
+
+    function attachOhlcHover(el, pts, daily, w = 580, h = 210) {
+      if (!pts || pts.length < 2) return;
+      const n = pts.length, top = 8, priceBot = h - 46;
+      let lo = Infinity, hi = -Infinity;
+      for (const p of pts) { if (p.l!=null) lo=Math.min(lo,p.l); if (p.h!=null) hi=Math.max(hi,p.h); }
+      const rng = (hi - lo) || 1;
+      const yc = v => top + (1 - (v - lo) / rng) * (priceBot - top);
+
+      const cross = document.createElement("div"); cross.className = "chart-cross";
+      const dot = document.createElement("div"); dot.className = "chart-dot";
+      const tip = document.createElement("div"); tip.className = "chart-tip";
+      el.append(cross, dot, tip);
+      const hide = () => { cross.style.display = dot.style.display = tip.style.display = "none"; };
+      hide();
+      el.onmousemove = (e) => {
+        const rect = el.getBoundingClientRect();
+        if (!rect.width) return;
+        let frac = (e.clientX - rect.left) / rect.width;
+        frac = Math.max(0, Math.min(1, frac));
+        const idx = Math.min(n - 1, Math.floor(frac * n));
+        const p = pts[idx];
+        const px = ((idx + 0.5) / n) * rect.width;
+        const py = (yc(p.c) / h) * rect.height;
+        cross.style.display = dot.style.display = tip.style.display = "block";
+        cross.style.left = px + "px";
+        dot.style.left = px + "px"; dot.style.top = py + "px";
+        const chg = p.o ? ((p.c - p.o) / p.o * 100) : 0;
+        const when = daily ? istDate(p.t) : istTime(p.t);
+        tip.innerHTML =
+          `<b>O ${p.o.toFixed(2)} · H ${p.h.toFixed(2)}</b>` +
+          `<b>L ${p.l.toFixed(2)} · C ${p.c.toFixed(2)} ` +
+          `<span class="${chg>=0?'pos':'neg'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span></b>` +
+          `<span>Vol ${fmtNum(p.v||0)} · ${when}</span>`;
+        let tx = px + 12;
+        if (tx > rect.width - 150) tx = px - 150;
+        tip.style.left = Math.max(2, tx) + "px";
+        tip.style.top = Math.max(2, py - 50) + "px";
+      };
+      el.onmouseleave = hide;
     }
 
     // NSE's chart timestamps are IST wall-clock baked into the epoch as if it

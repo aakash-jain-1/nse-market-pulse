@@ -67,8 +67,9 @@ layers analytics on top:
 - **Live sparklines** per row (accumulated client-side; persisted in `localStorage`).
 - **Deep-dive** (🔬 on any row): 30/60/90-day OHLCV, delivery %, and F&O OI
   history with actionable read-outs.
-- **Stock detail modal**: real intraday chart (hover crosshair → price & time),
-  key metrics, and buy/sell.
+- **Stock detail modal**: real **OHLCV candlestick chart with a volume
+  histogram** (1m/5m/15m/1D selector, hover → open/high/low/close, %chg, volume &
+  time), key metrics, and buy/sell.
 - **Option chain**: full chain for any equity/index, PCR, Max-Pain, ATM, and
   **Greeks** (Black-Scholes: delta/gamma/theta/vega), OI walls, IV skew.
 - **Market depth**: 5-level bid/ask.
@@ -363,7 +364,8 @@ python nse_demand.py losers     # top losers
 | `GET /api/demand` | Composite demand-score board |
 | `GET /api/recommendations[?fno=1]` | Ranked LONG/SHORT trade ideas |
 | `GET /api/deepdive/<sym>` | 30/60/90-day price + delivery + OI deep-dive |
-| `GET /api/quote/<sym>` · `/api/chart/<sym>` | Live quote + market depth · intraday chart |
+| `GET /api/quote/<sym>` · `/api/chart/<sym>` | Live quote + market depth · intraday price line |
+| `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
 | `GET /api/optionchain/<sym>[/summary]` | Full option chain / analytics (PCR, Max-Pain, Greeks) |
 | `GET /api/fno/universe` | List of F&O underlyings |
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads |
@@ -431,8 +433,10 @@ raw field names.
   outside that you'll see the last snapshot or empty lists.
 - The **offline backtest** only has real signal once the logger has archived
   strategy context across live sessions.
-- Live intraday charts come from NSE's NextApi gateway; the older chart endpoint
-  is empty, so some views also accumulate sparklines client-side.
+- OHLCV candlesticks come from `charting.nseindia.com` (fetched on demand, cached
+  ~30s); NSE itself retains the history (~30–40 days of 1-min, years of daily), so
+  we don't archive candles — we just query the window we need. Symbols without a
+  charting token fall back to the price-only NextApi line, then to a sparkline.
 - No API key needed; **no secrets in the repo** (`.gitignore` covers `.env`,
   `*.db`, state JSON, CSVs).
 

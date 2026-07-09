@@ -116,6 +116,16 @@ def api_chart(symbol):
     return jsonify(nse_quote.get_chart(symbol))
 
 
+@app.route("/api/ohlc/<symbol>")
+def api_ohlc(symbol):
+    interval = int(request.args.get("interval", 1))
+    chart_type = "D" if request.args.get("type") == "D" else "I"
+    days = request.args.get("days")
+    return jsonify(nse_quote.get_ohlc(
+        symbol, interval=interval, chart_type=chart_type,
+        days=int(days) if days else None))
+
+
 @app.route("/api/optionchain/<symbol>")
 def api_optionchain(symbol):
     expiry = request.args.get("expiry")
