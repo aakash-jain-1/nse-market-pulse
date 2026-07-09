@@ -191,6 +191,12 @@
     .rgm .down { background: rgba(255,92,104,.15); color: var(--red); }
     .rgm .neutral { background: rgba(139,152,169,.15); color: var(--muted); }
     .rgm-note { font-size: 12.5px; color: var(--muted); }
+    .pick { display: flex; gap: 14px; align-items: flex-start; background: linear-gradient(90deg, rgba(94,164,255,.12), rgba(94,164,255,.02)); border: 1px solid var(--accent); border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; cursor: pointer; transition: transform .1s; }
+    .pick:hover { transform: translateY(-1px); }
+    .pick-lab { font-size: 11px; font-weight: 800; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; padding-top: 2px; }
+    .pick-name { font-size: 16px; font-weight: 800; margin-bottom: 2px; }
+    .pick-reason { font-size: 12.5px; color: var(--text); opacity: .85; line-height: 1.4; }
+    .pick-stat { font-size: 11.5px; color: var(--muted); }
     .strat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin-bottom: 18px; }
     .strat-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; cursor: pointer; transition: border-color .15s, transform .1s; position: relative; }
     .strat-card:hover { border-color: var(--accent); }
@@ -1445,15 +1451,125 @@
         <div class="chart-note">Cells show the day's win-rate (wins/closed) per strategy; open-only days show trades taken + unrealised P&amp;L. Colour: green = winning, red = losing.</div>`;
     }
 
-    function renderSim(sum, daily) {
+    function miniSpark(points, w = 120, h = 30) {
+      const pts = points || [];
+      if (pts.length < 2)
+        return `<svg width="${w}" height="${h}"><text x="2" y="19" fill="#5b6675" font-size="10">…</text></svg>`;
+      const min = Math.min(0, ...pts), max = Math.max(0, ...pts);
+      const rng = (max - min) || 1;
+      const step = w / (pts.length - 1);
+      const y = v => h - 2 - ((v - min) / rng) * (h - 4);
+      const coords = pts.map((v, i) => `${(i * step).toFixed(1)},${y(v).toFixed(1)}`);
+      const up = pts[pts.length - 1] >= 0;
+      const color = up ? "#26d07c" : "#ff5c68";
+      const zero = y(0);
+      return `<svg width="${w}" height="${h}">
+        <line x1="0" y1="${zero.toFixed(1)}" x2="${w}" y2="${zero.toFixed(1)}" stroke="#3a4657" stroke-width="1" stroke-dasharray="2,2"/>
+        <polyline fill="none" stroke="${color}" stroke-width="1.5" points="${coords.join(" ")}" stroke-linejoin="round"/>
+      </svg>`;
+    }
+
+    function renderSimPick(pick) {
+      if (!pick) return "";
+      const meta = pick.basis === "history"
+        ? `<span class="pick-stat">avg ${_sgn(pick.avgPnlPct)}${pick.avgPnlPct}%/trade · ${pick.winRate}% win · ${pick.closed} trades</span>`
+        : `<span class="pick-stat" style="color:var(--muted)">no closed history yet — chosen by design fit</span>`;
+      return `<div class="pick" data-strat="${pick.id}" title="Click to open this strategy's trades">
+        <div class="pick-lab">⭐ Strategy of the day</div>
+        <div class="pick-body">
+          <div class="pick-name">${pick.name}</div>
+          <div class="pick-reason">${pick.reason || ""}</div>
+          ${meta}
+        </div></div>`;
+    }
+
+    function renderSimLeaderboard(bundle) {
+      if (!bundle) return "";
+      const lb = bundle.leaderboard || {}, eq = bundle.equity || {};
+      const strats = lb.strategies || [], rows = lb.rows || [];
+      const shortName = s => s.name.split(" ")[0];
+      const anyClosed = rows.some(r => strats.some(s => (r.cells[s.id] || {}).closed));
+
+      const head = `<tr><th class="day">Regime</th>` +
+        strats.map(s => `<th title="${s.description||''}">${shortName(s)}<br><span style="color:var(--muted);font-weight:400;font-size:10px">${s.id}</span></th>`).join("") + `</tr>`;
+      const body = rows.map(r => {
+        const cls = REGIME_CLS[r.regime] || "neutral";
+        const ico = REGIME_ICON[r.regime] || "";
+        const rgCell = `<td class="day"><span class="rgm-badge ${cls}" style="font-size:11px">${ico} ${r.regime||"?"}</span></td>`;
+        const cells = strats.map(s => {
+          const c = r.cells[s.id];
+          if (!c || (!c.closed && !c.open)) return `<td><span class="cell" style="${heatColor(null)}">—</span></td>`;
+          if (!c.closed) return `<td><span class="cell" style="${heatColor(null)}">${c.open}↑ open</span></td>`;
+          const star = r.best === s.id ? "⭐ " : "";
+          const label = `${star}${_sgn(c.avgPnlPct)}${c.avgPnlPct}%<br><span style="opacity:.7;font-size:10px">${c.winRate}% · ${c.closed}t</span>`;
+          const border = r.best === s.id ? "box-shadow:0 0 0 1.5px var(--accent) inset;" : "";
+          return `<td><span class="cell" style="${heatColor(c.avgPnlPct, 'pnl')}${border}">${label}</span></td>`;
+        }).join("");
+        return `<tr>${rgCell}${cells}</tr>`;
+      }).join("");
+
+      const eqRow = `<tr><td class="day" style="color:var(--muted)">Equity curve<br><span style="font-size:10px">cumulative ₹ P&amp;L</span></td>` +
+        strats.map(s => {
+          const e = eq[s.id] || {};
+          const fin = e.final || 0;
+          return `<td style="text-align:center">${miniSpark(e.points)}<br>
+            <span class="${fin>=0?'pos':'neg'}" style="font-size:11px">${_sgn(fin)}₹${fmtNum(fin)}</span>
+            <span style="color:var(--muted);font-size:10px"> (${e.n||0})</span></td>`;
+        }).join("") + `</tr>`;
+
+      const note = anyClosed
+        ? `Each cell = that strategy's <b>average P&amp;L per trade</b> in that regime (win% · #trades). ⭐ = best strategy for the regime. Bottom row is the running equity curve.`
+        : `No closed trades yet — as trades resolve across sessions, this grid fills in to show which strategy wins in which regime.`;
+
+      return `<h3 class="reco-colhead" style="margin-top:18px">Regime leaderboard — which strategy wins in which regime</h3>
+        <table class="tbl heat"><thead>${head}</thead><tbody>${body}${eqRow}</tbody></table>
+        <div class="chart-note">${note}</div>`;
+    }
+
+    function renderSim(sum, daily, lb) {
       const anyTrades = (sum.strategies || []).some(s => s.open || s.closed);
       const banner = renderSimBanner(sum.regime);
+      const pick = renderSimPick(sum.pick);
       const cards = renderSimCards(sum);
       const hint = anyTrades ? "" :
         `<div class="loading">No simulated trades yet. Click <b>“Take all strategies ▶”</b> to snapshot every strategy's live ideas, or turn on <b>Auto</b>. Each strategy is then tracked independently so you can compare — day by day — which one fits the regime.</div>`;
       const detail = sum.detail ? renderSimTrades(sum.detail)
         : `<div class="chart-note" style="margin:2px 0 6px">Click a strategy card above to see its open &amp; closed trades.</div>`;
-      return banner + cards + hint + detail + renderSimDaily(daily);
+      return banner + pick + cards + hint + detail + renderSimLeaderboard(lb) + renderSimDaily(daily);
+    }
+
+    // Fire a toast/beep/notification when a strategy takes new ideas or a trade
+    // resolves (target/stop), by diffing per-strategy counts across polls.
+    function simAlerts(sum) {
+      const prev = window._simPrev;
+      const cur = {};
+      (sum.strategies || []).forEach(s => {
+        cur[s.id] = { name: s.name, open: s.open, target: s.target, stop: s.stop };
+      });
+      if (prev) {
+        (sum.strategies || []).forEach(s => {
+          const p = prev[s.id]; if (!p) return;
+          const dTgt = s.target - p.target, dStop = s.stop - p.stop, dOpen = s.open - p.open;
+          if (dTgt > 0) fireSimAlert(`✓ ${s.name}`, `${dTgt} trade${dTgt>1?'s':''} hit TARGET`, true);
+          if (dStop > 0) fireSimAlert(`✗ ${s.name}`, `${dStop} trade${dStop>1?'s':''} hit STOP`, false);
+          if (dOpen > 0 && dTgt <= 0 && dStop <= 0)
+            fireSimAlert(`▶ ${s.name}`, `${dOpen} new idea${dOpen>1?'s':''} taken`, null);
+        });
+      }
+      window._simPrev = cur;
+    }
+    function fireSimAlert(title, msg, good) {
+      const box = document.getElementById("toasts");
+      const el = document.createElement("div");
+      el.className = "toast";
+      const clr = good === true ? "var(--green)" : good === false ? "var(--red)" : "var(--accent)";
+      el.style.borderLeft = `3px solid ${clr}`;
+      el.innerHTML = `<b>${title}</b><div class="sub">${msg}</div>`;
+      box.appendChild(el);
+      setTimeout(() => el.remove(), 8000);
+      beep();
+      if ("Notification" in window && Notification.permission === "granted")
+        new Notification(title, { body: msg });
     }
 
     function simProgBar(prog) {
@@ -1475,13 +1591,15 @@
       try {
         if (current === "sim") {
           const sel = window._simStrategy || "";
-          const [sum, daily] = await Promise.all([
+          const [sum, daily, lb] = await Promise.all([
             fetch("/api/sim/summary" + (sel ? "?strategy=" + sel : "")).then(r => r.json()),
             fetch("/api/sim/daily").then(r => r.json()),
+            fetch("/api/sim/leaderboard").then(r => r.json()),
           ]);
           document.getElementById("simAuto").checked = !!sum.auto;
           document.getElementById("simMode").value = sum.entryMode || "continuous";
-          wrap.innerHTML = renderSim(sum, daily);
+          simAlerts(sum);
+          wrap.innerHTML = renderSim(sum, daily, lb);
           // Strategy card click → select/deselect that strategy's detail.
           wrap.querySelectorAll("[data-strat]").forEach(el =>
             el.onclick = () => {

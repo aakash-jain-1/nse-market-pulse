@@ -338,6 +338,129 @@ def daily_matrix():
 
 
 # ----------------------------------------------------------------------------
+# Regime leaderboard / strategy-of-the-day / equity curves
+# ----------------------------------------------------------------------------
+# Nice display order for regimes (unknown/extra ones appended after).
+_REGIME_ORDER = ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"]
+
+
+def regime_leaderboard(min_closed=1):
+    """
+    Aggregate every trade by (regime-at-entry × strategy): closed count, win%,
+    average per-trade %, total P&L. Flags the best strategy per regime by avg %.
+    This is the accumulating forward-test — 'what works on a recovery day?'.
+    """
+    state = _load()
+    ids = [s["id"] for s in strat.STRATEGIES]
+    agg = {}
+    regimes = set()
+    for s in strat.STRATEGIES:
+        sid = s["id"]
+        for t in state["strategies"].get(sid, {"trades": []})["trades"]:
+            rg = t.get("regimeAtEntry") or "?"
+            regimes.add(rg)
+            a = agg.setdefault((rg, sid),
+                               {"closed": 0, "open": 0, "wins": 0,
+                                "pnl": 0.0, "pnlPctSum": 0.0})
+            if t["status"] == "OPEN":
+                a["open"] += 1
+            else:
+                a["closed"] += 1
+                if t["status"] == "TARGET":
+                    a["wins"] += 1
+                a["pnl"] += t.get("pnl") or 0.0
+                a["pnlPctSum"] += t.get("pnlPct") or 0.0
+
+    ordered = ([r for r in _REGIME_ORDER if r in regimes] +
+               sorted(r for r in regimes if r not in _REGIME_ORDER))
+    rows = []
+    for rg in ordered:
+        cells = {}
+        best_sid, best_val = None, None
+        for sid in ids:
+            a = agg.get((rg, sid))
+            if not a or (a["closed"] == 0 and a["open"] == 0):
+                cells[sid] = None
+                continue
+            avg = a["pnlPctSum"] / a["closed"] if a["closed"] else None
+            cells[sid] = {
+                "closed": a["closed"], "open": a["open"],
+                "winRate": round(a["wins"] / a["closed"] * 100, 1) if a["closed"] else None,
+                "avgPnlPct": round(avg, 2) if avg is not None else None,
+                "totalPnl": round(a["pnl"], 2),
+            }
+            if a["closed"] >= min_closed and avg is not None and (best_val is None or avg > best_val):
+                best_val, best_sid = avg, sid
+        rows.append({"regime": rg, "best": best_sid, "cells": cells})
+    return {"strategies": strat.strategy_meta(), "rows": rows}
+
+
+def strategy_of_the_day(regime_label=None, min_closed=3):
+    """
+    Pick the strategy to lean on today: the one with the best historical avg %
+    in the current regime (needs >= min_closed samples), else fall back to the
+    strategy whose design fits this regime.
+    """
+    if regime_label is None:
+        regime_label = current_regime().get("label")
+    lb = regime_leaderboard()
+    row = next((r for r in lb["rows"] if r["regime"] == regime_label), None)
+    ranked = []
+    if row:
+        for sid, cell in row["cells"].items():
+            if cell and cell["closed"] >= min_closed and cell["avgPnlPct"] is not None:
+                ranked.append({"id": sid, "name": strat.STRATEGY_MAP.get(sid, {}).get("name", sid), **cell})
+        ranked.sort(key=lambda x: x["avgPnlPct"], reverse=True)
+
+    if ranked:
+        top = ranked[0]
+        pick = {
+            "id": top["id"], "name": top["name"], "basis": "history",
+            "avgPnlPct": top["avgPnlPct"], "winRate": top["winRate"], "closed": top["closed"],
+            "reason": (f"Best avg P&L ({top['avgPnlPct']:+.2f}%/trade, {top['winRate']}% win) "
+                       f"in '{regime_label}' days across {top['closed']} closed trades."),
+        }
+    else:
+        fit = [s for s in strat.STRATEGIES if regime_label in s.get("regimeFit", [])]
+        if fit:
+            s = fit[0]
+            pick = {"id": s["id"], "name": s["name"], "basis": "fit",
+                    "reason": f"No closed history in '{regime_label}' yet — {s['name']} is built for this regime."}
+        else:
+            pick = None
+    return {"regime": regime_label, "pick": pick, "ranked": ranked}
+
+
+def equity_curves():
+    """Cumulative realized P&L per strategy, ordered by close time (equity curve)."""
+    state = _load()
+    out = {}
+    for s in strat.STRATEGIES:
+        sid = s["id"]
+        closed = [t for t in state["strategies"].get(sid, {"trades": []})["trades"]
+                  if t["status"] != "OPEN" and t.get("closedAt")]
+        closed.sort(key=lambda t: t["closedAt"])
+        cum, pts = 0.0, []
+        for t in closed:
+            cum += t.get("pnl") or 0.0
+            pts.append(round(cum, 0))
+        out[sid] = {"points": pts, "final": round(cum, 0), "n": len(pts)}
+    return out
+
+
+def leaderboard_bundle():
+    """One call for the whole leaderboard section: table + today's pick + curves."""
+    regime = current_regime()
+    return {
+        "regime": regime,
+        "leaderboard": regime_leaderboard(),
+        "pick": strategy_of_the_day(regime.get("label"))["pick"],
+        "equity": equity_curves(),
+        "generatedAt": _now(),
+    }
+
+
+# ----------------------------------------------------------------------------
 # Summary
 # ----------------------------------------------------------------------------
 def _scorecard(trades):
@@ -387,6 +510,7 @@ def summary(strategy_id=None):
         "maxSessions": state.get("maxSessions", DEFAULT_MAX_SESSIONS),
         "notional": NOTIONAL,
         "regime": regime,
+        "pick": strategy_of_the_day(regime.get("label"))["pick"],
         "strategies": cards,
         "generatedAt": _now(),
     }

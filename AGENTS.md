@@ -30,7 +30,7 @@ NSE/
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
 ├── nse_quote.py       # Per-stock quote/chart/depth via NextApi gateway
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
-├── strategies.py      # Strategy library (4 generators) + market-regime detector
+├── strategies.py      # Strategy library (7 generators) + market-regime detector
 ├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
 ├── snapshot_logger.py # Background snapshot logger + backtester (CSV)
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
@@ -274,11 +274,23 @@ trading works for any tradable symbol (not just hot-list names).
     **selectable** — `continuous` (auto-take all day) or `open` (one snapshot/
     day). `daily_rollup()` stores each day's regime + per-strategy win-rate/P&L →
     `daily_matrix()` powers a **day × strategy heatmap**.
-  - **UI**: regime banner, strategy cards (click to expand that strategy's open/
-    closed tables), and the daily comparison heatmap. Controls: Take all, entry-
-    mode dropdown, Auto, Reset.
-  - Routes: `/api/sim/{strategies,summary[?strategy=],daily,regime,take,auto,
-    mode,reset}`. Still SEPARATE from the manual paper account.
+  - **Regime leaderboard + strategy-of-the-day** (`regime_leaderboard()`,
+    `strategy_of_the_day()`, `equity_curves()` → `leaderboard_bundle()`):
+    aggregates every trade by **regime-at-entry × strategy** (avg %/trade, win%,
+    #trades), flags the best strategy per regime (⭐), and picks the one to lean
+    on today (best history in the current regime, ≥3 closed trades, else the
+    design-fit strategy). Per-strategy **equity curves** (cumulative realized ₹)
+    render as sparklines. This is the accumulating forward-test (a true offline
+    backtest isn't possible — snapshots.csv only logs demand/volgainers, not the
+    per-strategy inputs like VWAP/delivery/52wH/OI).
+  - **UI**: regime banner, ⭐ strategy-of-the-day card, strategy cards (click to
+    expand that strategy's open/closed tables), the **regime leaderboard** grid
+    (+ equity sparklines), and the daily comparison heatmap. **Sim alerts** toast/
+    beep/notify when a strategy takes new ideas or a trade hits target/stop
+    (diffs per-strategy counts across polls). Controls: Take all, entry-mode
+    dropdown, Auto, Reset.
+  - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,regime,
+    take,auto,mode,reset}`. Still SEPARATE from the manual paper account.
 - **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
   notional), long **and** short with netting/flip-through-zero, MTM on live
   near-month price. New route `/api/paper/futures_order`; traded from the detail

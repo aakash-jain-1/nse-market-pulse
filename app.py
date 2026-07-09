@@ -180,6 +180,12 @@ def api_sim_daily():
     return jsonify(sim.daily_matrix())
 
 
+@app.route("/api/sim/leaderboard")
+def api_sim_leaderboard():
+    import sim
+    return jsonify(sim.leaderboard_bundle())
+
+
 @app.route("/api/sim/regime")
 def api_sim_regime():
     import sim
