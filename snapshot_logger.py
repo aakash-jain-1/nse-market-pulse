@@ -178,13 +178,17 @@ def _loop():
                 if (time.time() - last_iv) >= IV_INTERVAL:
                     capture_iv()
                     last_iv = time.time()
-                # Recommendation simulator: mark trades to market, and auto-take
-                # fresh ideas when the user has turned auto mode on.
+                # Multi-strategy simulator: build the shared context once, mark
+                # all strategies' trades to market, auto-take fresh ideas (mode-
+                # aware) when enabled, and roll up today's regime + per-strategy
+                # stats + NIFTY close.
                 try:
                     import sim
-                    sim.update()
+                    ctx = sim.build_ctx()
+                    sim.update(ctx)
                     if sim.get_auto():
-                        sim.take()
+                        sim.take(ctx=ctx, auto=True)
+                    sim.daily_rollup(ctx)
                 except Exception:
                     pass
         except Exception as e:

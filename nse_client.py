@@ -138,6 +138,43 @@ def get_volume_gainers(limit=20):
 _price_cache = {"ts": 0.0, "map": {}}
 _PRICE_TTL = 20  # seconds
 
+_index_cache = {"ts": 0.0, "data": None}
+_INDEX_TTL = 30  # seconds
+
+
+def get_index_snapshot():
+    """
+    Live snapshot of the headline indices from NSE's /api/allIndices, normalized
+    to {NIFTY|BANKNIFTY|FINNIFTY: {last, pChange, prevClose, advances, declines,
+    unchanged}}. Each index row carries its constituents' advance/decline breadth
+    — a cheap, reliable market-regime signal. Cached ~30s.
+    """
+    if _index_cache["data"] and (time.time() - _index_cache["ts"]) < _INDEX_TTL:
+        return _index_cache["data"]
+    out = {}
+    want = {"NIFTY 50": "NIFTY", "NIFTY BANK": "BANKNIFTY",
+            "NIFTY FIN SERVICE": "FINNIFTY"}
+    try:
+        data = _fetch("/api/allIndices")
+        for r in data.get("data", []):
+            name = r.get("index") or r.get("indexSymbol")
+            key = want.get(name)
+            if not key:
+                continue
+            out[key] = {
+                "last": _num(r.get("last")),
+                "pChange": _num(r.get("percentChange")),
+                "prevClose": _num(r.get("previousClose")),
+                "advances": _num(r.get("advances")),
+                "declines": _num(r.get("declines")),
+                "unchanged": _num(r.get("unchanged")),
+            }
+    except Exception:
+        pass
+    if out:
+        _index_cache.update(ts=time.time(), data=out)
+    return out or (_index_cache["data"] or {})
+
 
 def _underlying_price_map():
     """

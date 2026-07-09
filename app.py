@@ -162,20 +162,38 @@ def api_paper_option_order():
     return jsonify({"ok": ok, "message": msg, "order": order}), status
 
 
+@app.route("/api/sim/strategies")
+def api_sim_strategies():
+    import strategies
+    return jsonify({"strategies": strategies.strategy_meta()})
+
+
 @app.route("/api/sim/summary")
 def api_sim_summary():
     import sim
-    return jsonify(sim.summary())
+    return jsonify(sim.summary(strategy_id=request.args.get("strategy")))
+
+
+@app.route("/api/sim/daily")
+def api_sim_daily():
+    import sim
+    return jsonify(sim.daily_matrix())
+
+
+@app.route("/api/sim/regime")
+def api_sim_regime():
+    import sim
+    return jsonify(sim.current_regime())
 
 
 @app.route("/api/sim/take", methods=["POST"])
 def api_sim_take():
     import sim
     body = request.get_json(silent=True) or {}
-    fno = bool(body.get("fno"))
-    limit = int(body.get("limit") or 10)
-    added = sim.take(fno_only=fno, limit=limit)
-    out = sim.summary()
+    strat = body.get("strategy")
+    ids = [strat] if strat else None
+    added = sim.take(strategy_ids=ids)
+    out = sim.summary(strategy_id=strat)
     out["added"] = added
     return jsonify(out)
 
@@ -185,6 +203,13 @@ def api_sim_auto():
     import sim
     body = request.get_json(silent=True) or {}
     return jsonify({"auto": sim.set_auto(bool(body.get("on")))})
+
+
+@app.route("/api/sim/mode", methods=["POST"])
+def api_sim_mode():
+    import sim
+    body = request.get_json(silent=True) or {}
+    return jsonify({"entryMode": sim.set_entry_mode(body.get("entryMode"))})
 
 
 @app.route("/api/sim/reset", methods=["POST"])

@@ -30,7 +30,8 @@ NSE/
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
 ├── nse_quote.py       # Per-stock quote/chart/depth via NextApi gateway
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
-├── sim.py             # Recommendation forward-tester (auto-trades Ideas, scores them)
+├── strategies.py      # Strategy library (4 generators) + market-regime detector
+├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
 ├── snapshot_logger.py # Background snapshot logger + backtester (CSV)
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
@@ -249,16 +250,31 @@ trading works for any tradable symbol (not just hot-list names).
 
 ## Done recently
 
-- **Recommendation Simulator** (`sim.py`, 🧪 Sim tab): forward-tests the Ideas
-  engine. `take()` snapshots the current LONG/SHORT recommendations, "enters"
-  each at its entry sized to a flat ₹1L notional, and tracks it against its own
-  target/stop on live prices (`update()` runs every logger cycle + on each
-  `summary()` call). Target hit = right, stop hit = wrong. Scorecard shows win
-  rate, realized/unrealized P&L, and hit-rate by conviction rating. Optional
-  **Auto** mode auto-takes fresh ideas each minute during market hours. State in
-  `sim_state.json` (gitignored), kept SEPARATE from the manual paper account so
-  auto-trades never touch the user's ₹10L. Routes: `/api/sim/{summary,take,auto,
-  reset}`.
+- **Multi-strategy Sim + regime-aware daily comparison** (`strategies.py` +
+  `sim.py`, 🧪 Sim tab): the Sim now forward-tests **4 strategies in parallel**,
+  each with its **own ledger**, so we can see which one fits which market day.
+  - **Strategies** (`strategies.py`): `momentum` (the original multi-signal
+    engine), `oi_smart` (F&O OI positioning), `meanrev` (contrarian oversold
+    bounce / fade), `vol_breakout` (≥5× volume explosions). Each is
+    `{id,name,description,regimeFit,generate(ctx)}` returning ideas in
+    `_build_idea` shape. `build_context()` fetches all live lists ONCE and every
+    generator reuses it.
+  - **Regime detector** (`detect_regime`): tags each day Trend-Up / Trend-Down /
+    Recovery / Pullback / Range / Mixed from NIFTY %change + advance-decline
+    breadth (`nse.get_index_snapshot()` → `/api/allIndices`, cached 30s) + the
+    prior session's move.
+  - **Per-strategy sims** (`sim.py` v2, `sim_state.json` version-gated): `take()`
+    snapshots each strategy's ideas (flat ₹1L, dedup by symbol+direction);
+    `update()` marks to market and closes on target/stop **or a multi-day
+    horizon** (`maxSessions`, default 3, then time-expire); entry mode is
+    **selectable** — `continuous` (auto-take all day) or `open` (one snapshot/
+    day). `daily_rollup()` stores each day's regime + per-strategy win-rate/P&L →
+    `daily_matrix()` powers a **day × strategy heatmap**.
+  - **UI**: regime banner, strategy cards (click to expand that strategy's open/
+    closed tables), and the daily comparison heatmap. Controls: Take all, entry-
+    mode dropdown, Auto, Reset.
+  - Routes: `/api/sim/{strategies,summary[?strategy=],daily,regime,take,auto,
+    mode,reset}`. Still SEPARATE from the manual paper account.
 - **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
   notional), long **and** short with netting/flip-through-zero, MTM on live
   near-month price. New route `/api/paper/futures_order`; traded from the detail

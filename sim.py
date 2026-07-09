@@ -1,24 +1,26 @@
 """
-Recommendation simulator (forward-test)
-========================================
-"Buy your own recommendations." This takes the Ideas engine's LONG/SHORT
-recommendations, enters a virtual position at the recommended entry, then tracks
-each one against its own target / stop using live prices. It lets us DEMO —
-after the fact — whether the recommendations actually played out (hit target =
-right, hit stop = wrong), with a hit-rate / P&L scorecard broken down by
-conviction.
+Multi-strategy recommendation simulator (forward-test)
+======================================================
+"Buy your own recommendations" — for SEVERAL strategies at once. Each strategy
+in `strategies.py` gets its OWN parallel ledger: we snapshot its ideas, enter
+at the recommended entry (flat notional), then track each trade against its
+target / stop (with a multi-day horizon). Every day is tagged with a market
+regime, so a day-by-day rollup shows WHICH strategy works in WHICH regime
+(momentum on trend days, mean-reversion on recovery days, ...).
 
-This is deliberately SEPARATE from the manual paper-trading account (`paper.py`)
-so auto-taken ideas never pollute the user's own virtual portfolio. State
-persists to `sim_state.json` (gitignored). Educational only — NOT advice.
+Kept SEPARATE from the manual paper account (`paper.py`). State persists to
+`sim_state.json` (gitignored). Educational only — NOT investment advice.
 
-Model
------
-- Each idea is sized to a fixed notional (`NOTIONAL`), so every trade is weighted
-  equally and P&L% == price move in the trade's direction.
-- We only see periodic price snapshots (no intrabar data), so target/stop are
-  evaluated on the latest observed LTP. Good enough for a directional demo.
-- LONG wins when price rises to target; SHORT wins when price falls to target.
+Entry modes
+-----------
+- `continuous` : auto-take fresh qualifying ideas every cycle (deduped).
+- `open`       : auto-take ONE snapshot per strategy per day (near the open).
+(Manual "Take" always takes now, regardless of mode.)
+
+Exit
+----
+Target or stop, else a multi-day horizon (`maxSessions`, default 3 trading
+sessions) after which the trade is time-expired at the current price.
 """
 
 import json
@@ -27,10 +29,13 @@ import threading
 from datetime import datetime, timezone, timedelta
 
 import nse_client as nse
+import strategies as strat
 
 IST = timezone(timedelta(hours=5, minutes=30))
 STATE_FILE = os.path.join(os.path.dirname(__file__), "sim_state.json")
-NOTIONAL = 100_000.0  # virtual rupees deployed per idea (equal weighting)
+NOTIONAL = 100_000.0   # virtual rupees per idea (equal weighting)
+DEFAULT_MAX_SESSIONS = 3
+STATE_VERSION = 2
 
 _lock = threading.RLock()
 
@@ -39,8 +44,21 @@ def _now():
     return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _today():
+    return datetime.now(IST).strftime("%Y-%m-%d")
+
+
 def _default_state():
-    return {"trades": [], "auto": False, "createdAt": _now()}
+    return {
+        "version": STATE_VERSION,
+        "auto": False,
+        "entryMode": "continuous",
+        "maxSessions": DEFAULT_MAX_SESSIONS,
+        "strategies": {s["id"]: {"trades": []} for s in strat.STRATEGIES},
+        "daily": {},
+        "lastAutoDate": {},
+        "createdAt": _now(),
+    }
 
 
 def _load():
@@ -49,9 +67,17 @@ def _load():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
             st = json.load(f)
-        st.setdefault("trades", [])
+        # Version-gate: v1 (single-ledger) state is superseded by per-strategy v2.
+        if st.get("version") != STATE_VERSION:
+            return _default_state()
+        st.setdefault("strategies", {})
+        for s in strat.STRATEGIES:
+            st["strategies"].setdefault(s["id"], {"trades": []})
+        st.setdefault("daily", {})
+        st.setdefault("lastAutoDate", {})
+        st.setdefault("entryMode", "continuous")
+        st.setdefault("maxSessions", DEFAULT_MAX_SESSIONS)
         st.setdefault("auto", False)
-        st.setdefault("createdAt", _now())
         return st
     except Exception:
         return _default_state()
@@ -71,14 +97,49 @@ def _price(symbol):
         return None
 
 
-def _open_trade_from_idea(idea):
+# ----------------------------------------------------------------------------
+# Context / regime
+# ----------------------------------------------------------------------------
+def _prior_day_move(state):
+    """NIFTY %change of the most recent daily entry BEFORE today (for regime)."""
+    today = _today()
+    dates = sorted(d for d in state.get("daily", {}) if d < today)
+    if not dates:
+        return None
+    return state["daily"][dates[-1]].get("niftyPct")
+
+
+def build_ctx():
+    """Full data bundle with today's regime attached (used for taking ideas)."""
+    state = _load()
+    ctx = strat.build_context()
+    ctx["regime"] = strat.detect_regime(ctx, _prior_day_move(state))
+    return ctx
+
+
+def current_regime():
+    """Cheap regime for the banner: index snapshot only, no full context."""
+    state = _load()
+    idx = {}
+    try:
+        idx = nse.get_index_snapshot()
+    except Exception:
+        pass
+    return strat.detect_regime({"index": idx}, _prior_day_move(state))
+
+
+# ----------------------------------------------------------------------------
+# Trades
+# ----------------------------------------------------------------------------
+def _open_trade(idea, strategy_id, regime_label):
     entry = idea.get("entry") or idea.get("ltp")
     if not entry:
         return None
     direction = idea["direction"]
-    qty = NOTIONAL / entry
     return {
-        "id": f"{idea['symbol']}|{direction}|{datetime.now(IST).strftime('%Y%m%d%H%M%S')}",
+        "id": f"{strategy_id}|{idea['symbol']}|{direction}|"
+              f"{datetime.now(IST).strftime('%Y%m%d%H%M%S')}",
+        "strategy": strategy_id,
         "symbol": idea["symbol"],
         "direction": direction,
         "conviction": idea.get("conviction"),
@@ -91,29 +152,36 @@ def _open_trade_from_idea(idea):
         "stopPct": idea.get("stopPct"),
         "targetPct": idea.get("targetPct"),
         "rr": idea.get("rr"),
-        "qty": qty,
+        "qty": NOTIONAL / entry,
         "notional": NOTIONAL,
         "status": "OPEN",
         "ltp": round(entry, 2),
-        "mfePct": 0.0,  # max favorable excursion (best unrealised gain %)
-        "maePct": 0.0,  # max adverse excursion (worst unrealised loss %)
+        "mfePct": 0.0,
+        "maePct": 0.0,
         "pnl": 0.0,
         "pnlPct": 0.0,
         "openedAt": _now(),
+        "openedDate": _today(),
+        "regimeAtEntry": regime_label,
         "exitPrice": None,
         "closedAt": None,
     }
 
 
 def _move_pct(t, px):
-    """Directional move % from entry (positive == in the trade's favour)."""
     if t["direction"] == "LONG":
         return (px - t["entry"]) / t["entry"] * 100
     return (t["entry"] - px) / t["entry"] * 100
 
 
-def _refresh_trade(t):
-    """Update one OPEN trade against the live price; close it if target/stop hit."""
+def _sessions_elapsed(state, opened_date):
+    """Distinct trading sessions (daily-log dates) from entry through today."""
+    today = _today()
+    return len([d for d in state.get("daily", {}) if opened_date <= d <= today]) or 1
+
+
+def _refresh_trade(state, t):
+    """Reprice one OPEN trade; close on target/stop, or time-expire at horizon."""
     if t["status"] != "OPEN":
         return
     px = _price(t["symbol"])
@@ -131,11 +199,14 @@ def _refresh_trade(t):
             hit, exit_px = "TARGET", tgt
         elif stop and px <= stop:
             hit, exit_px = "STOP", stop
-    else:  # SHORT
+    else:
         if tgt and px <= tgt:
             hit, exit_px = "TARGET", tgt
         elif stop and px >= stop:
             hit, exit_px = "STOP", stop
+
+    if not hit and _sessions_elapsed(state, t["openedDate"]) > state.get("maxSessions", DEFAULT_MAX_SESSIONS):
+        hit, exit_px = "EXPIRED", px
 
     if hit:
         t["status"] = hit
@@ -144,54 +215,204 @@ def _refresh_trade(t):
         t["ltp"] = round(exit_px, 2)
         px = exit_px
 
-    move = _move_pct(t, px)
-    t["pnl"] = round(t["qty"] * (px - t["entry"]) * (1 if t["direction"] == "LONG" else -1), 2)
-    t["pnlPct"] = round(move, 2)
+    t["pnl"] = round(t["qty"] * (px - t["entry"]) *
+                     (1 if t["direction"] == "LONG" else -1), 2)
+    t["pnlPct"] = round(_move_pct(t, px), 2)
 
 
-def update():
-    """Re-price every OPEN trade and close any that reached target/stop."""
+def update(ctx=None):
+    """Re-price and resolve every OPEN trade across all strategies."""
     with _lock:
         state = _load()
-        changed = False
-        for t in state["trades"]:
-            if t["status"] == "OPEN":
-                before = (t["status"], t["ltp"])
-                _refresh_trade(t)
-                if before != (t["status"], t["ltp"]):
-                    changed = True
-        if changed:
-            _save(state)
+        for sid, book in state["strategies"].items():
+            for t in book["trades"]:
+                if t["status"] == "OPEN":
+                    _refresh_trade(state, t)
+        _save(state)
         return state
 
 
-def take(fno_only=False, limit=10):
+def take(strategy_ids=None, ctx=None, auto=False, limit=10):
     """
-    Snapshot the current recommendations into the simulator. Skips any idea that
-    already has an OPEN trade for the same symbol+direction (so repeated/auto
-    calls don't stack duplicates). Returns how many new trades were opened.
+    Snapshot ideas into each strategy's ledger. Dedups by (symbol, direction)
+    among that strategy's OPEN trades. Honors entry mode for AUTO calls (in
+    'open' mode, only the first take per strategy per day). Returns per-strategy
+    counts of new trades.
     """
-    recos = nse.get_recommendations(fno_only=fno_only, limit=limit)
-    ideas = (recos.get("longs") or []) + (recos.get("shorts") or [])
+    ctx = ctx or build_ctx()
+    regime_label = (ctx.get("regime") or {}).get("label", "?")
     with _lock:
         state = _load()
-        open_keys = {(t["symbol"], t["direction"])
-                     for t in state["trades"] if t["status"] == "OPEN"}
-        added = 0
-        for idea in ideas:
-            key = (idea["symbol"], idea["direction"])
-            if key in open_keys:
+        ids = strategy_ids or [s["id"] for s in strat.STRATEGIES]
+        mode = state.get("entryMode", "continuous")
+        today = _today()
+        added = {}
+        for sid in ids:
+            if auto and mode == "open" and state["lastAutoDate"].get(sid) == today:
+                added[sid] = 0
                 continue
-            tr = _open_trade_from_idea(idea)
-            if tr:
-                state["trades"].append(tr)
-                open_keys.add(key)
-                added += 1
-        if added:
-            _save(state)
+            book = state["strategies"].setdefault(sid, {"trades": []})
+            open_keys = {(t["symbol"], t["direction"])
+                         for t in book["trades"] if t["status"] == "OPEN"}
+            ideas = strat.generate(sid, ctx)
+            longs = sorted([i for i in ideas if i["direction"] == "LONG"],
+                           key=lambda x: x.get("conviction", 0), reverse=True)[:limit]
+            shorts = sorted([i for i in ideas if i["direction"] == "SHORT"],
+                            key=lambda x: x.get("conviction", 0), reverse=True)[:limit]
+            n = 0
+            for idea in longs + shorts:
+                key = (idea["symbol"], idea["direction"])
+                if key in open_keys:
+                    continue
+                tr = _open_trade(idea, sid, regime_label)
+                if tr:
+                    book["trades"].append(tr)
+                    open_keys.add(key)
+                    n += 1
+            added[sid] = n
+            if auto and mode == "open":
+                state["lastAutoDate"][sid] = today
+        _save(state)
     return added
 
 
+# ----------------------------------------------------------------------------
+# Daily rollup
+# ----------------------------------------------------------------------------
+def daily_rollup(ctx=None):
+    """Upsert today's per-strategy stats + regime + NIFTY close into the log."""
+    ctx = ctx or build_ctx()
+    regime = ctx.get("regime") or {}
+    idx = (ctx.get("index") or {}).get("NIFTY") or {}
+    today = _today()
+    with _lock:
+        state = _load()
+        day = state["daily"].setdefault(today, {})
+        day["regime"] = regime.get("label")
+        day["niftyPct"] = regime.get("niftyPct")
+        day["niftyLast"] = idx.get("last")
+        day["priorDayMove"] = regime.get("priorDayMove")
+        day["breadth"] = f"{int(regime.get('breadthAdv') or 0)}:{int(regime.get('breadthDec') or 0)}"
+        strat_stats = {}
+        for sid, book in state["strategies"].items():
+            opened = closed = wins = 0
+            realized = 0.0
+            unreal = 0.0
+            for t in book["trades"]:
+                if t.get("openedDate") == today:
+                    opened += 1
+                if t["status"] == "OPEN":
+                    unreal += t["pnl"]
+                elif (t.get("closedAt") or "").startswith(today):
+                    closed += 1
+                    realized += t["pnl"]
+                    if t["status"] == "TARGET":
+                        wins += 1
+            strat_stats[sid] = {
+                "opened": opened, "closed": closed, "wins": wins,
+                "winRate": round(wins / closed * 100, 1) if closed else None,
+                "realized": round(realized, 2),
+                "unrealized": round(unreal, 2),
+            }
+        day["strategies"] = strat_stats
+        _save(state)
+        return day
+
+
+def daily_matrix():
+    """Day × strategy comparison grid for the heatmap."""
+    state = _load()
+    ids = [s["id"] for s in strat.STRATEGIES]
+    dates = sorted(state.get("daily", {}).keys(), reverse=True)
+    rows = []
+    for d in dates:
+        day = state["daily"][d]
+        rows.append({
+            "date": d,
+            "regime": day.get("regime"),
+            "niftyPct": day.get("niftyPct"),
+            "breadth": day.get("breadth"),
+            "cells": {sid: (day.get("strategies", {}) or {}).get(sid) for sid in ids},
+        })
+    return {"strategies": strat.strategy_meta(), "rows": rows}
+
+
+# ----------------------------------------------------------------------------
+# Summary
+# ----------------------------------------------------------------------------
+def _scorecard(trades):
+    closed = [t for t in trades if t["status"] in ("TARGET", "STOP", "EXPIRED")]
+    open_t = [t for t in trades if t["status"] == "OPEN"]
+    wins = sum(1 for t in closed if t["status"] == "TARGET")
+    n = len(closed)
+    realized = sum(t["pnl"] for t in closed)
+    unreal = sum(t["pnl"] for t in open_t)
+    today = _today()
+    today_closed = [t for t in closed if (t.get("closedAt") or "").startswith(today)]
+    today_wins = sum(1 for t in today_closed if t["status"] == "TARGET")
+    return {
+        "open": len(open_t),
+        "closed": n,
+        "target": wins,
+        "stop": sum(1 for t in closed if t["status"] == "STOP"),
+        "expired": sum(1 for t in closed if t["status"] == "EXPIRED"),
+        "winRate": round(wins / n * 100, 1) if n else None,
+        "realizedPnl": round(realized, 2),
+        "unrealizedPnl": round(unreal, 2),
+        "totalPnl": round(realized + unreal, 2),
+        "todayClosed": len(today_closed),
+        "todayWinRate": round(today_wins / len(today_closed) * 100, 1) if today_closed else None,
+    }
+
+
+def summary(strategy_id=None):
+    """Overview scorecards + regime; plus one strategy's trade detail if asked."""
+    update()
+    state = _load()
+    regime = current_regime()
+
+    cards = []
+    for s in strat.STRATEGIES:
+        sc = _scorecard(state["strategies"].get(s["id"], {"trades": []})["trades"])
+        cards.append({
+            "id": s["id"], "name": s["name"], "description": s["description"],
+            "regimeFit": s["regimeFit"], **sc,
+            "fitsNow": regime.get("label") in s["regimeFit"],
+        })
+
+    out = {
+        "mode": "overview",
+        "auto": state.get("auto", False),
+        "entryMode": state.get("entryMode", "continuous"),
+        "maxSessions": state.get("maxSessions", DEFAULT_MAX_SESSIONS),
+        "notional": NOTIONAL,
+        "regime": regime,
+        "strategies": cards,
+        "generatedAt": _now(),
+    }
+
+    if strategy_id and strategy_id in state["strategies"]:
+        trades = state["strategies"][strategy_id]["trades"]
+        meta = strat.STRATEGY_MAP.get(strategy_id, {})
+        open_t = sorted([t for t in trades if t["status"] == "OPEN"],
+                        key=lambda t: t["pnlPct"], reverse=True)
+        closed_t = sorted([t for t in trades if t["status"] != "OPEN"],
+                          key=lambda t: t.get("closedAt") or "", reverse=True)
+        out["detail"] = {
+            "id": strategy_id,
+            "name": meta.get("name", strategy_id),
+            "description": meta.get("description"),
+            "regimeFit": meta.get("regimeFit", []),
+            "scorecard": _scorecard(trades),
+            "open": open_t,
+            "closed": closed_t[:200],
+        }
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Settings
+# ----------------------------------------------------------------------------
 def set_auto(on):
     with _lock:
         state = _load()
@@ -204,70 +425,15 @@ def get_auto():
     return _load().get("auto", False)
 
 
+def set_entry_mode(mode):
+    mode = "open" if mode == "open" else "continuous"
+    with _lock:
+        state = _load()
+        state["entryMode"] = mode
+        _save(state)
+        return mode
+
+
 def reset():
     with _lock:
         _save(_default_state())
-
-
-def _bucket_stats(trades):
-    closed = [t for t in trades if t["status"] in ("TARGET", "STOP")]
-    n = len(closed)
-    wins = sum(1 for t in closed if t["status"] == "TARGET")
-    pnl = sum(t["pnl"] for t in closed)
-    return {
-        "closed": n,
-        "wins": wins,
-        "losses": n - wins,
-        "winRate": round(wins / n * 100, 1) if n else None,
-        "pnl": round(pnl, 2),
-    }
-
-
-def summary():
-    """Live scorecard: open positions, closed outcomes and aggregate hit-rate."""
-    state = update()  # always mark-to-market before reporting
-    trades = state["trades"]
-    open_t = [t for t in trades if t["status"] == "OPEN"]
-    closed_t = [t for t in trades if t["status"] in ("TARGET", "STOP")]
-
-    open_t.sort(key=lambda t: t["pnlPct"], reverse=True)
-    closed_t.sort(key=lambda t: t.get("closedAt") or "", reverse=True)
-
-    realized = sum(t["pnl"] for t in closed_t)
-    unrealized = sum(t["pnl"] for t in open_t)
-    wins = sum(1 for t in closed_t if t["status"] == "TARGET")
-    nclosed = len(closed_t)
-
-    # Hit-rate by conviction rating, to show whether higher conviction == better.
-    def band(t):
-        return t.get("rating") or "?"
-
-    by_conv = {}
-    for t in closed_t:
-        by_conv.setdefault(band(t), []).append(t)
-    conv_rows = []
-    for label in ("High", "Medium", "Low", "?"):
-        if label in by_conv:
-            s = _bucket_stats(by_conv[label])
-            s["band"] = label
-            conv_rows.append(s)
-
-    return {
-        "auto": state.get("auto", False),
-        "notional": NOTIONAL,
-        "generatedAt": _now(),
-        "counts": {
-            "total": len(trades),
-            "open": len(open_t),
-            "closed": nclosed,
-            "target": wins,
-            "stop": nclosed - wins,
-        },
-        "winRate": round(wins / nclosed * 100, 1) if nclosed else None,
-        "realizedPnl": round(realized, 2),
-        "unrealizedPnl": round(unrealized, 2),
-        "totalPnl": round(realized + unrealized, 2),
-        "byConviction": conv_rows,
-        "open": open_t,
-        "closed": closed_t[:200],
-    }
