@@ -29,6 +29,11 @@ Thumbs.db
 *.log
 *.csv
 
+# SQLite time-series store (snapshots / IV / strategy context)
+*.db
+*.db-wal
+*.db-shm
+
 # Paper trading state (local virtual portfolio)
 paper_state.json
 

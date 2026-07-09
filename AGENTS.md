@@ -32,17 +32,33 @@ NSE/
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
 ├── strategies.py      # Strategy library (7 generators) + market-regime detector
 ├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
-├── snapshot_logger.py # Background snapshot logger + backtester (CSV)
+├── backtest_strategies.py # Offline backtester: replays strategies over stored context
+├── db.py              # SQLite store (snapshots / IV / strategy-context time-series)
+├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
 │   └── index.html     # Entire dashboard UI (HTML + CSS + JS inline)
-├── data/              # (gitignored) snapshots.csv lives here
+├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── requirements.txt
 ├── README.md
 ├── AGENTS.md          # <- this file
 ├── .gitignore
 └── paper_state.json   # (gitignored) local virtual-portfolio state
 ```
+
+## Data storage (IMPORTANT)
+
+- **Time-series → SQLite** (`db.py`, `data/market.db`, gitignored via `*.db`).
+  Tables: `snapshots` (demand/volgainers board), `iv_log` (ATM IV), `context_log`
+  (a trimmed+gzipped snapshot of the full strategy context each cycle, ~6 KB/cycle).
+  WAL mode for concurrent reads; indexed by view/ts/symbol/day. Reads no longer
+  slurp whole CSVs into memory. On first run any legacy `snapshots.csv` /
+  `iv_log.csv` is auto-imported (`db._import_legacy_csv`).
+- **Small state → JSON** (`sim_state.json`, `paper_state.json`). Tiny, document-
+  shaped, rewritten atomically — no DB needed. Don't "upgrade" these to SQLite.
+- Not Postgres/Mongo/Timescale — those need a server and are overkill for a
+  single-user local tool. If analytical backtests ever get huge, DuckDB is the
+  drop-in upgrade, but we're nowhere near that.
 
 ## How to run
 
@@ -289,8 +305,17 @@ trading works for any tradable symbol (not just hot-list names).
     beep/notify when a strategy takes new ideas or a trade hits target/stop
     (diffs per-strategy counts across polls). Controls: Take all, entry-mode
     dropdown, Auto, Reset.
-  - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,regime,
-    take,auto,mode,reset}`. Still SEPARATE from the manual paper account.
+  - **Offline backtest** (`backtest_strategies.py`, `/api/sim/backtest`): replays
+    the SAME generators over the archived `context_log` on a virtual clock —
+    reprice open trades (target/stop/multi-day-expiry), take fresh ideas (one per
+    symbol+direction per day; `open` vs `continuous` entry), forward-price from
+    later cycles. Returns per-strategy scorecards + equity curves + a regime
+    leaderboard. This is the real backtest (unlike the live forward-sim, it
+    doesn't need days to accumulate — but it needs the logger to have archived
+    context, which it does every ~5 min during market hours). UI: "⏮ Backtest
+    history" button in the Sim tab.
+  - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,backtest,
+    regime,take,auto,mode,reset}`. Still SEPARATE from the manual paper account.
 - **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
   notional), long **and** short with netting/flip-through-zero, MTM on live
   near-month price. New route `/api/paper/futures_order`; traded from the detail

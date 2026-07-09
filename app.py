@@ -13,6 +13,8 @@ service worker from another local app (a BSE announcements PWA) caches that
 origin and hijacks requests. A fresh port sidesteps that stale cache.
 """
 
+import os
+
 from flask import Flask, jsonify, render_template, request, send_file
 
 import nse_client as nse
@@ -186,6 +188,22 @@ def api_sim_leaderboard():
     return jsonify(sim.leaderboard_bundle())
 
 
+@app.route("/api/sim/backtest")
+def api_sim_backtest():
+    import backtest_strategies as bt
+    days = request.args.get("days")
+    since = None
+    if days:
+        from datetime import datetime, timezone, timedelta
+        ist = timezone(timedelta(hours=5, minutes=30))
+        since = (datetime.now(ist) - timedelta(days=int(days))).strftime("%Y-%m-%d")
+    return jsonify(bt.run(
+        since_day=since,
+        max_sessions=int(request.args.get("maxSessions", 3)),
+        entry_mode=request.args.get("entryMode", "continuous"),
+    ))
+
+
 @app.route("/api/sim/regime")
 def api_sim_regime():
     import sim
@@ -271,11 +289,13 @@ def api_iv_rank(symbol):
 
 @app.route("/api/log/download")
 def api_log_download():
+    import db
     st = snaplog.status()
     if not st["totalRows"]:
         return jsonify({"error": "No snapshots logged yet"}), 404
-    return send_file(st["logFile"], as_attachment=True,
-                     download_name="nse_snapshots.csv")
+    out = os.path.join(db.DATA_DIR, "snapshots_export.csv")
+    db.export_snapshots_csv(out)
+    return send_file(out, as_attachment=True, download_name="nse_snapshots.csv")
 
 
 @app.errorhandler(Exception)

@@ -370,6 +370,7 @@
         </label>
         <label class="chk"><input type="checkbox" id="simAuto"> Auto (market hours)</label>
         <button id="simReset" class="sell" style="padding:6px 12px">Reset</button>
+        <button id="simBacktest" style="padding:6px 12px">⏮ Backtest history</button>
         <span style="color:var(--muted);font-size:11px">Each idea sized ₹1L · target=right, stop=wrong · multi-day hold (≤3 sessions).</span>
       </div>
       <div id="scanFilters" class="scan-filters" style="display:none">
@@ -1526,6 +1527,35 @@
         <div class="chart-note">${note}</div>`;
     }
 
+    function renderBacktest(bt) {
+      if (!bt) return "";
+      if (bt.message)
+        return `<div class="chart-note" style="margin-top:8px">${bt.message}</div>`;
+      const strats = bt.strategies || [];
+      const rowsById = {};
+      strats.forEach(s => rowsById[s.id] = s);
+      const rows = [...strats].sort((a, b) => (b.equity.final) - (a.equity.final)).map(s => {
+        const wr = s.winRate == null ? "—" : s.winRate + "%";
+        return `<tr>
+          <td class="sym">${s.name}</td>
+          <td>${s.trades}</td><td>${s.closed}</td>
+          <td class="pos">${s.target}</td><td class="neg">${s.stop}</td><td style="color:var(--muted)">${s.expired}</td>
+          <td class="${s.winRate>=50?'pos':'neg'}">${wr}</td>
+          <td class="${(s.avgPnlPct||0)>=0?'pos':'neg'}">${s.avgPnlPct==null?"—":_sgn(s.avgPnlPct)+s.avgPnlPct+"%"}</td>
+          <td class="${s.equity.final>=0?'pos':'neg'}">${_sgn(s.equity.final)}₹${fmtNum(s.equity.final)}</td>
+          <td>${miniSpark(s.equity.points, 110, 26)}</td></tr>`;
+      }).join("");
+      const lbGrid = renderSimLeaderboard({ leaderboard: bt.leaderboard, equity: {} })
+        .replace("Regime leaderboard — which strategy wins in which regime",
+                 "Backtest: regime leaderboard");
+      return `<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:12px">
+        <h3 class="reco-colhead">Offline backtest — strategies replayed over history</h3>
+        <div class="chart-note">${bt.cycles} cycles across ${(bt.days||[]).length} day(s) · ${simDT(bt.range.from)} → ${simDT(bt.range.to)} · entry: ${bt.entryMode} · hold ≤${bt.maxSessions} sessions. Same generators as the live sim, replayed on archived context.</div>
+        <table class="tbl"><thead><tr><th>Strategy</th><th>Trades</th><th>Closed</th><th>✓Tgt</th><th>✗Stop</th><th>⏱Exp</th><th>Win%</th><th>Avg%/trade</th><th>Realized P&amp;L</th><th>Equity</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+        ${lbGrid}</div>`;
+    }
+
     function renderSim(sum, daily, lb) {
       const anyTrades = (sum.strategies || []).some(s => s.open || s.closed);
       const banner = renderSimBanner(sum.regime);
@@ -1535,7 +1565,8 @@
         `<div class="loading">No simulated trades yet. Click <b>“Take all strategies ▶”</b> to snapshot every strategy's live ideas, or turn on <b>Auto</b>. Each strategy is then tracked independently so you can compare — day by day — which one fits the regime.</div>`;
       const detail = sum.detail ? renderSimTrades(sum.detail)
         : `<div class="chart-note" style="margin:2px 0 6px">Click a strategy card above to see its open &amp; closed trades.</div>`;
-      return banner + pick + cards + hint + detail + renderSimLeaderboard(lb) + renderSimDaily(daily);
+      return banner + pick + cards + hint + detail + renderSimLeaderboard(lb) +
+        renderSimDaily(daily) + `<div id="btResult"></div>`;
     }
 
     // Fire a toast/beep/notification when a strategy takes new ideas or a trade
@@ -2328,6 +2359,21 @@
       window._simStrategy = "";
       await fetch("/api/sim/reset", { method: "POST" });
       load();
+    };
+    document.getElementById("simBacktest").onclick = async () => {
+      const btn = document.getElementById("simBacktest");
+      const host = document.getElementById("btResult");
+      if (!host) return;
+      btn.disabled = true; btn.textContent = "⏳ Replaying…";
+      host.innerHTML = `<div class="loading">Replaying all strategies over archived context…</div>`;
+      try {
+        const mode = document.getElementById("simMode").value || "continuous";
+        const bt = await fetch("/api/sim/backtest?entryMode=" + mode).then(r => r.json());
+        host.innerHTML = renderBacktest(bt);
+      } catch (e) {
+        host.innerHTML = `<div class="chart-note">Backtest failed: ${e}</div>`;
+      }
+      btn.disabled = false; btn.textContent = "⏮ Backtest history";
     };
     document.getElementById("fReset").onclick = () => {
       document.getElementById("fDir").value = "any";

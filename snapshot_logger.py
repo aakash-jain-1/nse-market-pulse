@@ -1,52 +1,40 @@
 """
 Snapshot logger + backtester
 ============================
-Periodically records the "demand" board and volume-gainers to a CSV so we can
-later analyze whether stocks flagged as in-demand actually moved. Runs on a
-background thread during market hours; snapshots can also be captured on demand.
+Periodically records the "demand" board and volume-gainers so we can later
+analyze whether stocks flagged as in-demand actually moved, PLUS a trimmed
+snapshot of the full strategy context (for offline strategy backtests). Runs on
+a background thread during market hours; snapshots can also be captured on demand.
 
-The log is a flat CSV (one row per symbol per snapshot) using only the stdlib,
-so there's no pandas/DB dependency. File lives in data/snapshots.csv (gitignored
-via *.csv).
+Storage is SQLite (`db.py`, data/market.db) — indexed, queryable, millions of
+rows, no server. On first run any legacy snapshots.csv / iv_log.csv is imported.
 """
 
-import csv
 import os
 import threading
 import time
 from datetime import datetime, timezone, timedelta
 
+import db
 import nse_client as nse
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-LOG_FILE = os.path.join(DATA_DIR, "snapshots.csv")
-IV_LOG_FILE = os.path.join(DATA_DIR, "iv_log.csv")
 
-FIELDS = [
-    "ts", "view", "rank", "symbol", "ltp", "pChange",
-    "score", "signalCount", "volMult", "week1volChange", "volume", "value",
-]
-
-IV_FIELDS = [
-    "ts", "symbol", "expiry", "atmStrike", "atmIV", "ceIV", "peIV",
-    "pcr", "underlying",
-]
-
-INTERVAL = 60      # seconds between automatic snapshots
-IV_INTERVAL = 300  # seconds between ATM-IV captures (heavier, so slower)
+INTERVAL = 60          # seconds between automatic snapshots
+IV_INTERVAL = 300      # seconds between ATM-IV captures (heavier, so slower)
+CONTEXT_INTERVAL = 300  # seconds between strategy-context captures (for backtest)
 
 # Always-tracked indices + the most-active F&O stocks (liquid, consistent IV).
 IV_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
 
-_lock = threading.Lock()
-_iv_lock = threading.Lock()
 _thread = None
 _running = False
 _last_capture = None
 _last_error = None
 _last_iv_capture = None
+_last_context_capture = None
 
 
 def _now_ist():
@@ -100,14 +88,8 @@ def capture_snapshot():
     if not rows:
         _last_error = "No data returned from NSE"
         return 0
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with _lock:
-        new_file = not os.path.exists(LOG_FILE)
-        with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=FIELDS)
-            if new_file:
-                w.writeheader()
-            w.writerows(rows)
+    db.init()
+    db.insert_snapshots(rows)
     _last_capture = _now_ist().isoformat(timespec="seconds")
     _last_error = None
     return len(rows)
@@ -156,21 +138,63 @@ def capture_iv():
 
     if not rows:
         return 0
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with _iv_lock:
-        new_file = not os.path.exists(IV_LOG_FILE)
-        with open(IV_LOG_FILE, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=IV_FIELDS)
-            if new_file:
-                w.writeheader()
-            w.writerows(rows)
+    db.init()
+    db.insert_iv(rows)
     _last_iv_capture = ts
     return len(rows)
+
+
+# Only the fields each strategy generator actually reads, so the stored context
+# stays small yet lets us replay strategies.generate() faithfully offline.
+def _trim_context(ctx):
+    def pick(rows, keys):
+        return [{k: r.get(k) for k in keys if r.get(k) is not None}
+                for r in (rows or [])]
+
+    idx = ctx.get("index") or {}
+    keep_idx = {}
+    for name in ("NIFTY", "BANKNIFTY"):
+        d = idx.get(name)
+        if d:
+            keep_idx[name] = {k: d.get(k) for k in
+                              ("last", "pChange", "advances", "declines")}
+    return {
+        "scanner": pick(ctx.get("scanner"),
+                        ["symbol", "ltp", "pChange", "oiSignal", "volMult",
+                         "tags", "listCount", "lists", "value", "score", "signalCount"]),
+        "gainers": pick(ctx.get("gainers"), ["symbol", "ltp", "pChange"]),
+        "losers": pick(ctx.get("losers"), ["symbol", "ltp", "pChange"]),
+        "volgainers": pick(ctx.get("volgainers"),
+                           ["symbol", "ltp", "pChange", "week1volChange"]),
+        "oispurts": pick(ctx.get("oispurts"),
+                         ["symbol", "ltp", "pChange", "signalKind", "signal",
+                          "oiPctChange", "latestOI", "changeInOI"]),
+        "quotes": {s: {k: q.get(k) for k in
+                       ("ltp", "vwap", "yearHigh", "yearLow", "deliveryPct", "pChange")}
+                   for s, q in (ctx.get("quotes") or {}).items()},
+        "index": keep_idx,
+        "niftyPcr": ctx.get("niftyPcr"),
+    }
+
+
+def capture_context(ctx):
+    """Store a trimmed+gzipped snapshot of the strategy context for backtesting."""
+    global _last_context_capture
+    if not ctx:
+        return 0
+    regime = ctx.get("regime") or {}
+    now = _now_ist()
+    n = db.insert_context(
+        now.isoformat(timespec="seconds"), now.strftime("%Y-%m-%d"),
+        regime.get("label"), regime.get("niftyPct"), _trim_context(ctx))
+    _last_context_capture = now.isoformat(timespec="seconds")
+    return n
 
 
 def _loop():
     global _last_error, _last_iv_capture
     last_iv = 0.0
+    last_context = 0.0
     while _running:
         try:
             if is_market_hours():
@@ -181,7 +205,8 @@ def _loop():
                 # Multi-strategy simulator: build the shared context once, mark
                 # all strategies' trades to market, auto-take fresh ideas (mode-
                 # aware) when enabled, and roll up today's regime + per-strategy
-                # stats + NIFTY close.
+                # stats + NIFTY close. The SAME context is periodically archived
+                # (trimmed) so we can replay strategies offline (backtest).
                 try:
                     import sim
                     ctx = sim.build_ctx()
@@ -189,6 +214,9 @@ def _loop():
                     if sim.get_auto():
                         sim.take(ctx=ctx, auto=True)
                     sim.daily_rollup(ctx)
+                    if (time.time() - last_context) >= CONTEXT_INTERVAL:
+                        capture_context(ctx)
+                        last_context = time.time()
                 except Exception:
                     pass
         except Exception as e:
@@ -214,32 +242,29 @@ def stop():
     _running = False
 
 
-def _read_rows():
-    if not os.path.exists(LOG_FILE):
-        return []
-    with open(LOG_FILE, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
 def status():
-    rows = _read_rows()
-    times = sorted({r["ts"] for r in rows})
-    iv_rows = _read_iv_rows()
-    iv_times = sorted({r["ts"] for r in iv_rows})
+    db.init()
+    snap = db.snapshot_stats()
+    iv = db.iv_stats()
+    ctx = db.context_stats()
     return {
         "running": _running,
         "marketHours": is_market_hours(),
         "intervalSec": INTERVAL,
-        "totalRows": len(rows),
-        "snapshots": len(times),
-        "firstSnapshot": times[0] if times else None,
-        "lastSnapshot": times[-1] if times else None,
+        "totalRows": snap["total"],
+        "snapshots": snap["distinct"],
+        "firstSnapshot": snap["first"],
+        "lastSnapshot": snap["last"],
         "lastCapture": _last_capture,
         "lastError": _last_error,
-        "logFile": LOG_FILE,
-        "ivSnapshots": len(iv_times),
-        "ivSymbols": len({r["symbol"] for r in iv_rows}),
+        "db": db.DB_FILE,
+        "ivSnapshots": iv["snapshots"],
+        "ivSymbols": iv["symbols"],
         "lastIvCapture": _last_iv_capture,
+        "contextCycles": ctx["cycles"],
+        "contextDays": ctx["days"],
+        "contextBytes": ctx["bytes"],
+        "lastContextCapture": _last_context_capture,
     }
 
 
@@ -256,7 +281,8 @@ def backtest(view="demand"):
     view, how did its price change from that first sighting to its most recent
     sighting in the log? This tests whether the signal was predictive.
     """
-    rows = [r for r in _read_rows() if r["view"] == view]
+    db.init()
+    rows = db.snapshot_rows(view)
     if not rows:
         return {"view": view, "symbols": [], "summary": None,
                 "message": "No logged data yet for this view."}
@@ -310,13 +336,6 @@ def backtest(view="demand"):
             "message": None}
 
 
-def _read_iv_rows():
-    if not os.path.exists(IV_LOG_FILE):
-        return []
-    with open(IV_LOG_FILE, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
 def iv_rank(symbol):
     """
     IV rank/percentile for a symbol from logged ATM IV history.
@@ -325,11 +344,8 @@ def iv_rank(symbol):
     Needs a couple of samples; the more history logged, the more meaningful.
     """
     symbol = (symbol or "").upper().strip()
-    series = [
-        (r["ts"], _to_float(r.get("atmIV")))
-        for r in _read_iv_rows() if r.get("symbol") == symbol
-    ]
-    series = [(t, v) for t, v in series if v is not None]
+    db.init()
+    series = [(t, v) for t, v in db.iv_series(symbol) if v is not None]
     if len(series) < 2:
         return {"symbol": symbol, "enough": False, "samples": len(series)}
     series.sort(key=lambda x: x[0])
