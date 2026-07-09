@@ -278,6 +278,14 @@ flowchart LR
   *same* generators over archived `context_log`, opening trades from the context
   and resolving exits on real minute candles — no need to wait for live days once
   context has been captured.
+- **Daily-bar historical backtest** (`/api/sim/backtest_daily`, `backtest_daily.py`,
+  📅 button): "how would the strategies have worked over the last N days?" using
+  **real NSE end-of-day** history (`get_stock_history` + near-month futures OI via
+  `foCPV`). Reconstructs the **6 EOD-computable strategies** (Momentum,
+  Mean-Reversion, Delivery%, High-Proximity, Volume-Breakout, OI Smart-Money) with
+  the same risk-based R sizing. Trades off fidelity for reach: EOD entries, exits
+  on the next days' high/low (a bar piercing both stop & target is a stop). VWAP /
+  ORB / iVWAP are intraday-only and not covered here.
 - **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
   entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
 
@@ -411,6 +419,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads |
 | `GET /api/sim/performance` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
+| `GET /api/sim/backtest_daily[?days=&universe=&maxHold=]` | Daily-bar historical backtest over real NSE EOD data (6 strategies) |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
@@ -428,7 +437,8 @@ nse-market-pulse/
 ├── strategies.py           # 9 strategy generators + market-regime detector
 ├── sim.py                  # Multi-strategy forward-tester + regime leaderboard
 ├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
-├── backtest_strategies.py  # Offline backtester (replays strategies, OHLCV exits)
+├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
+├── backtest_daily.py        # Daily-bar historical backtest over real NSE EOD data
 ├── test_intrabar.py        # Unit tests for the intrabar resolver
 ├── paper.py                # Paper-trading engine (equity/futures/options)
 ├── snapshot_logger.py      # Background logger (snapshots + IV + context) → SQLite

@@ -368,4 +368,6 @@ if __name__ == "__main__":
         import sim
         sim.set_auto(True)
         snaplog.start()
-    app.run(debug=DEBUG, port=5055)
+    # threaded so a long request (e.g. a full-universe daily backtest, ~2-3 min)
+    # doesn't block the dashboard's auto-refresh polling.
+    app.run(debug=DEBUG, port=5055, threaded=True)

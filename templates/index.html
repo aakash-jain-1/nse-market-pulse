@@ -375,7 +375,15 @@
         <label class="chk"><input type="checkbox" id="simAuto"> Auto (market hours)</label>
         <button id="simReset" class="sell" style="padding:6px 12px">Reset</button>
         <button id="simBacktest" style="padding:6px 12px">⏮ Backtest history</button>
-        <button id="simBacktestDaily" style="padding:6px 12px">📅 Daily 30d (real EOD)</button>
+        <label>Daily universe
+          <select id="simBtUniverse">
+            <option value="40">Top 40</option>
+            <option value="80">Top 80</option>
+            <option value="150">Top 150</option>
+            <option value="260">All F&amp;O (~210)</option>
+          </select>
+        </label>
+        <button id="simBacktestDaily" style="padding:6px 12px">📅 Daily backtest (real EOD)</button>
         <span style="color:var(--muted);font-size:11px">Risk-based sizing: each trade risks ₹2,000 to its stop · target=right, stop=wrong · multi-day hold (≤3 sessions). Expectancy in R.</span>
       </div>
       <div id="scanFilters" class="scan-filters" style="display:none">
@@ -1928,7 +1936,7 @@
       const nc = (bt.notCovered || []).map(x => `<b>${x.name}</b> (${x.reason})`).join("; ");
       return `<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:12px">
         <h3 class="reco-colhead">📅 Daily-bar historical backtest — real NSE end-of-day, last ${bt.days} days</h3>
-        <div class="chart-note"><b>${bt.universeWithData}</b> liquid F&amp;O names · ${bt.range.from} → ${bt.range.to} · ~${bt.barsMedian} bars/name · hold ≤${bt.maxHold} trading days · risk ₹${fmtNum(bt.riskPerTrade)}/trade.</div>
+        <div class="chart-note"><b>${bt.universeWithData}</b> liquid F&amp;O names · ${bt.range.from} → ${bt.range.to} · ~${bt.barsMedian} bars/name · hold ≤${bt.maxHold} trading days · risk ₹${fmtNum(bt.riskPerTrade)}/trade${bt.oiExpiry ? ` · OI from ${bt.oiExpiry} futures (${bt.oiNames} names)` : ""}.</div>
         <table class="tbl"><thead><tr>
           <th>Strategy</th><th title="All reconstructed trades in the window">Trades</th><th>Closed</th>
           <th title="Target hit">✓Tgt</th><th title="Stop hit">✗Stop</th><th title="Time-expired at horizon close">⏱Exp</th>
@@ -2764,15 +2772,19 @@
     };
     document.getElementById("simBacktestDaily").onclick = async () => {
       const btn = document.getElementById("simBacktestDaily");
+      const uni = document.getElementById("simBtUniverse").value || "40";
+      const big = parseInt(uni, 10) >= 150;
+      const label = parseInt(uni, 10) >= 210 ? "all ~210 F&O names" : "top " + uni + " names";
+      const eta = big ? "this can take ~1-3 min on a cold run" : "first run ~20-40s, then cached";
       btn.disabled = true; btn.textContent = "⏳ Pulling EOD history…";
-      setBtHtml("btDailyResult", "_btDailyHtml", `<div class="loading" style="margin-top:12px">Fetching ~40 names' daily history from NSE and reconstructing strategies… first run ~20-40s, then cached.</div>`);
+      setBtHtml("btDailyResult", "_btDailyHtml", `<div class="loading" style="margin-top:12px">Fetching ${label}' daily history + OI from NSE and reconstructing strategies… ${eta}. (The dashboard keeps refreshing meanwhile.)</div>`);
       try {
-        const bt = await fetch("/api/sim/backtest_daily?days=30&universe=40").then(r => r.json());
+        const bt = await fetch("/api/sim/backtest_daily?days=30&universe=" + uni).then(r => r.json());
         setBtHtml("btDailyResult", "_btDailyHtml", renderDailyBacktest(bt));
       } catch (e) {
         setBtHtml("btDailyResult", "_btDailyHtml", `<div class="chart-note">Daily backtest failed: ${e}</div>`);
       }
-      btn.disabled = false; btn.textContent = "📅 Daily 30d (real EOD)";
+      btn.disabled = false; btn.textContent = "📅 Daily backtest (real EOD)";
     };
     document.getElementById("fReset").onclick = () => {
       document.getElementById("fDir").value = "any";

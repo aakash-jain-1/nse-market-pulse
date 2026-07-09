@@ -33,7 +33,8 @@ NSE/
 ├── strategies.py      # Strategy library (9 generators) + market-regime detector
 ├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
 ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
-├── backtest_strategies.py # Offline backtester: replays strategies, resolves on OHLCV
+├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
+├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (6 strategies)
 ├── test_intrabar.py   # Unit tests for the intrabar resolver
 ├── db.py              # SQLite store (snapshots / IV / context + durable sim_trades ledger)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
@@ -375,6 +376,22 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     + equity curves + a regime leaderboard, plus `resolve` mode and a
     `{intrabar, ltpFallback}` count. `?resolve=ltp` reverts to the old coarse
     per-cycle LTP resolution. UI: "⏮ Backtest history" button in the Sim tab.
+  - **Daily-bar historical backtest** (`backtest_daily.py`, `/api/sim/backtest_daily`,
+    "📅 Daily backtest" button): answers "how would the strategies have done over
+    the last N days?" *today*, without needing archived context. Pulls REAL NSE EOD
+    history (`nse.get_stock_history` daily OHLCV+delivery% + near-month futures OI
+    via `nse.get_futures_oi_history`/`foCPV`, near expiry from `nse.get_futures`),
+    reconstructs the **6 EOD-computable strategies** (momentum, meanrev, delivery,
+    high52w=52w-proxy, vol_breakout, oi_smart=rising-OI buildup) over a selectable
+    universe — `LIQUID` names first, extended with a spread sample of the rest;
+    the UI offers Top 40/80/150 or **All F&O (~210)** (`universe` param, capped 260,
+    `_universe()` clamps to the live count). Full-universe cold runs ≈ ~840 NSE
+    requests / ~3 min, then 15-min cached. Enters at the signal day's close,
+    resolves on subsequent daily high/low (stop-first on straddles), same
+    `size_position` R sizing. Concurrency = 6 workers; relies on the 15-min history
+    cache. VWAP/ORB/iVWAP are intraday-only → in `NOT_COVERED`. This is a daily-bar
+    APPROXIMATION (lower fidelity than the live sim / context backtest) — the UI
+    says so; don't conflate its numbers with the intraday strategies.
   - **Intrabar resolution** (`intrabar.py`): the sims used to decide target/stop
     against a single LTP per cycle (60s live, 5-min backtest), which misses wicks
     and detects exits late. `intrabar.resolve(trade, bars, risk, max_sessions)`
@@ -395,8 +412,8 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     time-to-exit stats. On demand via `/api/ohlc/<sym>?from=&to=` (baked epochs);
     no storage — trades are within NSE's ~30-40 day 1-min retention.
   - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,performance,
-    backtest[?resolve=intrabar|ltp],regime,take,auto,mode,reset}`. Still SEPARATE
-    from the manual paper account.
+    backtest[?resolve=intrabar|ltp],backtest_daily[?days=&universe=&maxHold=],
+    regime,take,auto,mode,reset}`. Still SEPARATE from the manual paper account.
 - **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
   notional), long **and** short with netting/flip-through-zero, MTM on live
   near-month price. New route `/api/paper/futures_order`; traded from the detail

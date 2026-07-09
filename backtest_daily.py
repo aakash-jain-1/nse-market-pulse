@@ -14,11 +14,12 @@ This is DIFFERENT from `backtest_strategies.py`:
     subsequent daily high/low (a bar that pierces both stop and target is counted
     as a STOP first — conservative), no intrabar wick precision.
 
-Coverage: the 5 strategies computable from daily price/volume/delivery in ONE call
-per symbol — Momentum, Mean-Reversion, Delivery%, High-Proximity, Volume-Breakout.
-VWAP / ORB / iVWAP are intraday-only (no daily equivalent); OI-Smart needs the
-separate daily-OI (foCPV) feed + per-symbol expiry and is left to the live sim /
-context backtest. Sizing matches the live sim: fixed RISK_PER_TRADE, outcomes in
+Coverage: 6 strategies. Five come from ONE daily price/volume/delivery call per
+symbol — Momentum, Mean-Reversion, Delivery%, High-Proximity, Volume-Breakout.
+The sixth, OI Smart-Money, adds a second call per symbol for the near-month
+futures' daily open-interest history (foCPV). VWAP / ORB / iVWAP remain
+intraday-only (no daily equivalent) and are left to the live sim / context
+backtest. Sizing matches the live sim: fixed RISK_PER_TRADE, outcomes in
 R-multiples.
 """
 import concurrent.futures as cf
@@ -42,12 +43,16 @@ STRATS = [
      "desc": "Within 3% of the available-history high (52w proxy) on an up day (anchoring/breakout edge)."},
     {"id": "vol_breakout", "name": "Volume Breakout",        "stop": 3.0, "target": 6.0,
      "desc": "Close breaks the prior 20-day high/low on a >=2x volume expansion."},
+    {"id": "oi_smart",     "name": "F&O OI Smart-Money",     "stop": 3.0, "target": 6.0,
+     "desc": "Rising near-month OI (>=3%) with price confirming: long buildup (price up + OI up) -> long, short buildup (price down + OI up) -> short. Entered/resolved on the equity bars."},
 ]
 STRAT_MAP = {s["id"]: s for s in STRATS}
 
+# OI Smart-Money only fires when we could load that symbol's daily OI; below is
+# the fixed magnitude gate.
+OI_MIN_PCT = 3.0
+
 NOT_COVERED = [
-    {"id": "oi_smart", "name": "F&O OI Smart-Money",
-     "reason": "Needs daily OI (foCPV) + per-symbol expiry — use the live sim / context backtest."},
     {"id": "vwap", "name": "VWAP Trend",
      "reason": "Intraday cumulative VWAP has no daily-bar equivalent."},
     {"id": "orb", "name": "Opening-Range Breakout",
@@ -82,6 +87,46 @@ def _clean_date(b):
         return datetime.strptime(b["date"], "%d-%b-%Y").strftime("%Y-%m-%d")
     except Exception:
         return (b.get("iso") or "")[:10]
+
+
+def _dmy_to_iso(s):
+    """foCPV date '08-Jul-2026' -> '2026-07-08'."""
+    try:
+        return datetime.strptime(s, "%d-%b-%Y").strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def _near_expiry():
+    """The current near-month F&O expiry (e.g. '31-Jul-2026') for foCPV, or None.
+    All stock futures share the monthly expiry, so one lookup covers everyone; the
+    near contract's foCPV history spans ~3 months (enough for 30/60/90-day looks)."""
+    try:
+        rows = nse.get_futures(limit=15)
+    except Exception:
+        return None
+    exps = sorted((r.get("daysToExpiry"), r.get("expiry")) for r in rows
+                  if r.get("expiry") and (r.get("daysToExpiry") or -1) >= 0)
+    return exps[0][1] if exps else None
+
+
+def _oi_map(symbol, expiry):
+    """{clean_date: oiPct} from the near-month futures' daily OI history."""
+    out = {}
+    if not expiry:
+        return out
+    try:
+        rows = nse.get_futures_oi_history(symbol, expiry)
+    except Exception:
+        return out
+    for r in rows:
+        d = _dmy_to_iso(r.get("date") or "")
+        oi, chg = r.get("oi"), r.get("changeOi")
+        if not d or oi is None or chg is None:
+            continue
+        prev = oi - chg
+        out[d] = (chg / prev * 100) if prev else None
+    return out
 
 
 def _universe(size):
@@ -217,7 +262,7 @@ def _trade(sid, direction, bars, feats, i, max_hold):
     return t
 
 
-def _backtest_symbol(bars, cutoff_iso, max_hold):
+def _backtest_symbol(bars, oi_map, cutoff_iso, max_hold):
     """All trades for one symbol across every strategy (no overlapping per s/strat)."""
     feats = _features(bars)
     trades = []
@@ -243,6 +288,14 @@ def _backtest_symbol(bars, cutoff_iso, max_hold):
                 sigs.append(("vol_breakout", "LONG"))
             elif c < f["lo20"]:
                 sigs.append(("vol_breakout", "SHORT"))
+        # OI Smart-Money: rising OI (>= OI_MIN_PCT) + price confirming = buildup.
+        if oi_map:
+            oi_pct = oi_map.get(b["d"])
+            if oi_pct is not None and oi_pct >= OI_MIN_PCT:
+                if f["ret1"] > 0:
+                    sigs.append(("oi_smart", "LONG"))
+                elif f["ret1"] < 0:
+                    sigs.append(("oi_smart", "SHORT"))
         for sid, direction in sigs:
             if busy.get(sid, -1) >= i:
                 continue   # already in a trade for this strategy on this name
@@ -288,13 +341,15 @@ def _scorecard(trades):
     }
 
 
-def run(days=30, universe_size=40, max_hold=5, chunks=3):
+def run(days=30, universe_size=40, max_hold=5, chunks=3, include_oi=True):
     days = max(5, min(int(days), 120))
-    universe_size = max(5, min(int(universe_size), 210))
+    universe_size = max(5, min(int(universe_size), 260))
     max_hold = max(1, min(int(max_hold), 15))
 
     symbols = _universe(universe_size)
+    expiry = _near_expiry() if include_oi else None
     hist = {}
+    ois = {}
 
     def _pull(sym):
         try:
@@ -302,14 +357,16 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3):
             for b in bars:
                 b["symbol"] = sym
                 b["d"] = _clean_date(b)
-            return sym, bars
         except Exception:
-            return sym, []
+            bars = []
+        oi = _oi_map(sym, expiry) if (include_oi and expiry) else {}
+        return sym, bars, oi
 
     with cf.ThreadPoolExecutor(max_workers=6) as pool:
-        for sym, bars in pool.map(_pull, symbols):
+        for sym, bars, oi in pool.map(_pull, symbols):
             if bars:
                 hist[sym] = bars
+                ois[sym] = oi
 
     if not hist:
         return {"message": "No history returned from NSE (rate-limited or off-hours). Try again."}
@@ -322,7 +379,7 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3):
     by_strat = {s["id"]: [] for s in STRATS}
     first_iso = last_iso
     for sym, bars in hist.items():
-        for t in _backtest_symbol(bars, cutoff_iso, max_hold):
+        for t in _backtest_symbol(bars, ois.get(sym, {}), cutoff_iso, max_hold):
             by_strat[t["strategy"]].append(t)
             if t["openedDate"] < first_iso:
                 first_iso = t["openedDate"]
@@ -351,6 +408,8 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3):
         "universeRequested": universe_size,
         "universeWithData": len(hist),
         "barsMedian": _median(bars_counts),
+        "oiExpiry": expiry,
+        "oiNames": sum(1 for v in ois.values() if v),
         "strategies": rows,
         "totals": _scorecard(all_trades),
         "notCovered": NOT_COVERED,
