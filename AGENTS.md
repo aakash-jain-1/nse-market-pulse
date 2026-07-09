@@ -263,12 +263,21 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
   OI-spurts endpoint (partial coverage -> "OI n/a" when unknown). Note stock_fut
   returns only ~20 (most-active) contracts, not the full F&O universe.
 - **Snapshot logging + backtest** (`snapshot_logger.py`) — a daemon thread
-  captures the demand board + volume-gainers (25 each) to `data/snapshots.csv`
-  every 60s **during market hours only** (Mon-Fri 09:15-15:30 IST). The 📊 Log
-  button shows logger status, a manual "Capture now", CSV download, and a simple
+  captures the demand board + volume-gainers (25 each) into SQLite every 60s
+  **during market hours only** (Mon-Fri 09:15-15:30 IST). The 📊 Log button shows
+  logger status, a manual "Capture now", CSV download, and a simple
   **forward-return backtest** (price move from a symbol's first sighting to its
   latest, with avg return + hit rate). Started in `app.py` guarded by
   `WERKZEUG_RUN_MAIN` so the Flask reloader doesn't run two loggers.
+  - **Reliability / self-healing**: the loop runs unattended every market day.
+    Each cycle isolates its sub-tasks (`_run_cycle`: snapshot / IV / sim /
+    context) so one NSE failure can't skip the rest; a heartbeat (`_last_tick`),
+    `_cycles` and `_consecutive_errors` feed `health()`; after `REBUILD_AFTER`
+    failed cycles it force-rebuilds the NSE session; and a **watchdog thread**
+    revives the worker if it dies (`_restarts`). `health()` (`/api/log/health`,
+    also nested in `/api/log/status`) reports `healthy/stalled/threadAlive/
+    watchdogAlive/secondsSinceTick/cycles/restarts` — the Log modal shows a
+    green "healthy" / amber "stalled" / red "down" dot + last tick + restarts.
 
 ## Known limitations
 

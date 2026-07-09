@@ -283,6 +283,11 @@ def api_log_status():
     return jsonify(snaplog.status())
 
 
+@app.route("/api/log/health")
+def api_log_health():
+    return jsonify(snaplog.health())
+
+
 @app.route("/api/log/snapshot", methods=["POST"])
 def api_log_snapshot():
     n = snaplog.capture_snapshot()

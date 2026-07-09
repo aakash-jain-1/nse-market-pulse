@@ -153,7 +153,7 @@ flowchart TB
         SM["sim.py<br/>• per-strategy ledgers<br/>• take/update/summary<br/>• daily rollup + regime leaderboard"]
         BK["backtest_strategies.py<br/>• virtual-clock replay<br/>• scorecards + equity curves"]
         PP["paper.py<br/>• equity/futures/option fills<br/>• MTM P&L"]
-        SL["snapshot_logger.py<br/>• market-hours loop (60s)<br/>• snapshots + IV + context capture"]
+        SL["snapshot_logger.py<br/>• market-hours loop (60s) + watchdog<br/>• snapshots + IV + context capture<br/>• health/heartbeat"]
         DBM["db.py<br/>• SQLite (WAL)<br/>• snapshots / iv_log / context_log"]
     end
 
@@ -387,7 +387,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
-| `GET /api/log/status · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger + signal backtest + CSV export |
+| `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
 | `GET /api/iv/rank/<sym>` | IV rank/percentile from logged ATM-IV history |
 
 ---

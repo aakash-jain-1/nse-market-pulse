@@ -8,6 +8,16 @@ a background thread during market hours; snapshots can also be captured on deman
 
 Storage is SQLite (`db.py`, data/market.db) — indexed, queryable, millions of
 rows, no server. On first run any legacy snapshots.csv / iv_log.csv is imported.
+
+Reliability
+-----------
+The capture loop is designed to run every market day unattended:
+- Each cycle's sub-tasks (snapshot / IV / sim / context) are independently
+  guarded, so one failing NSE call can't skip the others.
+- A heartbeat (`_last_tick`), cycle counter and consecutive-error counter feed
+  `health()`; after a few failed cycles the NSE session is force-rebuilt.
+- A watchdog thread revives the worker if it ever dies (`_restarts`).
+`health()` / `/api/log/health` expose whether capture is actually happening.
 """
 
 import os
@@ -25,16 +35,30 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 INTERVAL = 60          # seconds between automatic snapshots
 IV_INTERVAL = 300      # seconds between ATM-IV captures (heavier, so slower)
 CONTEXT_INTERVAL = 300  # seconds between strategy-context captures (for backtest)
+WATCHDOG_INTERVAL = 30  # seconds between watchdog liveness checks
+STALE_AFTER = 180      # a live thread that hasn't ticked this long = "stalled"
+REBUILD_AFTER = 3      # consecutive failed cycles before forcing a session rebuild
 
 # Always-tracked indices + the most-active F&O stocks (liquid, consistent IV).
 IV_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
 
 _thread = None
+_watchdog = None
 _running = False
 _last_capture = None
 _last_error = None
+_last_error_at = None
 _last_iv_capture = None
 _last_context_capture = None
+
+# Health / heartbeat state (see health()).
+_loop_started = None
+_last_tick = 0.0          # epoch seconds of the last loop iteration
+_cycles = 0               # loop iterations since start
+_consecutive_errors = 0   # cycles in a row that failed to capture the snapshot
+_restarts = 0             # times the watchdog revived a dead worker thread
+_last_iv_run = 0.0        # throttle timers (epoch seconds)
+_last_context_run = 0.0
 
 
 def _now_ist():
@@ -191,55 +215,138 @@ def capture_context(ctx):
     return n
 
 
+def _note_error(msg):
+    global _last_error, _last_error_at
+    _last_error = msg
+    _last_error_at = _now_ist().isoformat(timespec="seconds")
+
+
+def _run_cycle():
+    """
+    One logging cycle. Each sub-task is independently guarded, so a failure in
+    (say) the option-chain IV pull can't stop the demand snapshot or the sim
+    update. Returns True if the core demand/volgainers snapshot captured rows.
+    """
+    global _last_iv_run, _last_context_run
+    ok = False
+    try:
+        ok = capture_snapshot() > 0
+    except Exception as e:
+        _note_error("snapshot: " + str(e))
+
+    try:
+        if (time.time() - _last_iv_run) >= IV_INTERVAL:
+            capture_iv()
+            _last_iv_run = time.time()
+    except Exception as e:
+        _note_error("iv: " + str(e))
+
+    # Multi-strategy simulator: build the shared context ONCE, mark all trades to
+    # market, auto-take fresh ideas when enabled, roll up today's regime + stats,
+    # and periodically archive the (trimmed) context so strategies can be
+    # replayed offline (backtest).
+    try:
+        import sim
+        ctx = sim.build_ctx()
+        sim.update(ctx)
+        if sim.get_auto():
+            sim.take(ctx=ctx, auto=True)
+        sim.daily_rollup(ctx)
+        if (time.time() - _last_context_run) >= CONTEXT_INTERVAL:
+            capture_context(ctx)
+            _last_context_run = time.time()
+    except Exception as e:
+        _note_error("sim: " + str(e))
+    return ok
+
+
 def _loop():
-    global _last_error, _last_iv_capture
-    last_iv = 0.0
-    last_context = 0.0
+    global _loop_started, _last_tick, _cycles, _consecutive_errors
+    _loop_started = _now_ist().isoformat(timespec="seconds")
     while _running:
         try:
+            _last_tick = time.time()
+            _cycles += 1
             if is_market_hours():
-                capture_snapshot()
-                if (time.time() - last_iv) >= IV_INTERVAL:
-                    capture_iv()
-                    last_iv = time.time()
-                # Multi-strategy simulator: build the shared context once, mark
-                # all strategies' trades to market, auto-take fresh ideas (mode-
-                # aware) when enabled, and roll up today's regime + per-strategy
-                # stats + NIFTY close. The SAME context is periodically archived
-                # (trimmed) so we can replay strategies offline (backtest).
-                try:
-                    import sim
-                    ctx = sim.build_ctx()
-                    sim.update(ctx)
-                    if sim.get_auto():
-                        sim.take(ctx=ctx, auto=True)
-                    sim.daily_rollup(ctx)
-                    if (time.time() - last_context) >= CONTEXT_INTERVAL:
-                        capture_context(ctx)
-                        last_context = time.time()
-                except Exception:
-                    pass
+                if _run_cycle():
+                    _consecutive_errors = 0
+                else:
+                    _consecutive_errors += 1
+                    # NSE occasionally drops the session; rebuild it after a few
+                    # failed cycles so we self-heal without a manual restart.
+                    if _consecutive_errors % REBUILD_AFTER == 0:
+                        try:
+                            nse.get_session(force=True)
+                            _note_error(f"forced session rebuild after "
+                                        f"{_consecutive_errors} failed cycles")
+                        except Exception:
+                            pass
         except Exception as e:
-            _last_error = str(e)
-        # Sleep in small steps so stop() is responsive.
+            _note_error("loop: " + str(e))
+        # Sleep in small steps so stop() stays responsive.
         for _ in range(INTERVAL):
             if not _running:
                 break
             time.sleep(1)
 
 
+def _watchdog_loop():
+    """Revive the worker thread if it ever dies, so capture survives crashes."""
+    global _thread, _restarts
+    while _running:
+        for _ in range(WATCHDOG_INTERVAL):
+            if not _running:
+                return
+            time.sleep(1)
+        if _running and (_thread is None or not _thread.is_alive()):
+            _restarts += 1
+            _note_error("watchdog: worker thread died - restarting")
+            _thread = threading.Thread(target=_loop, daemon=True,
+                                       name="snapshot-logger")
+            _thread.start()
+
+
 def start():
-    global _thread, _running
+    global _thread, _watchdog, _running
     if _running:
         return
     _running = True
     _thread = threading.Thread(target=_loop, daemon=True, name="snapshot-logger")
     _thread.start()
+    _watchdog = threading.Thread(target=_watchdog_loop, daemon=True,
+                                 name="snapshot-watchdog")
+    _watchdog.start()
 
 
 def stop():
     global _running
     _running = False
+
+
+def health():
+    """Derived health for the UI/monitoring: is capture actually happening?"""
+    alive = bool(_thread and _thread.is_alive())
+    since_tick = (time.time() - _last_tick) if _last_tick else None
+    mkt = is_market_hours()
+    # A live thread that hasn't ticked within STALE_AFTER during market hours is
+    # stalled (stuck on a hung call); outside market hours idling is expected.
+    stalled = bool(mkt and (since_tick is None or since_tick > STALE_AFTER))
+    healthy = bool(_running and alive and not stalled)
+    return {
+        "healthy": healthy,
+        "running": _running,
+        "threadAlive": alive,
+        "watchdogAlive": bool(_watchdog and _watchdog.is_alive()),
+        "marketHours": mkt,
+        "stalled": stalled,
+        "loopStarted": _loop_started,
+        "cycles": _cycles,
+        "secondsSinceTick": round(since_tick, 1) if since_tick is not None else None,
+        "consecutiveErrors": _consecutive_errors,
+        "restarts": _restarts,
+        "lastError": _last_error,
+        "lastErrorAt": _last_error_at,
+    }
 
 
 def status():
@@ -265,6 +372,7 @@ def status():
         "contextDays": ctx["days"],
         "contextBytes": ctx["bytes"],
         "lastContextCapture": _last_context_capture,
+        "health": health(),
     }
 
 
