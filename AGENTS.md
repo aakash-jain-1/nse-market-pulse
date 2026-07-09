@@ -202,7 +202,10 @@ trading works for any tradable symbol (not just hot-list names).
  symbol->LTP map. **Options too:** `place_option_order()` fills CE/PE at the
  live premium (from the option chain) via a trade box in the ⛓ Options modal;
  option positions are tracked per-contract and re-priced live in the portfolio.
- Quantity is unit-based (lot sizes not enforced). **Limitation:** only symbols currently in the hot lists
+ **Options are sized in LOTS** — `place_option_order(...lots)` multiplies by the
+ underlying's market lot (`nse_client.get_lot_size()`, from NSE's `fo_mktlots.csv`,
+ 215 names, cached a day); the trade box shows lot size + total units + est. cost,
+ and the portfolio/orders show lots. **Limitation:** only symbols currently in the hot lists
   (~100-150) have a price, so only those are tradable. State persists to
   `paper_state.json` (gitignored). This is broker-agnostic by design: swapping
   in a real broker feed later only changes the price/fill source.
@@ -235,12 +238,14 @@ trading works for any tradable symbol (not just hot-list names).
   Plan: keep the paper-trading interface, swap `get_price`/fills for the broker
   feed. Needs the user's API credentials.
 - Phone/LAN access + optional deploy.
-- Enforce option lot sizes in paper trading (currently unit-based).
 - Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
   bits (quotes, historical). See README/analysis for the API landscape.
 
 ## Done recently
 
+- **Lot-size enforcement in paper options**: options now trade in lots
+  (`get_lot_size()` from `fo_mktlots.csv`); trade box + portfolio show lots/units.
+- **One-click deep-dive** (🔬) from every table row, Ideas card and momentum row.
 - **Stock Deep-Dive** (`get_stock_deepdive()` / `get_stock_history()` /
   `_analyze_stock()`): 30/60/90-day history + delivery/volume/volatility stats,
   live F&O/options snapshot, and a synthesized bias + levels + today's read.
@@ -284,8 +289,8 @@ trading works for any tradable symbol (not just hot-list names).
 
 ## Futures roadmap (user wants to trade futures)
 
-- Futures paper trading (lot sizes, margin/leverage, MTM). Needs a lot-size
-  source (stock_fut lacks marketLot; NSE publishes an F&O lot-size master).
+- Futures paper trading (margin/leverage, MTM). Lot sizes are now available via
+  `get_lot_size()` (fo_mktlots.csv) and `FH_MARKET_LOT` (foCPV).
 - Rollover tracker (OI shift current-month -> next-month near expiry).
 - Full F&O universe (stock_fut is only ~20 most-active contracts).
 

@@ -428,6 +428,7 @@ def get_option_chain(symbol, expiry=None):
         "atmStrike": atm,
         "support": _top("pe"),
         "resistance": _top("ce"),
+        "lotSize": nse.get_lot_size(symbol),
     }
     _cache[key] = (time.time(), out)
     return out

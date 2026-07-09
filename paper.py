@@ -140,12 +140,12 @@ def place_order(symbol, side, qty):
         return True, "Order executed", order
 
 
-def place_option_order(underlying, expiry, strike, opt_type, side, qty):
+def place_option_order(underlying, expiry, strike, opt_type, side, lots):
     """
-    Simulated option order. Fills at the current premium (LTP) from the option
-    chain. Positions are keyed by the full contract so CE/PE and each strike are
-    tracked separately. Quantity is in units (lot sizes are not enforced — this
-    is a simplified paper simulation).
+    Simulated option order sized in LOTS (real F&O sizing). Fills at the current
+    premium (LTP) from the option chain. Total quantity = lots x the underlying's
+    market lot; cost = premium x quantity. Positions are keyed by the full
+    contract so CE/PE and each strike are tracked separately.
     """
     import nse_quote
 
@@ -157,14 +157,17 @@ def place_option_order(underlying, expiry, strike, opt_type, side, qty):
     if side not in ("BUY", "SELL"):
         return False, "Side must be BUY or SELL", None
     try:
-        qty = int(qty)
+        lots = int(lots)
         strike = float(strike)
     except (TypeError, ValueError):
-        return False, "Invalid strike or quantity", None
-    if qty <= 0:
-        return False, "Quantity must be positive", None
+        return False, "Invalid strike or lots", None
+    if lots <= 0:
+        return False, "Lots must be positive", None
     if not expiry:
         return False, "Expiry is required", None
+
+    lot_size = nse.get_lot_size(underlying) or 1
+    qty = lots * lot_size
 
     price = nse_quote.get_option_price(underlying, expiry, strike, opt_type)
     if price is None or price <= 0:
@@ -181,35 +184,40 @@ def place_option_order(underlying, expiry, strike, opt_type, side, qty):
         if side == "BUY":
             if cost > state["cash"]:
                 return (False,
-                        f"Insufficient virtual cash: need Rs {cost:,.0f}, "
-                        f"have Rs {state['cash']:,.0f}", None)
+                        f"Insufficient virtual cash: need Rs {cost:,.0f} "
+                        f"({lots} lot(s) x {lot_size}), have Rs {state['cash']:,.0f}", None)
             state["cash"] -= cost
             if pos:
                 total_qty = pos["qty"] + qty
                 pos["avgPrice"] = (pos["avgPrice"] * pos["qty"] + cost) / total_qty
                 pos["qty"] = total_qty
+                pos["lots"] = pos.get("lots", 0) + lots
             else:
                 state["positions"][key] = {
                     "qty": qty, "avgPrice": price, "kind": "option",
                     "label": label, "underlying": underlying, "expiry": expiry,
                     "strike": strike, "optType": opt_type,
+                    "lots": lots, "lotSize": lot_size,
                 }
         else:  # SELL
             held = pos["qty"] if pos else 0
             if qty > held:
-                return False, f"Cannot sell {qty} {label}: you hold {held}", None
+                held_lots = held // lot_size if lot_size else held
+                return False, f"Cannot sell {lots} lot(s) of {label}: you hold {held_lots} lot(s)", None
             state["cash"] += cost
             pos["qty"] -= qty
+            pos["lots"] = pos.get("lots", 0) - lots
             if pos["qty"] == 0:
                 del state["positions"][key]
 
         order = {
             "time": _now(), "symbol": label, "side": side, "qty": qty,
+            "lots": lots, "lotSize": lot_size,
             "price": round(price, 2), "value": round(cost, 2),
         }
         state["orders"].append(order)
         _save(state)
-        return True, "Order executed", order
+        return True, f"Order executed: {lots} lot(s) x {lot_size} = {qty} units", order
 
 
 def _reprice(key, pos):
@@ -244,6 +252,8 @@ def portfolio():
                 "symbol": pos.get("label", key),
                 "kind": pos.get("kind", "equity"),
                 "qty": pos["qty"],
+                "lots": pos.get("lots"),
+                "lotSize": pos.get("lotSize"),
                 "avgPrice": round(pos["avgPrice"], 2),
                 "ltp": round(ltp, 2),
                 "value": round(mkt, 2),

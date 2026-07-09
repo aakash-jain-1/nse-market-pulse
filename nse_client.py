@@ -345,6 +345,49 @@ def get_fno_universe():
     return out
 
 
+_lots_cache = {"ts": 0.0, "map": None}
+_LOTS_TTL = 86400  # lot sizes change only on periodic NSE revisions
+
+
+def get_lot_sizes():
+    """
+    F&O market lot sizes for every underlying, from NSE's published
+    fo_mktlots.csv (UNDERLYING, SYMBOL, then a lot column per expiry month).
+    Returns {SYMBOL: lot}. Cached a day. Lot size is ~constant across the near
+    months, so we take the first numeric month column.
+    """
+    if _lots_cache["map"] and (time.time() - _lots_cache["ts"]) < _LOTS_TTL:
+        return _lots_cache["map"]
+    import csv
+    import io
+    out = {}
+    try:
+        s = get_session()
+        r = s.get("https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv", timeout=20)
+        r.raise_for_status()
+        for row in list(csv.reader(io.StringIO(r.text)))[1:]:
+            if len(row) < 3:
+                continue
+            sym = (row[1] or "").strip().upper()
+            if not sym or sym == "SYMBOL":
+                continue
+            lot = next((int(c.strip()) for c in row[2:] if c.strip().isdigit()), None)
+            if lot:
+                out[sym] = lot
+    except Exception:
+        pass
+    if out:
+        _lots_cache.update(ts=time.time(), map=out)
+    return out or (_lots_cache["map"] or {})
+
+
+def get_lot_size(symbol):
+    """Lot size (shares per contract) for one F&O underlying, or None."""
+    if not symbol:
+        return None
+    return get_lot_sizes().get(symbol.upper().strip())
+
+
 def get_scanner(
     direction="any",
     min_abs_change=None,

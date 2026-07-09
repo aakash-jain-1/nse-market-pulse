@@ -501,15 +501,16 @@
         </div>
         <div id="ocTable"><div class="chart-note">Enter an F&amp;O symbol and click Load.</div></div>
         <div id="ocTradeBox" class="trade-box" style="display:none">
-          <h4>Paper trade this option <span style="color:var(--muted);font-weight:400">(virtual money · units, lots not enforced)</span></h4>
+          <h4>Paper trade this option <span style="color:var(--muted);font-weight:400">(virtual money · sized in lots)</span></h4>
           <div class="trade-row">
             <select id="ocTType"><option value="CE">CE (Call)</option><option value="PE">PE (Put)</option></select>
             <select id="ocTStrike" style="width:110px"></select>
             <span id="ocTPremium" style="color:var(--muted);font-size:12px;align-self:center"></span>
-            <input type="number" id="ocTQty" min="1" value="50" style="width:80px" />
+            <label style="font-size:12px;color:var(--muted);align-self:center">Lots <input type="number" id="ocTQty" min="1" value="1" style="width:60px" /></label>
             <button class="buy" id="ocTBuy">Buy</button>
             <button class="sell" id="ocTSell">Sell</button>
           </div>
+          <div id="ocTLotInfo" style="font-size:11.5px;color:var(--muted);margin-top:6px"></div>
           <div class="trade-msg" id="ocTradeMsg"></div>
         </div>
         <div class="chart-note" style="margin-top:12px">
@@ -1308,7 +1309,8 @@
       } else {
         holds.innerHTML = `<table><thead><tr><th>Stock</th><th>Qty</th><th>Avg</th><th>LTP</th><th>Value</th><th>P&L</th></tr></thead><tbody>` +
           p.positions.map(pos => `<tr>
-            <td class="sym">${pos.symbol}</td><td>${pos.qty}</td>
+            <td class="sym">${pos.symbol}</td>
+            <td>${fmtNum(pos.qty)}${pos.lots?` <span style="color:var(--muted)">(${pos.lots} lot${pos.lots>1?'s':''})</span>`:''}</td>
             <td>${fmtPrice(pos.avgPrice)}</td><td>${fmtPrice(pos.ltp)}</td>
             <td>${fmtNum(pos.value)}</td>
             <td class="${pos.pnl>=0?'pos':'neg'}">${pos.pnl>=0?'+':''}${fmtNum(pos.pnl)} (${pos.pnlPct>=0?'+':''}${pos.pnlPct}%)</td>
@@ -1322,7 +1324,8 @@
           p.orders.map(o => `<tr>
             <td style="text-align:left">${o.time}</td>
             <td class="${o.side==='BUY'?'pos':'neg'}">${o.side}</td>
-            <td class="sym">${o.symbol}</td><td>${o.qty}</td>
+            <td class="sym">${o.symbol}</td>
+            <td>${fmtNum(o.qty)}${o.lots?` <span style="color:var(--muted)">(${o.lots}L)</span>`:''}</td>
             <td>${fmtPrice(o.price)}</td><td>${fmtNum(o.value)}</td>
           </tr>`).join("") + `</tbody></table>`;
     }
@@ -1780,6 +1783,16 @@
       const prem = leg && leg.ltp != null ? leg.ltp : null;
       document.getElementById("ocTPremium").textContent =
         prem != null ? `@ ₹${fmtPrice(prem)}` : "(no premium)";
+      const lot = d.lotSize || 1;
+      const lots = Math.max(1, parseInt(document.getElementById("ocTQty").value, 10) || 1);
+      const qty = lots * lot;
+      const info = document.getElementById("ocTLotInfo");
+      if (prem != null) {
+        info.innerHTML = `Lot size <b>${fmtNum(lot)}</b> · ${lots} lot(s) = <b>${fmtNum(qty)}</b> units · ` +
+          `est. cost <b>₹${fmtNum(Math.round(prem * qty))}</b>${d.lotSize?"":" (lot size unknown, treated as 1)"}`;
+      } else {
+        info.textContent = "";
+      }
     }
     async function placeOptionOrder(side) {
       const d = window._ocData;
@@ -1791,7 +1804,7 @@
         strike: parseFloat(document.getElementById("ocTStrike").value),
         optType: document.getElementById("ocTType").value,
         side,
-        qty: parseInt(document.getElementById("ocTQty").value, 10),
+        lots: parseInt(document.getElementById("ocTQty").value, 10),
       };
       msg.textContent = "Placing…";
       try {
@@ -1801,7 +1814,7 @@
         });
         const res = await r.json();
         msg.innerHTML = res.ok
-          ? `<span class="pos">✓ ${side} ${body.qty} ${d.symbol} ${body.strike}${body.optType} @ ₹${fmtPrice(res.order.price)} (₹${fmtNum(res.order.value)})</span>`
+          ? `<span class="pos">✓ ${side} ${res.order.lots} lot(s) (${fmtNum(res.order.qty)}u) ${d.symbol} ${body.strike}${body.optType} @ ₹${fmtPrice(res.order.price)} (₹${fmtNum(res.order.value)})</span>`
           : `<span class="neg">✗ ${res.message}</span>`;
       } catch (e) {
         msg.innerHTML = `<span class="neg">✗ ${e.message}</span>`;
@@ -1830,6 +1843,7 @@
     document.getElementById("ocViewGreeks").onclick = () => setOcView("greeks");
     document.getElementById("ocTStrike").onchange = updateOcPremium;
     document.getElementById("ocTType").onchange = updateOcPremium;
+    document.getElementById("ocTQty").oninput = updateOcPremium;
     document.getElementById("ocTBuy").onclick = () => placeOptionOrder("BUY");
     document.getElementById("ocTSell").onclick = () => placeOptionOrder("SELL");
     document.getElementById("refreshBtn").onclick = load;
