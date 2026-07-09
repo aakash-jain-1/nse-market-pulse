@@ -338,6 +338,13 @@
         <label class="chk"><input type="checkbox" id="recoFno"> F&amp;O only (shortable / positional)</label>
         <span style="color:var(--muted);font-size:11px">Educational signal summary — not a buy/sell recommendation. Always use a stop-loss.</span>
       </div>
+      <div id="simBar" class="scan-filters" style="display:none">
+        <button id="simTake" class="buy" style="padding:6px 12px">Take current ideas ▶</button>
+        <label class="chk"><input type="checkbox" id="simFno"> F&amp;O only</label>
+        <label class="chk"><input type="checkbox" id="simAuto"> Auto-take every minute (market hours)</label>
+        <button id="simReset" class="sell" style="padding:6px 12px">Reset</button>
+        <span style="color:var(--muted);font-size:11px">Each idea is sized to ₹1,00,000. Target hit = right, stop hit = wrong.</span>
+      </div>
       <div id="scanFilters" class="scan-filters" style="display:none">
         <label>Direction
           <select id="fDir"><option value="any">Any</option><option value="up">Up only</option><option value="down">Down only</option></select>
@@ -542,6 +549,8 @@
         desc: "Futures with premium/discount to spot and OI buildup. The Momentum panel ranks the strongest bullish/bearish movers (price move × OI activity). Toggle 'All F&O' to cover the whole ~215-name universe." },
       { key: "recos",      label: "💡 Ideas", title: "Trade Ideas — Long / Short",
         desc: "Ranked LONG & SHORT setups derived from live signals (momentum, OI buildup, unusual volume, money flow), each with a conviction score, reasons and an entry/stop/target plan. Signal summary — NOT investment advice." },
+      { key: "sim",        label: "🧪 Sim", title: "Recommendation Simulator — did the ideas work?",
+        desc: "Forward-test of the Ideas engine: 'buy' the recommendations at their entry and track each against its own target/stop. Hit target = right, hit stop = wrong. Take ideas manually, or turn on Auto to snapshot fresh ideas every minute during market hours. Educational — NOT advice." },
       { key: "scanner",    label: "🔎 Scanner", title: "In-Demand Scanner",
         desc: "One ranked board combining volume spikes, money flow, momentum & OI buildup. Use the filters to hunt for exactly the setup you want." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
@@ -725,6 +734,8 @@
         current === "futures" ? "flex" : "none";
       document.getElementById("recoBar").style.display =
         current === "recos" ? "flex" : "none";
+      document.getElementById("simBar").style.display =
+        current === "sim" ? "flex" : "none";
       if (current !== "futures")
         document.getElementById("futMomentum").style.display = "none";
     }
@@ -1243,11 +1254,103 @@
       </div>`;
     }
 
+    function renderSim(d) {
+      const c = d.counts || {};
+      const pnlCls = (d.totalPnl || 0) >= 0 ? "pos" : "neg";
+      const sgn = (v) => (v >= 0 ? "+" : "");
+      if (!c.total)
+        return `<div class="loading">No simulated trades yet. Click <b>“Take current ideas ▶”</b> to snapshot the live recommendations, or turn on <b>Auto</b>. Each idea is then tracked against its target/stop so you can see — later — whether it was right.</div>`;
+
+      const stat = (k, v, cls) =>
+        `<div class="metric"><div class="k">${k}</div><div class="v ${cls||''}">${v}</div></div>`;
+      const scorecard = `<div class="pf-metrics" style="margin-bottom:14px">
+        ${stat("Win rate", d.winRate==null?"—":d.winRate+"%", d.winRate>=50?"pos":(d.winRate==null?"":"neg"))}
+        ${stat("Closed", `${c.closed} <span style="color:var(--muted);font-size:12px">(${c.target}✓ / ${c.stop}✗)</span>`)}
+        ${stat("Open", c.open)}
+        ${stat("Total P&amp;L", `${sgn(d.totalPnl)}₹${fmtNum(d.totalPnl)}`, pnlCls)}
+        ${stat("Realized", `${sgn(d.realizedPnl)}₹${fmtNum(d.realizedPnl)}`, d.realizedPnl>=0?"pos":"neg")}
+      </div>`;
+
+      const convRows = (d.byConviction || []).map(b =>
+        `<tr><td>${b.band}</td><td>${b.closed}</td>
+          <td class="pos">${b.wins}</td><td class="neg">${b.losses}</td>
+          <td class="${(b.winRate||0)>=50?'pos':'neg'}">${b.winRate==null?"—":b.winRate+"%"}</td>
+          <td class="${b.pnl>=0?'pos':'neg'}">${sgn(b.pnl)}₹${fmtNum(b.pnl)}</td></tr>`).join("");
+      const convTable = convRows
+        ? `<h3 class="reco-colhead" style="margin-top:4px">Hit-rate by conviction</h3>
+           <table class="tbl"><thead><tr><th>Conviction</th><th>Closed</th><th>Wins</th><th>Losses</th><th>Win rate</th><th>P&amp;L</th></tr></thead>
+           <tbody>${convRows}</tbody></table>` : "";
+
+      const dirTag = (t) =>
+        `<span class="${t.direction==='LONG'?'pos':'neg'}" style="font-weight:600">${t.direction}</span>`;
+
+      const openRows = (d.open || []).map(t => {
+        // progress from entry(0) toward target(100) / stop(-100)
+        const toT = t.targetPct || 1, toS = Math.abs(t.stopPct || 1);
+        const prog = t.pnlPct >= 0 ? Math.min(100, t.pnlPct / toT * 100)
+                                   : Math.max(-100, t.pnlPct / toS * 100);
+        return `<tr data-sym="${t.symbol}" style="cursor:pointer">
+          <td class="sym">${t.symbol}</td><td>${dirTag(t)}</td>
+          <td>${t.conviction ?? "—"}</td>
+          <td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.ltp)}</td>
+          <td class="pos">${fmtPrice(t.target)}</td><td class="neg">${fmtPrice(t.stop)}</td>
+          <td class="${t.pnlPct>=0?'pos':'neg'}">${sgn(t.pnlPct)}${t.pnlPct}%</td>
+          <td>${simProgBar(prog)}</td></tr>`;
+      }).join("");
+      const openTable = (d.open || []).length
+        ? `<h3 class="reco-colhead long" style="margin-top:14px">Open (${c.open}) — live</h3>
+           <table class="tbl"><thead><tr><th>Symbol</th><th>Dir</th><th>Conv</th><th>Entry</th><th>LTP</th><th>Target</th><th>Stop</th><th>P&amp;L%</th><th>Progress</th></tr></thead>
+           <tbody>${openRows}</tbody></table>` : "";
+
+      const closedRows = (d.closed || []).map(t => {
+        const tag = t.status === "TARGET"
+          ? `<span class="pos">✓ TARGET</span>` : `<span class="neg">✗ STOP</span>`;
+        return `<tr data-sym="${t.symbol}" style="cursor:pointer">
+          <td class="sym">${t.symbol}</td><td>${dirTag(t)}</td>
+          <td>${t.conviction ?? "—"}</td>
+          <td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.exitPrice)}</td>
+          <td>${tag}</td>
+          <td class="${t.pnlPct>=0?'pos':'neg'}">${sgn(t.pnlPct)}${t.pnlPct}%</td>
+          <td class="${t.pnl>=0?'pos':'neg'}">${sgn(t.pnl)}₹${fmtNum(t.pnl)}</td>
+          <td style="color:var(--muted);font-size:11px">${(t.closedAt||"").slice(11)}</td></tr>`;
+      }).join("");
+      const closedTable = (d.closed || []).length
+        ? `<h3 class="reco-colhead short" style="margin-top:14px">Closed (${c.closed}) — outcomes</h3>
+           <table class="tbl"><thead><tr><th>Symbol</th><th>Dir</th><th>Conv</th><th>Entry</th><th>Exit</th><th>Outcome</th><th>P&amp;L%</th><th>P&amp;L</th><th>Closed</th></tr></thead>
+           <tbody>${closedRows}</tbody></table>` : "";
+
+      return scorecard + convTable + openTable + closedTable;
+    }
+
+    function simProgBar(prog) {
+      // prog in [-100,100]; green rightward toward target, red leftward toward stop
+      const p = Math.max(-100, Math.min(100, prog || 0));
+      const w = Math.abs(p) / 2;  // half-width (max 50%)
+      const side = p >= 0
+        ? `left:50%;width:${w}%;background:var(--green)`
+        : `right:50%;width:${w}%;background:var(--red)`;
+      return `<div style="position:relative;height:8px;background:#1b2431;border-radius:4px;min-width:80px">
+        <div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:#3a4657"></div>
+        <div style="position:absolute;top:0;bottom:0;border-radius:4px;${side}"></div></div>`;
+    }
+
     async function load() {
       const wrap = document.getElementById("tableWrap");
       const dot = document.getElementById("liveDot");
       dot.style.background = "var(--accent)";
       try {
+        if (current === "sim") {
+          const data = await (await fetch("/api/sim/summary")).json();
+          wrap.innerHTML = renderSim(data);
+          document.getElementById("simAuto").checked = !!data.auto;
+          wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
+            tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
+          document.getElementById("futMomentum").style.display = "none";
+          document.getElementById("updated").textContent =
+            "Updated " + new Date().toLocaleTimeString("en-IN");
+          dot.style.background = "var(--green)";
+          return;
+        }
         let url = "/api/" + current + (current === "scanner" ? scannerQuery() : "");
         if (current === "recos")
           url = "/api/recommendations" + (document.getElementById("recoFno").checked ? "?fno=1" : "");
@@ -1912,6 +2015,31 @@
     document.getElementById("refreshBtn").onclick = load;
     document.getElementById("fApply").onclick = load;
     document.getElementById("recoFno").onchange = load;
+    document.getElementById("simTake").onclick = async () => {
+      const btn = document.getElementById("simTake");
+      const old = btn.textContent; btn.disabled = true; btn.textContent = "Taking…";
+      try {
+        const r = await fetch("/api/sim/take", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ fno: document.getElementById("simFno").checked }),
+        });
+        const d = await r.json();
+        btn.textContent = `+${d.added} taken`;
+        setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 1200);
+        load();
+      } catch (e) { btn.textContent = old; btn.disabled = false; }
+    };
+    document.getElementById("simAuto").onchange = async (e) => {
+      await fetch("/api/sim/auto", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ on: e.target.checked }),
+      });
+    };
+    document.getElementById("simReset").onclick = async () => {
+      if (!confirm("Reset the recommendation simulator? All tracked trades will be cleared.")) return;
+      await fetch("/api/sim/reset", { method: "POST" });
+      load();
+    };
     document.getElementById("fReset").onclick = () => {
       document.getElementById("fDir").value = "any";
       document.getElementById("fChg").value = "";

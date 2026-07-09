@@ -178,6 +178,15 @@ def _loop():
                 if (time.time() - last_iv) >= IV_INTERVAL:
                     capture_iv()
                     last_iv = time.time()
+                # Recommendation simulator: mark trades to market, and auto-take
+                # fresh ideas when the user has turned auto mode on.
+                try:
+                    import sim
+                    sim.update()
+                    if sim.get_auto():
+                        sim.take()
+                except Exception:
+                    pass
         except Exception as e:
             _last_error = str(e)
         # Sleep in small steps so stop() is responsive.

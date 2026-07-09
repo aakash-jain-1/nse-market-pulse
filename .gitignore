@@ -31,3 +31,6 @@ Thumbs.db
 
 # Paper trading state (local virtual portfolio)
 paper_state.json
+
+# Recommendation simulator state (forward-test ledger)
+sim_state.json

@@ -30,6 +30,7 @@ NSE/
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
 ├── nse_quote.py       # Per-stock quote/chart/depth via NextApi gateway
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
+├── sim.py             # Recommendation forward-tester (auto-trades Ideas, scores them)
 ├── snapshot_logger.py # Background snapshot logger + backtester (CSV)
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
@@ -248,6 +249,16 @@ trading works for any tradable symbol (not just hot-list names).
 
 ## Done recently
 
+- **Recommendation Simulator** (`sim.py`, 🧪 Sim tab): forward-tests the Ideas
+  engine. `take()` snapshots the current LONG/SHORT recommendations, "enters"
+  each at its entry sized to a flat ₹1L notional, and tracks it against its own
+  target/stop on live prices (`update()` runs every logger cycle + on each
+  `summary()` call). Target hit = right, stop hit = wrong. Scorecard shows win
+  rate, realized/unrealized P&L, and hit-rate by conviction rating. Optional
+  **Auto** mode auto-takes fresh ideas each minute during market hours. State in
+  `sim_state.json` (gitignored), kept SEPARATE from the manual paper account so
+  auto-trades never touch the user's ₹10L. Routes: `/api/sim/{summary,take,auto,
+  reset}`.
 - **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
   notional), long **and** short with netting/flip-through-zero, MTM on live
   near-month price. New route `/api/paper/futures_order`; traded from the detail

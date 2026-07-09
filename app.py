@@ -162,6 +162,38 @@ def api_paper_option_order():
     return jsonify({"ok": ok, "message": msg, "order": order}), status
 
 
+@app.route("/api/sim/summary")
+def api_sim_summary():
+    import sim
+    return jsonify(sim.summary())
+
+
+@app.route("/api/sim/take", methods=["POST"])
+def api_sim_take():
+    import sim
+    body = request.get_json(silent=True) or {}
+    fno = bool(body.get("fno"))
+    limit = int(body.get("limit") or 10)
+    added = sim.take(fno_only=fno, limit=limit)
+    out = sim.summary()
+    out["added"] = added
+    return jsonify(out)
+
+
+@app.route("/api/sim/auto", methods=["POST"])
+def api_sim_auto():
+    import sim
+    body = request.get_json(silent=True) or {}
+    return jsonify({"auto": sim.set_auto(bool(body.get("on")))})
+
+
+@app.route("/api/sim/reset", methods=["POST"])
+def api_sim_reset():
+    import sim
+    sim.reset()
+    return jsonify(sim.summary())
+
+
 @app.route("/api/paper/futures_order", methods=["POST"])
 def api_paper_futures_order():
     body = request.get_json(silent=True) or {}
