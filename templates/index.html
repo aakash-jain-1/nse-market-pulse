@@ -390,13 +390,23 @@
         </div>
         <div id="mDepth"></div>
         <div class="trade-box">
-          <h4>Paper trade <span style="color:var(--muted);font-weight:400">(virtual money)</span></h4>
+          <h4>Paper trade <span style="color:var(--muted);font-weight:400">(equity · virtual money)</span></h4>
           <div class="trade-row">
             <input type="number" id="mQty" min="1" value="10" />
             <button class="buy" id="mBuy">Buy</button>
             <button class="sell" id="mSell">Sell</button>
           </div>
           <div class="trade-msg" id="mTradeMsg"></div>
+        </div>
+        <div class="trade-box" id="mFutBox" style="display:none">
+          <h4>Paper trade FUTURES <span style="color:var(--muted);font-weight:400">(lots · ~15% margin, supports short)</span></h4>
+          <div class="trade-row">
+            <label style="font-size:12px;color:var(--muted);align-self:center">Lots <input type="number" id="mFutLots" min="1" value="1" style="width:60px" /></label>
+            <button class="buy" id="mFutBuy">Buy / Long</button>
+            <button class="sell" id="mFutSell">Sell / Short</button>
+          </div>
+          <div id="mFutInfo" style="font-size:11.5px;color:var(--muted);margin-top:6px"></div>
+          <div class="trade-msg" id="mFutMsg"></div>
         </div>
       </div>
     </div>
@@ -925,6 +935,59 @@
       document.getElementById("overlay").classList.add("show");
       loadRealChart(sym);
       loadDepth(sym);
+      setupFutBox(sym);
+    }
+
+    async function setupFutBox(sym) {
+      const box = document.getElementById("mFutBox");
+      document.getElementById("mFutMsg").textContent = "";
+      window._mFut = null;
+      // Only F&O underlyings have futures.
+      if (!window._fnoSet || !window._fnoSet.has((sym || "").toUpperCase())) {
+        box.style.display = "none";
+        return;
+      }
+      box.style.display = "block";
+      document.getElementById("mFutInfo").textContent = "Loading futures…";
+      try {
+        const d = await (await fetch("/api/futures/" + encodeURIComponent(sym))).json();
+        if (window._detailSym !== sym) return;
+        const fut = (d.futures || [])[0];
+        if (!fut || fut.ltp == null) { box.style.display = "none"; return; }
+        window._mFut = { sym, ltp: fut.ltp, expiry: fut.expiry, lot: d.lotSize || 1 };
+        updateFutInfo();
+      } catch (e) { box.style.display = "none"; }
+    }
+
+    function updateFutInfo() {
+      const f = window._mFut;
+      if (!f) return;
+      const lots = Math.max(1, parseInt(document.getElementById("mFutLots").value, 10) || 1);
+      const units = lots * f.lot;
+      const notional = units * f.ltp;
+      const margin = Math.round(notional * 0.15);
+      document.getElementById("mFutInfo").innerHTML =
+        `Fut ₹${fmtPrice(f.ltp)} · exp ${(f.expiry||"").slice(0,6)} · lot ${fmtNum(f.lot)} · ` +
+        `${lots} lot(s) = ${fmtNum(units)}u · notional ₹${fmtNum(Math.round(notional))} · margin ~₹${fmtNum(margin)}`;
+    }
+
+    async function placeFuturesOrder(side) {
+      const f = window._mFut;
+      if (!f) return;
+      const msg = document.getElementById("mFutMsg");
+      msg.textContent = "Placing…";
+      try {
+        const r = await fetch("/api/paper/futures_order", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ symbol: f.sym, side, lots: parseInt(document.getElementById("mFutLots").value, 10) }),
+        });
+        const res = await r.json();
+        msg.innerHTML = res.ok
+          ? `<span class="pos">✓ ${res.message}</span>`
+          : `<span class="neg">✗ ${res.message}</span>`;
+      } catch (e) {
+        msg.innerHTML = `<span class="neg">✗ ${e.message}</span>`;
+      }
     }
 
     async function loadRealChart(sym) {
@@ -1310,7 +1373,7 @@
         holds.innerHTML = `<table><thead><tr><th>Stock</th><th>Qty</th><th>Avg</th><th>LTP</th><th>Value</th><th>P&L</th></tr></thead><tbody>` +
           p.positions.map(pos => `<tr>
             <td class="sym">${pos.symbol}</td>
-            <td>${fmtNum(pos.qty)}${pos.lots?` <span style="color:var(--muted)">(${pos.lots} lot${pos.lots>1?'s':''})</span>`:''}</td>
+            <td>${fmtNum(pos.qty)}${pos.lots?` <span style="color:var(--muted)">(${pos.lots} lot${pos.lots>1?'s':''}${pos.kind==='future'?(pos.qty<0?' · SHORT':' · LONG'):''})</span>`:''}</td>
             <td>${fmtPrice(pos.avgPrice)}</td><td>${fmtPrice(pos.ltp)}</td>
             <td>${fmtNum(pos.value)}</td>
             <td class="${pos.pnl>=0?'pos':'neg'}">${pos.pnl>=0?'+':''}${fmtNum(pos.pnl)} (${pos.pnlPct>=0?'+':''}${pos.pnlPct}%)</td>
@@ -1896,6 +1959,9 @@
     };
     document.getElementById("mBuy").onclick = () => placeOrder("BUY");
     document.getElementById("mSell").onclick = () => placeOrder("SELL");
+    document.getElementById("mFutBuy").onclick = () => placeFuturesOrder("BUY");
+    document.getElementById("mFutSell").onclick = () => placeFuturesOrder("SELL");
+    document.getElementById("mFutLots").oninput = updateFutInfo;
     document.getElementById("mOptions").onclick = () => {
       if (window._detailSym) openOptionChain(window._detailSym);
     };
@@ -1943,6 +2009,7 @@
       try {
         const d = await (await fetch("/api/fno/universe")).json();
         const all = [...(d.indices || []), ...(d.stocks || [])];
+        window._fnoSet = new Set(all.map(s => s.toUpperCase()));
         const opts = all.map(s => `<option value="${s}">`).join("");
         document.getElementById("ocSymbols").innerHTML = opts;
         document.getElementById("ddSymbols").innerHTML = opts;

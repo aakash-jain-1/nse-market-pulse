@@ -290,7 +290,8 @@ def get_symbol_futures(symbol):
             "signalKind": kind,
         })
     futs.sort(key=lambda x: (nse._days_to_expiry(x["expiry"]) or 9999))
-    out = {"symbol": symbol, "underlying": underlying, "futures": futs}
+    out = {"symbol": symbol, "underlying": underlying, "futures": futs,
+           "lotSize": nse.get_lot_size(symbol)}
     _cache[key] = (time.time(), out)
     return out
 

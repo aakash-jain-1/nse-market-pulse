@@ -162,6 +162,16 @@ def api_paper_option_order():
     return jsonify({"ok": ok, "message": msg, "order": order}), status
 
 
+@app.route("/api/paper/futures_order", methods=["POST"])
+def api_paper_futures_order():
+    body = request.get_json(silent=True) or {}
+    ok, msg, order = paper.place_futures_order(
+        body.get("symbol"), body.get("side"), body.get("lots"),
+    )
+    status = 200 if ok else 400
+    return jsonify({"ok": ok, "message": msg, "order": order}), status
+
+
 @app.route("/api/paper/reset", methods=["POST"])
 def api_paper_reset():
     paper.reset()

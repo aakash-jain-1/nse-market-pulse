@@ -205,7 +205,12 @@ trading works for any tradable symbol (not just hot-list names).
  **Options are sized in LOTS** — `place_option_order(...lots)` multiplies by the
  underlying's market lot (`nse_client.get_lot_size()`, from NSE's `fo_mktlots.csv`,
  215 names, cached a day); the trade box shows lot size + total units + est. cost,
- and the portfolio/orders show lots. **Limitation:** only symbols currently in the hot lists
+ and the portfolio/orders show lots. **Futures too:** `place_futures_order(sym,
+ side, lots)` is margin-based (~15% of notional, `FUT_MARGIN_RATE`), supports
+ LONG **and** SHORT with proper netting/flip-through-zero, realizes P&L + releases
+ margin on close, and marks to market on the live near-month price. Traded from a
+ "Paper trade FUTURES" box in the detail modal (shown only for F&O names).
+ **Limitation:** only symbols currently in the hot lists
   (~100-150) have a price, so only those are tradable. State persists to
   `paper_state.json` (gitignored). This is broker-agnostic by design: swapping
   in a real broker feed later only changes the price/fill source.
@@ -243,6 +248,10 @@ trading works for any tradable symbol (not just hot-list names).
 
 ## Done recently
 
+- **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
+  notional), long **and** short with netting/flip-through-zero, MTM on live
+  near-month price. New route `/api/paper/futures_order`; traded from the detail
+  modal's "Paper trade FUTURES" box (F&O names only).
 - **Lot-size enforcement in paper options**: options now trade in lots
   (`get_lot_size()` from `fo_mktlots.csv`); trade box + portfolio show lots/units.
 - **One-click deep-dive** (🔬) from every table row, Ideas card and momentum row.
@@ -289,8 +298,6 @@ trading works for any tradable symbol (not just hot-list names).
 
 ## Futures roadmap (user wants to trade futures)
 
-- Futures paper trading (margin/leverage, MTM). Lot sizes are now available via
-  `get_lot_size()` (fo_mktlots.csv) and `FH_MARKET_LOT` (foCPV).
 - Rollover tracker (OI shift current-month -> next-month near expiry).
 - Full F&O universe (stock_fut is only ~20 most-active contracts).
 
