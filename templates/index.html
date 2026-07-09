@@ -205,6 +205,9 @@
     .reco-reasons li::before { content: "•"; position: absolute; left: 2px; color: var(--accent); }
     .reco-empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
     .has-info { cursor: help; text-decoration: underline dotted; text-decoration-color: var(--muted); text-underline-offset: 3px; }
+    .drill-btn { background: transparent; border: none; padding: 0 2px; margin-left: 6px; font-size: 12px; line-height: 1; cursor: pointer; opacity: 0.35; transition: opacity .12s, transform .12s; vertical-align: middle; }
+    .drill-btn:hover { opacity: 1; transform: scale(1.25); }
+    tr:hover .drill-btn, .reco-card:hover .drill-btn, .mom-row:hover .drill-btn { opacity: 0.7; }
     .dd-search { display: flex; gap: 8px; margin-bottom: 16px; }
     .dd-search input { flex: 1; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 14px; }
     .dd-bias { display: flex; align-items: center; gap: 14px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
@@ -733,7 +736,13 @@
     }
 
     function rowStart(i, sym) {
-      return `<td class="sym"><span class="rank ${i<3?'top':''}">${i+1}</span>${sym}</td>`;
+      return `<td class="sym"><span class="rank ${i<3?'top':''}">${i+1}</span>${sym}${drillBtn(sym)}</td>`;
+    }
+
+    // One-click deep-dive launcher. stopPropagation so it doesn't also trigger
+    // the row/card's quick-detail modal.
+    function drillBtn(sym) {
+      return `<button class="drill-btn" title="Deep-dive analysis of ${sym}" onclick="event.stopPropagation();openDeepDive('${sym}')">🔬</button>`;
     }
 
     function renderTable(key, rows) {
@@ -1119,7 +1128,7 @@
           const meta = [sig, oiTxt].filter(Boolean).join(" · ");
           return `<div class="mom-row" data-sym="${r.symbol}">
               <span class="mom-rank">${i+1}</span>
-              <span class="mom-sym">${r.symbol}</span>
+              <span class="mom-sym">${r.symbol}${drillBtn(r.symbol)}</span>
               <span class="mom-chg ${(r.pChange??0)>=0?'pos':'neg'}">${r.pChange==null?'—':(r.pChange>=0?'+':'')+r.pChange.toFixed(2)+'%'}</span>
               <span class="mom-str"><i style="width:${w}%"></i></span>
               ${meta ? `<span class="mom-meta">${meta}</span>` : ""}
@@ -1143,7 +1152,7 @@
       const reasons = (idea.reasons || []).map(r => `<li>${r}</li>`).join("");
       return `<div class="reco-card ${dir}" data-sym="${idea.symbol}">
         <div class="reco-top">
-          <div><span class="reco-sym">${idea.symbol}</span>${fno} ${pcHtml}</div>
+          <div><span class="reco-sym">${idea.symbol}</span>${fno} ${pcHtml} ${drillBtn(idea.symbol)}</div>
           <div class="reco-conv ${idea.rating}">Conviction<b>${idea.conviction}</b>${idea.rating}</div>
         </div>
         <div class="reco-plan">
