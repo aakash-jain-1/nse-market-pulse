@@ -615,6 +615,14 @@
       } catch (e) {}
     });
 
+    // "2026-07-09 11:05:00" -> "09 Jul, 11:05" (sim uses IST strings from server)
+    function simDT(s) {
+      if (!s) return "—";
+      const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(s);
+      if (!m) return s;
+      const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m[2]-1];
+      return `${m[3]} ${mon}, ${m[4]}:${m[5]}`;
+    }
     const fmtNum = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");
     const fmtPrice = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
     const fmtCr = (n) => n == null ? "—" : "₹" + (n/1e7).toLocaleString("en-IN",{maximumFractionDigits:1}) + " Cr";
@@ -1292,6 +1300,7 @@
         return `<tr data-sym="${t.symbol}" style="cursor:pointer">
           <td class="sym">${t.symbol}</td><td>${dirTag(t)}</td>
           <td>${t.conviction ?? "—"}</td>
+          <td style="color:var(--muted);font-size:11px;white-space:nowrap">${simDT(t.openedAt)}</td>
           <td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.ltp)}</td>
           <td class="pos">${fmtPrice(t.target)}</td><td class="neg">${fmtPrice(t.stop)}</td>
           <td class="${t.pnlPct>=0?'pos':'neg'}">${sgn(t.pnlPct)}${t.pnlPct}%</td>
@@ -1299,7 +1308,7 @@
       }).join("");
       const openTable = (d.open || []).length
         ? `<h3 class="reco-colhead long" style="margin-top:14px">Open (${c.open}) — live</h3>
-           <table class="tbl"><thead><tr><th>Symbol</th><th>Dir</th><th>Conv</th><th>Entry</th><th>LTP</th><th>Target</th><th>Stop</th><th>P&amp;L%</th><th>Progress</th></tr></thead>
+           <table class="tbl"><thead><tr><th>Symbol</th><th>Dir</th><th>Conv</th><th>Opened</th><th>Entry</th><th>LTP</th><th>Target</th><th>Stop</th><th>P&amp;L%</th><th>Progress</th></tr></thead>
            <tbody>${openRows}</tbody></table>` : "";
 
       const closedRows = (d.closed || []).map(t => {
@@ -1312,11 +1321,12 @@
           <td>${tag}</td>
           <td class="${t.pnlPct>=0?'pos':'neg'}">${sgn(t.pnlPct)}${t.pnlPct}%</td>
           <td class="${t.pnl>=0?'pos':'neg'}">${sgn(t.pnl)}₹${fmtNum(t.pnl)}</td>
-          <td style="color:var(--muted);font-size:11px">${(t.closedAt||"").slice(11)}</td></tr>`;
+          <td style="color:var(--muted);font-size:11px;white-space:nowrap">${simDT(t.openedAt)}</td>
+          <td style="color:var(--muted);font-size:11px;white-space:nowrap">${simDT(t.closedAt)}</td></tr>`;
       }).join("");
       const closedTable = (d.closed || []).length
         ? `<h3 class="reco-colhead short" style="margin-top:14px">Closed (${c.closed}) — outcomes</h3>
-           <table class="tbl"><thead><tr><th>Symbol</th><th>Dir</th><th>Conv</th><th>Entry</th><th>Exit</th><th>Outcome</th><th>P&amp;L%</th><th>P&amp;L</th><th>Closed</th></tr></thead>
+           <table class="tbl"><thead><tr><th>Symbol</th><th>Dir</th><th>Conv</th><th>Entry</th><th>Exit</th><th>Outcome</th><th>P&amp;L%</th><th>P&amp;L</th><th>Opened</th><th>Closed</th></tr></thead>
            <tbody>${closedRows}</tbody></table>` : "";
 
       return scorecard + convTable + openTable + closedTable;

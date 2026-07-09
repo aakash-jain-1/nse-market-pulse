@@ -269,5 +269,5 @@ def summary():
         "totalPnl": round(realized + unrealized, 2),
         "byConviction": conv_rows,
         "open": open_t,
-        "closed": closed_t[:50],
+        "closed": closed_t[:200],
     }
