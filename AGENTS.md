@@ -36,7 +36,7 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (6 strategies)
 ├── test_intrabar.py   # Unit tests for the intrabar resolver
-├── db.py              # SQLite store (snapshots / IV / context + durable sim_trades ledger)
+├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD-bar cache)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
@@ -385,13 +385,20 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     high52w=52w-proxy, vol_breakout, oi_smart=rising-OI buildup) over a selectable
     universe — `LIQUID` names first, extended with a spread sample of the rest;
     the UI offers Top 40/80/150 or **All F&O (~210)** (`universe` param, capped 260,
-    `_universe()` clamps to the live count). Full-universe cold runs ≈ ~840 NSE
-    requests / ~3 min, then 15-min cached. Enters at the signal day's close,
+    `_universe()` clamps to the live count). Enters at the signal day's close,
     resolves on subsequent daily high/low (stop-first on straddles), same
-    `size_position` R sizing. Concurrency = 6 workers; relies on the 15-min history
-    cache. VWAP/ORB/iVWAP are intraday-only → in `NOT_COVERED`. This is a daily-bar
-    APPROXIMATION (lower fidelity than the live sim / context backtest) — the UI
-    says so; don't conflate its numbers with the intraday strategies.
+    `size_position` R sizing. Concurrency = 6 workers. VWAP/ORB/iVWAP are
+    intraday-only → in `NOT_COVERED`. This is a daily-bar APPROXIMATION (lower
+    fidelity than the live sim / context backtest) — the UI says so; don't conflate
+    its numbers with the intraday strategies.
+    **Persistent EOD cache** (`db.eod_bars` / `eod_oi` / `eod_meta`): daily bars are
+    immutable once a session closes, so we store them in SQLite forever and only
+    re-hit NSE per a freshness TTL (`CACHE_TTL_HOURS=12`, tracked in `eod_meta`).
+    First full-universe run ≈ ~840 requests / ~3 min; after that repeat runs are
+    ~instant (all cache hits) and wider look-backs (60/90d) need ZERO extra fetches
+    because ~8 months of history is already stored. `_cached_bars`/`_cached_oi_rows`
+    are the read-through wrappers; `?refresh=1` (or the "force refresh" checkbox)
+    bypasses the cache. `run()` reports `cache:{barsHit,barsFetched,ttlHours,store}`.
   - **Intrabar resolution** (`intrabar.py`): the sims used to decide target/stop
     against a single LTP per cycle (60s live, 5-min backtest), which misses wicks
     and detects exits late. `intrabar.resolve(trade, bars, risk, max_sessions)`

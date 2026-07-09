@@ -383,6 +383,7 @@
             <option value="260">All F&amp;O (~210)</option>
           </select>
         </label>
+        <label class="chk" title="Ignore the on-disk cache and re-pull fresh EOD history from NSE"><input type="checkbox" id="simBtRefresh"> force refresh</label>
         <button id="simBacktestDaily" style="padding:6px 12px">📅 Daily backtest (real EOD)</button>
         <span style="color:var(--muted);font-size:11px">Risk-based sizing: each trade risks ₹2,000 to its stop · target=right, stop=wrong · multi-day hold (≤3 sessions). Expectancy in R.</span>
       </div>
@@ -1937,6 +1938,7 @@
       return `<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:12px">
         <h3 class="reco-colhead">📅 Daily-bar historical backtest — real NSE end-of-day, last ${bt.days} days</h3>
         <div class="chart-note"><b>${bt.universeWithData}</b> liquid F&amp;O names · ${bt.range.from} → ${bt.range.to} · ~${bt.barsMedian} bars/name · hold ≤${bt.maxHold} trading days · risk ₹${fmtNum(bt.riskPerTrade)}/trade${bt.oiExpiry ? ` · OI from ${bt.oiExpiry} futures (${bt.oiNames} names)` : ""}.</div>
+        ${bt.cache ? `<div class="chart-note" style="opacity:.8">🗃️ Cache: <b>${bt.cache.barsHit}</b> from disk · <b>${bt.cache.barsFetched}</b> freshly pulled · TTL ${bt.cache.ttlHours}h · store holds ${fmtNum(bt.cache.store.bars.symbols)} names${bt.cache.store.bars.from ? ` (${bt.cache.store.bars.from}→${bt.cache.store.bars.to})` : ""}. Past bars are permanent, so wider windows (60/90d) need no re-fetch — tick <i>force refresh</i> to re-pull.</div>` : ""}
         <table class="tbl"><thead><tr>
           <th>Strategy</th><th title="All reconstructed trades in the window">Trades</th><th>Closed</th>
           <th title="Target hit">✓Tgt</th><th title="Stop hit">✗Stop</th><th title="Time-expired at horizon close">⏱Exp</th>
@@ -2773,13 +2775,15 @@
     document.getElementById("simBacktestDaily").onclick = async () => {
       const btn = document.getElementById("simBacktestDaily");
       const uni = document.getElementById("simBtUniverse").value || "40";
+      const refresh = document.getElementById("simBtRefresh").checked;
       const big = parseInt(uni, 10) >= 150;
       const label = parseInt(uni, 10) >= 210 ? "all ~210 F&O names" : "top " + uni + " names";
-      const eta = big ? "this can take ~1-3 min on a cold run" : "first run ~20-40s, then cached";
+      const eta = refresh ? "forcing a fresh pull — " + (big ? "~1-3 min" : "~20-40s")
+                          : (big ? "instant if cached, else ~1-3 min cold" : "instant if cached, else ~20-40s");
       btn.disabled = true; btn.textContent = "⏳ Pulling EOD history…";
-      setBtHtml("btDailyResult", "_btDailyHtml", `<div class="loading" style="margin-top:12px">Fetching ${label}' daily history + OI from NSE and reconstructing strategies… ${eta}. (The dashboard keeps refreshing meanwhile.)</div>`);
+      setBtHtml("btDailyResult", "_btDailyHtml", `<div class="loading" style="margin-top:12px">Loading ${label}' daily history + OI and reconstructing strategies… ${eta}. (The dashboard keeps refreshing meanwhile.)</div>`);
       try {
-        const bt = await fetch("/api/sim/backtest_daily?days=30&universe=" + uni).then(r => r.json());
+        const bt = await fetch("/api/sim/backtest_daily?days=30&universe=" + uni + (refresh ? "&refresh=1" : "")).then(r => r.json());
         setBtHtml("btDailyResult", "_btDailyHtml", renderDailyBacktest(bt));
       } catch (e) {
         setBtHtml("btDailyResult", "_btDailyHtml", `<div class="chart-note">Daily backtest failed: ${e}</div>`);

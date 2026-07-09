@@ -7,12 +7,16 @@ JSON — it's tiny and rewritten atomically. But the *time-series* logs grow fas
 memory on every backtest()/iv_rank() call. SQLite fixes that: one file, no
 server, indexed queries, millions of rows, concurrent reads (WAL).
 
-Three tables:
+Tables:
   snapshots     — the demand / volume-gainers board, one row per symbol/snapshot.
   iv_log        — ATM implied-volatility captures.
   context_log   — a trimmed, gzipped snapshot of the FULL strategy context each
                   cycle (scanner / gainers / losers / oi / quotes / index). This
                   is what lets us replay all strategies offline (backtest).
+  sim_trades    — the durable multi-strategy sim ledger.
+  eod_bars /    — persistent daily OHLCV+delivery / futures-OI history cache for
+  eod_oi /        the daily backtest. Past bars are immutable, so we keep them
+  eod_meta        forever and only re-hit NSE per a freshness TTL (eod_meta).
 
 Everything is stdlib (sqlite3 + gzip + json). DB lives in data/market.db
 (gitignored via *.db). On first run we import any existing snapshots.csv /
@@ -30,6 +34,9 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_FILE = os.path.join(DATA_DIR, "market.db")
 
 _init_lock = threading.Lock()
+# serializes EOD-cache writes: the daily backtest hits these from 6 worker
+# threads, so we funnel writes through one lock to avoid "database is locked".
+_write_lock = threading.Lock()
 _initialized = False
 
 SNAPSHOT_COLS = [
@@ -49,6 +56,16 @@ SIM_TRADE_COLS = [
 ]
 _SIM_TEXT = {"id", "strategy", "symbol", "direction", "rating", "status",
              "openedAt", "openedDate", "regimeAtEntry", "closedAt", "closedDay"}
+EOD_BAR_COLS = [
+    "symbol", "d", "date", "iso", "open", "high", "low", "close",
+    "prevClose", "vwap", "volume", "value", "trades", "delivQty", "delivPct",
+]
+_EOD_BAR_TEXT = {"symbol", "d", "date", "iso"}
+EOD_OI_COLS = [
+    "symbol", "expiry", "d", "date", "close", "spot", "oi", "changeOi",
+    "volume", "lot",
+]
+_EOD_OI_TEXT = {"symbol", "expiry", "d", "date"}
 
 
 def _conn():
@@ -103,6 +120,28 @@ def init():
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_status ON sim_trades(status)")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_strat_day ON sim_trades(strategy, openedDate)")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_regime ON sim_trades(regimeAtEntry, strategy)")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS eod_bars (
+                    symbol TEXT, d TEXT, date TEXT, iso TEXT,
+                    open REAL, high REAL, low REAL, close REAL, prevClose REAL,
+                    vwap REAL, volume REAL, value REAL, trades REAL,
+                    delivQty REAL, delivPct REAL,
+                    PRIMARY KEY (symbol, d)
+                )""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_eod_bars_sym ON eod_bars(symbol)")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS eod_oi (
+                    symbol TEXT, expiry TEXT, d TEXT, date TEXT,
+                    close REAL, spot REAL, oi REAL, changeOi REAL,
+                    volume REAL, lot REAL,
+                    PRIMARY KEY (symbol, expiry, d)
+                )""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_eod_oi_sym ON eod_oi(symbol, expiry)")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS eod_meta (
+                    symbol TEXT, kind TEXT, fetched_at TEXT, last_d TEXT, n INTEGER,
+                    PRIMARY KEY (symbol, kind)
+                )""")
         _import_legacy_csv()
         _initialized = True
 
@@ -295,6 +334,109 @@ def sim_trade_count():
 def sim_clear():
     with _conn() as c:
         c.execute("DELETE FROM sim_trades")
+
+
+# ----------------------------------------------------------------------------
+# EOD daily-bar / OI cache (persistent history for the daily backtest)
+# ----------------------------------------------------------------------------
+def _eod_bar_row(symbol, b):
+    out = []
+    for col in EOD_BAR_COLS:
+        if col == "symbol":
+            out.append(symbol)
+        elif col in _EOD_BAR_TEXT:
+            out.append(b.get(col))
+        else:
+            out.append(_num_or_none(b.get(col)))
+    return tuple(out)
+
+
+def _eod_oi_row(symbol, expiry, r):
+    out = []
+    for col in EOD_OI_COLS:
+        if col == "symbol":
+            out.append(symbol)
+        elif col == "expiry":
+            out.append(expiry)
+        elif col in _EOD_OI_TEXT:
+            out.append(r.get(col))
+        else:
+            out.append(_num_or_none(r.get(col)))
+    return tuple(out)
+
+
+def eod_bars_get(symbol):
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM eod_bars WHERE symbol=? ORDER BY d", (symbol.upper(),))]
+
+
+def eod_bars_put(symbol, bars):
+    """Upsert daily bars (each needs a clean 'd' YYYY-MM-DD). Past bars are
+    immutable; REPLACE handles the occasional revision + the newest day."""
+    symbol = symbol.upper()
+    rows = [_eod_bar_row(symbol, b) for b in bars if b.get("d")]
+    if not rows:
+        return 0
+    with _write_lock, _conn() as c:
+        c.executemany(
+            f"INSERT OR REPLACE INTO eod_bars ({','.join(EOD_BAR_COLS)}) "
+            f"VALUES ({','.join('?' * len(EOD_BAR_COLS))})", rows)
+    return len(rows)
+
+
+def eod_oi_get(symbol, expiry):
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM eod_oi WHERE symbol=? AND expiry=? ORDER BY d",
+            (symbol.upper(), (expiry or "").upper()))]
+
+
+def eod_oi_put(symbol, expiry, rows_in):
+    symbol, expiry = symbol.upper(), (expiry or "").upper()
+    rows = [_eod_oi_row(symbol, expiry, r) for r in rows_in if r.get("d")]
+    if not rows:
+        return 0
+    with _write_lock, _conn() as c:
+        c.executemany(
+            f"INSERT OR REPLACE INTO eod_oi ({','.join(EOD_OI_COLS)}) "
+            f"VALUES ({','.join('?' * len(EOD_OI_COLS))})", rows)
+    return len(rows)
+
+
+def eod_meta_get(symbol, kind):
+    with _conn() as c:
+        r = c.execute(
+            "SELECT fetched_at, last_d, n FROM eod_meta WHERE symbol=? AND kind=?",
+            (symbol.upper(), kind)).fetchone()
+    return dict(r) if r else None
+
+
+def eod_meta_set(symbol, kind, fetched_at, last_d, n):
+    with _write_lock, _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO eod_meta (symbol, kind, fetched_at, last_d, n) "
+            "VALUES (?,?,?,?,?)", (symbol.upper(), kind, fetched_at, last_d, n))
+
+
+def eod_stats():
+    with _conn() as c:
+        b = c.execute("SELECT COUNT(*) rows, COUNT(DISTINCT symbol) syms, "
+                      "MIN(d) a, MAX(d) z FROM eod_bars").fetchone()
+        o = c.execute("SELECT COUNT(*) rows, COUNT(DISTINCT symbol) syms "
+                      "FROM eod_oi").fetchone()
+    return {
+        "bars": {"rows": b["rows"] or 0, "symbols": b["syms"] or 0,
+                 "from": b["a"], "to": b["z"]},
+        "oi": {"rows": o["rows"] or 0, "symbols": o["syms"] or 0},
+    }
+
+
+def eod_clear():
+    with _write_lock, _conn() as c:
+        c.execute("DELETE FROM eod_bars")
+        c.execute("DELETE FROM eod_oi")
+        c.execute("DELETE FROM eod_meta")
 
 
 # ----------------------------------------------------------------------------

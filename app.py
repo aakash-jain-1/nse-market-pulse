@@ -237,6 +237,7 @@ def api_sim_backtest_daily():
         days=int(request.args.get("days", 30)),
         universe_size=int(request.args.get("universe", 40)),
         max_hold=int(request.args.get("maxHold", 5)),
+        force=request.args.get("refresh") in ("1", "true", "yes"),
     ))
 
 

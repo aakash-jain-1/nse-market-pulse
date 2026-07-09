@@ -25,10 +25,17 @@ R-multiples.
 import concurrent.futures as cf
 from datetime import datetime, timedelta, timezone
 
+import db
 import nse_client as nse
 from sim import RISK_PER_TRADE, size_position
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# Daily bars only finalise once per session, so a symbol pulled within this many
+# hours is considered fresh and served straight from the SQLite cache. Past bars
+# are immutable and kept forever; the TTL only governs how often we re-hit NSE to
+# pick up the newest day. Full-universe repeat runs (same day) are then instant.
+CACHE_TTL_HOURS = 12
 
 # Strategies reconstructable from a single daily-history call, with their
 # fixed stop/target (% of entry). RR is roughly comparable to the live ideas.
@@ -110,23 +117,75 @@ def _near_expiry():
     return exps[0][1] if exps else None
 
 
-def _oi_map(symbol, expiry):
-    """{clean_date: oiPct} from the near-month futures' daily OI history."""
+def _oi_map_from_rows(rows):
+    """{clean_date: oiPct} from near-month futures daily OI rows (oi + changeOi)."""
     out = {}
-    if not expiry:
-        return out
-    try:
-        rows = nse.get_futures_oi_history(symbol, expiry)
-    except Exception:
-        return out
     for r in rows:
-        d = _dmy_to_iso(r.get("date") or "")
-        oi, chg = r.get("oi"), r.get("changeOi")
+        d, oi, chg = r.get("d"), r.get("oi"), r.get("changeOi")
         if not d or oi is None or chg is None:
             continue
         prev = oi - chg
         out[d] = (chg / prev * 100) if prev else None
     return out
+
+
+def _fresh(fetched_at):
+    """Was this symbol pulled within CACHE_TTL_HOURS? (fetched_at is IST text.)"""
+    if not fetched_at:
+        return False
+    try:
+        dt = datetime.strptime(fetched_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
+    except Exception:
+        return False
+    return (datetime.now(IST) - dt).total_seconds() < CACHE_TTL_HOURS * 3600
+
+
+def _cached_bars(sym, chunks, chunk_days, force):
+    """Daily bars for one symbol: SQLite if fresh, else fetch from NSE + upsert.
+    Returns (ascending bars with 'd', from_cache: bool)."""
+    kind = "bars:%d:%d" % (chunks, chunk_days)
+    if not force:
+        meta = db.eod_meta_get(sym, kind)
+        if meta and _fresh(meta.get("fetched_at")):
+            cached = db.eod_bars_get(sym)
+            if cached:
+                return cached, True
+    try:
+        bars = nse.get_stock_history(sym, chunks=chunks, chunk_days=chunk_days)
+    except Exception:
+        bars = []
+    for b in bars:
+        b["symbol"] = sym
+        b["d"] = _clean_date(b)
+    if bars:
+        db.eod_bars_put(sym, bars)
+        db.eod_meta_set(sym, kind, _now(), bars[-1]["d"], len(bars))
+        return bars, False
+    return db.eod_bars_get(sym), False   # NSE failed → fall back to any cache
+
+
+def _cached_oi_rows(sym, expiry, force):
+    """Near-month futures daily OI rows: SQLite if fresh, else fetch + upsert.
+    Returns (rows with 'd', from_cache: bool)."""
+    kind = "oi:%s" % (expiry or "")
+    if not force:
+        meta = db.eod_meta_get(sym, kind)
+        if meta and _fresh(meta.get("fetched_at")):
+            cached = db.eod_oi_get(sym, expiry)
+            if cached:
+                return cached, True
+    try:
+        rows = nse.get_futures_oi_history(sym, expiry)
+    except Exception:
+        rows = []
+    for r in rows:
+        r["d"] = _dmy_to_iso(r.get("date") or "")
+    rows = [r for r in rows if r.get("d")]
+    if rows:
+        db.eod_oi_put(sym, expiry, rows)
+        db.eod_meta_set(sym, kind, _now(), rows[-1]["d"], len(rows))
+        return rows, False
+    return db.eod_oi_get(sym, expiry), False
 
 
 def _universe(size):
@@ -341,7 +400,9 @@ def _scorecard(trades):
     }
 
 
-def run(days=30, universe_size=40, max_hold=5, chunks=3, include_oi=True):
+def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
+        include_oi=True, force=False):
+    db.init()
     days = max(5, min(int(days), 120))
     universe_size = max(5, min(int(universe_size), 260))
     max_hold = max(1, min(int(max_hold), 15))
@@ -350,20 +411,20 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3, include_oi=True):
     expiry = _near_expiry() if include_oi else None
     hist = {}
     ois = {}
+    cache = {"barsHit": 0, "barsFetched": 0}
 
     def _pull(sym):
-        try:
-            bars = nse.get_stock_history(sym, chunks=chunks, chunk_days=80)
-            for b in bars:
-                b["symbol"] = sym
-                b["d"] = _clean_date(b)
-        except Exception:
-            bars = []
-        oi = _oi_map(sym, expiry) if (include_oi and expiry) else {}
-        return sym, bars, oi
+        bars, bhit = _cached_bars(sym, chunks, chunk_days, force)
+        if include_oi and expiry:
+            oi_rows, _ = _cached_oi_rows(sym, expiry, force)
+            oi = _oi_map_from_rows(oi_rows)
+        else:
+            oi = {}
+        return sym, bars, oi, bhit
 
     with cf.ThreadPoolExecutor(max_workers=6) as pool:
-        for sym, bars, oi in pool.map(_pull, symbols):
+        for sym, bars, oi, bhit in pool.map(_pull, symbols):
+            cache["barsHit" if bhit else "barsFetched"] += 1
             if bars:
                 hist[sym] = bars
                 ois[sym] = oi
@@ -410,6 +471,7 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3, include_oi=True):
         "barsMedian": _median(bars_counts),
         "oiExpiry": expiry,
         "oiNames": sum(1 for v in ois.values() if v),
+        "cache": {**cache, "ttlHours": CACHE_TTL_HOURS, "store": db.eod_stats()},
         "strategies": rows,
         "totals": _scorecard(all_trades),
         "notCovered": NOT_COVERED,

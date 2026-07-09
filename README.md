@@ -285,7 +285,11 @@ flowchart LR
   Mean-Reversion, Delivery%, High-Proximity, Volume-Breakout, OI Smart-Money) with
   the same risk-based R sizing. Trades off fidelity for reach: EOD entries, exits
   on the next days' high/low (a bar piercing both stop & target is a stop). VWAP /
-  ORB / iVWAP are intraday-only and not covered here.
+  ORB / iVWAP are intraday-only and not covered here. Universe is selectable — Top
+  40/80/150 or **All F&O (~210)**. A **persistent SQLite cache** (`eod_bars` /
+  `eod_oi`, 12h freshness TTL) stores the daily history: the first full sweep is
+  ~3 min, then repeat runs and wider look-backs (60/90d) are near-instant with zero
+  re-fetching. "Force refresh" re-pulls from NSE.
 - **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
   entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
 
@@ -338,6 +342,23 @@ erDiagram
         text openedDate
         text closedDay
     }
+    EOD_BARS {
+        text symbol PK
+        text d PK "YYYY-MM-DD"
+        real open
+        real high
+        real low
+        real close
+        real volume
+        real delivPct
+    }
+    EOD_OI {
+        text symbol PK
+        text expiry PK
+        text d PK
+        real oi
+        real changeOi
+    }
 ```
 
 - `snapshots` — the demand/volume-gainers board, one row per symbol per snapshot.
@@ -350,6 +371,11 @@ erDiagram
   all-time performance are fast SQL-backed reads. Only the small settings and the
   bounded per-day rollup stay in `sim_state.json`; trades embedded in an older
   `sim_state.json` are auto-migrated into this table on first run.
+- `eod_bars` / `eod_oi` — the **persistent daily-history cache** for the daily
+  backtest (keyed `(symbol, d)` / `(symbol, expiry, d)`). Past bars are immutable,
+  so they're kept forever; `eod_meta` tracks per-symbol fetch time for a 12h
+  freshness TTL. This makes full-universe repeat runs and 60/90-day look-backs
+  near-instant (no re-fetching NSE).
 - WAL mode + indexes on `view/ts/symbol/day`. Legacy `snapshots.csv` / `iv_log.csv`
   are auto-imported on first run.
 
@@ -419,7 +445,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads |
 | `GET /api/sim/performance` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
-| `GET /api/sim/backtest_daily[?days=&universe=&maxHold=]` | Daily-bar historical backtest over real NSE EOD data (6 strategies) |
+| `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1]` | Daily-bar historical backtest over real NSE EOD data (6 strategies); SQLite-cached, `refresh=1` re-pulls |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
