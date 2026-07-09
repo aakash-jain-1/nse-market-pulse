@@ -1111,6 +1111,47 @@
       el.onmouseleave = hide;
     }
 
+    // Generic crosshair hover for the deep-dive SVGs. `accessor` picks the value
+    // that the line plots (used for the dot's Y); `tipFn(p)` builds the tooltip.
+    // Geometry mirrors ddChart/ddOiChart's viewBox mapping (top/bot padding).
+    function attachSvgHover(el, series, accessor, tipFn, w, h, top, bot) {
+      if (!el || !series || series.length < 2) return;
+      const vals = series.map(accessor).filter(v => v != null);
+      if (vals.length < 2) return;
+      const min = Math.min(...vals), max = Math.max(...vals), rng = (max - min) || 1;
+      const n = series.length;
+      const yOf = v => top + (1 - (v - min) / rng) * (h - top - bot);
+
+      const cross = document.createElement("div"); cross.className = "chart-cross";
+      const dot = document.createElement("div"); dot.className = "chart-dot";
+      const tip = document.createElement("div"); tip.className = "chart-tip";
+      el.append(cross, dot, tip);
+      const hide = () => { cross.style.display = dot.style.display = tip.style.display = "none"; };
+      hide();
+
+      el.onmousemove = (e) => {
+        const rect = el.getBoundingClientRect();
+        if (!rect.width) return;
+        let frac = (e.clientX - rect.left) / rect.width;
+        frac = Math.max(0, Math.min(1, frac));
+        const idx = Math.round(frac * (n - 1));
+        const p = series[idx];
+        const v = accessor(p);
+        if (v == null) { hide(); return; }
+        const cx = (idx / (n - 1)) * rect.width;
+        const cy = (yOf(v) / h) * rect.height;
+        cross.style.display = dot.style.display = tip.style.display = "block";
+        cross.style.left = cx + "px";
+        dot.style.left = cx + "px"; dot.style.top = cy + "px";
+        tip.innerHTML = tipFn(p);
+        let tx = cx + 12;
+        if (tx > rect.width - 130) tx = cx - 130;
+        tip.style.left = Math.max(2, tx) + "px";
+        tip.style.top = Math.max(2, cy - 42) + "px";
+      };
+      el.onmouseleave = hide;
+    }
+
     async function loadDepth(sym) {
       try {
         const q = await (await fetch("/api/quote/" + encodeURIComponent(sym))).json();
@@ -1573,6 +1614,23 @@
         if (d.error) { box.innerHTML = `<div class="loading err">${d.error}</div>`; return; }
         box.innerHTML = renderDeepDive(d);
         annotateInfo(box);
+        // Crosshair hover on the price+volume and OI charts (geometry must match
+        // ddChart w=840,h=220,top=12,bot=40 and ddOiChart w=840,h=170,top=12,bot=30).
+        attachSvgHover(
+          document.getElementById("ddPriceChart"), d.series,
+          p => p.close,
+          p => `<b>₹${Number(p.close).toFixed(2)}</b><span>${p.date||""}` +
+               `${p.volume!=null?` · vol ${fmtNum(p.volume)}`:""}` +
+               `${p.delivPct!=null?` · deliv ${p.delivPct}%`:""}</span>`,
+          840, 220, 12, 40);
+        if (d.oiHistory && d.oiHistory.length > 1)
+          attachSvgHover(
+            document.getElementById("ddOiChartBox"), d.oiHistory,
+            p => p.oi,
+            p => `<b>${fmtNum(p.oi)} <span style="font-weight:400;color:var(--muted)">OI</span></b>` +
+                 `<span>${p.date||""}${p.changeOi!=null?` · Δ${p.changeOi>=0?'+':''}${fmtNum(p.changeOi)}`:""}` +
+                 `${p.close!=null?` · ₹${fmtPrice(p.close)}`:""}</span>`,
+            840, 170, 12, 30);
       } catch (e) {
         box.innerHTML = `<div class="loading err">Failed: ${e.message}</div>`;
       }
@@ -1688,11 +1746,11 @@
         <ul class="dd-notes">${(a.notes||[]).map(x=>`<li>${x}</li>`).join("") || "<li>No standout signals right now.</li>"}</ul>
 
         <div class="dd-section-title">Price &amp; volume (last ${d.series.length} sessions)</div>
-        <div class="chart-box">${ddChart(d.series)}</div>
+        <div class="chart-box"><div id="ddPriceChart" style="position:relative;cursor:crosshair">${ddChart(d.series)}</div></div>
 
         ${d.oiHistory && d.oiHistory.length > 1 ? `
         <div class="dd-section-title">Futures open interest — near contract${dv&&dv.expiry?` (exp ${dv.expiry})`:""}</div>
-        <div class="chart-box">${ddOiChart(d.oiHistory)}</div>` : ""}
+        <div class="chart-box"><div id="ddOiChartBox" style="position:relative;cursor:crosshair">${ddOiChart(d.oiHistory)}</div></div>` : ""}
 
         <div class="dd-section-title">Key stats</div>
         <div class="metrics">${statsHtml}</div>
