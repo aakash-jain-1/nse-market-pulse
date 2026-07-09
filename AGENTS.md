@@ -253,12 +253,16 @@ trading works for any tradable symbol (not just hot-list names).
 - **Multi-strategy Sim + regime-aware daily comparison** (`strategies.py` +
   `sim.py`, 🧪 Sim tab): the Sim now forward-tests **4 strategies in parallel**,
   each with its **own ledger**, so we can see which one fits which market day.
-  - **Strategies** (`strategies.py`): `momentum` (the original multi-signal
+  - **Strategies** (`strategies.py`, 7): `momentum` (the original multi-signal
     engine), `oi_smart` (F&O OI positioning), `meanrev` (contrarian oversold
-    bounce / fade), `vol_breakout` (≥5× volume explosions). Each is
-    `{id,name,description,regimeFit,generate(ctx)}` returning ideas in
-    `_build_idea` shape. `build_context()` fetches all live lists ONCE and every
-    generator reuses it.
+    bounce / fade), `vol_breakout` (≥5× volume explosions), `high52w`
+    (nearness-to-52-week-high momentum, George-Hwang), `vwap` (price vs the
+    institutional VWAP benchmark), `delivery` (high delivery% = accumulation/
+    distribution). Each is `{id,name,description,regimeFit,generate(ctx)}`
+    returning ideas in `_build_idea` shape. `build_context()` fetches all live
+    lists ONCE — including a bounded, concurrent per-symbol quote fetch
+    (`ctx["quotes"]`, ~45 liquid names) that feeds VWAP / 52wH / delivery — and
+    every generator reuses it.
   - **Regime detector** (`detect_regime`): tags each day Trend-Up / Trend-Down /
     Recovery / Pullback / Range / Mixed from NIFTY %change + advance-decline
     breadth (`nse.get_index_snapshot()` → `/api/allIndices`, cached 30s) + the

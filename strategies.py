@@ -55,6 +55,37 @@ def build_context(fno_only=False):
         pass
 
     ctx["scannerSyms"] = {r["symbol"] for r in ctx["scanner"] if r.get("symbol")}
+
+    # Per-symbol quotes for the quote-driven strategies (VWAP, 52-week-high,
+    # delivery). Fetched ONCE here for a bounded, liquid candidate set and shared
+    # via ctx["quotes"] so those three strategies don't each hit NSE per name.
+    cand, seen = [], set()
+    for src, n in ((ctx["scanner"], 30), (ctx["gainers"], 15), (ctx["losers"], 10)):
+        for r in src[:n]:
+            s = r.get("symbol")
+            if s and s not in seen:
+                seen.add(s)
+                cand.append(s)
+    cand = cand[:45]
+
+    quotes = {}
+    try:
+        import concurrent.futures as cf
+        import nse_quote
+
+        def _q(s):
+            try:
+                return s, nse_quote.get_quote(s)
+            except Exception:
+                return s, None
+
+        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            for s, q in ex.map(_q, cand):
+                if q and q.get("ltp"):
+                    quotes[s] = q
+    except Exception:
+        pass
+    ctx["quotes"] = quotes
     return ctx
 
 
@@ -287,6 +318,105 @@ def gen_vol_breakout(ctx):
     return ideas
 
 
+def _is_fno(sym):
+    try:
+        return bool(nse.get_lot_size(sym))
+    except Exception:
+        return False
+
+
+def gen_high52w(ctx):
+    """
+    E — 52-Week-High Momentum: nearness to the 52-week high predicts future
+    returns (George & Hwang 2004) better than raw past returns, and doesn't
+    reverse. LONG names trading within ~10% of their 52wH; SHORT names hugging
+    the 52w low (weaker leg, kept lighter). Positional — suits the 3-session hold.
+    """
+    ideas = []
+    for sym, q in ctx.get("quotes", {}).items():
+        ltp, yh, yl = q.get("ltp"), q.get("yearHigh"), q.get("yearLow")
+        pc = q.get("pChange")
+        if not ltp:
+            continue
+        if yh and ltp / yh >= 0.90 and (pc is None or pc >= -0.5):
+            prox = ltp / yh
+            conv = (prox - 0.90) / 0.10 * 60 + 20
+            if pc:
+                conv += min(abs(pc) * 2, 19)
+            reasons = [f"Within {(1 - prox) * 100:.1f}% of 52-week high",
+                       "Nearness-to-52wH momentum (George-Hwang)"]
+            if pc is not None:
+                reasons.append(f"Price {pc:+.2f}% today")
+            idea = _mk_idea(sym, "LONG", ltp, conv, reasons, 2.0, 4.0, fno=_is_fno(sym))
+            if idea:
+                ideas.append(idea)
+        elif yl and ltp / yl <= 1.05 and (pc is None or pc <= 0.5):
+            prox = ltp / yl
+            conv = (1.05 - prox) / 0.05 * 40 + 15
+            reasons = [f"Within {(prox - 1) * 100:.1f}% of 52-week low",
+                       "Breaking down from the lows"]
+            idea = _mk_idea(sym, "SHORT", ltp, conv, reasons, 2.0, 4.0, fno=_is_fno(sym))
+            if idea:
+                ideas.append(idea)
+    return ideas
+
+
+def gen_vwap(ctx):
+    """
+    F — VWAP Trend: VWAP is the institutional intraday benchmark. LONG when price
+    holds above VWAP with a green day, SHORT when it's below with a red day.
+    Tight 1% stop, 2% target (1:2 intraday).
+    """
+    ideas = []
+    for sym, q in ctx.get("quotes", {}).items():
+        ltp, vwap, pc = q.get("ltp"), q.get("vwap"), q.get("pChange")
+        if not ltp or not vwap:
+            continue
+        dist = (ltp - vwap) / vwap * 100
+        if dist > 0.2 and (pc is None or pc >= 0):
+            conv = min(dist * 8, 45) + min(abs(pc or 0) * 3, 40) + 10
+            reasons = [f"Price {dist:+.2f}% above VWAP",
+                       "Above the institutional VWAP benchmark"]
+            idea = _mk_idea(sym, "LONG", ltp, conv, reasons, 1.0, 2.0, fno=_is_fno(sym))
+            if idea:
+                ideas.append(idea)
+        elif dist < -0.2 and (pc is None or pc <= 0):
+            conv = min(abs(dist) * 8, 45) + min(abs(pc or 0) * 3, 40) + 10
+            reasons = [f"Price {dist:+.2f}% below VWAP",
+                       "Below the institutional VWAP benchmark"]
+            idea = _mk_idea(sym, "SHORT", ltp, conv, reasons, 1.0, 2.0, fno=_is_fno(sym))
+            if idea:
+                ideas.append(idea)
+    return ideas
+
+
+def gen_delivery(ctx):
+    """
+    G — Delivery-% Accumulation (India-specific): a high delivery % means shares
+    were taken to demat, not flipped intraday — genuine conviction. High delivery
+    + up day = accumulation (LONG); high delivery + down day = distribution
+    (SHORT). Single-day proxy (a rising multi-session trend is even stronger).
+    """
+    ideas = []
+    for sym, q in ctx.get("quotes", {}).items():
+        ltp, dp, pc = q.get("ltp"), q.get("deliveryPct"), q.get("pChange")
+        if not ltp or dp is None or dp < 55:
+            continue
+        if (pc or 0) >= 0:
+            conv = min((dp - 55) * 1.6, 45) + min((pc or 0) * 4, 45) + 10
+            reasons = [f"Delivery {dp:.0f}% — shares held, not flipped",
+                       "Accumulation footprint on an up day"]
+            idea = _mk_idea(sym, "LONG", ltp, conv, reasons, 2.0, 3.0, fno=_is_fno(sym))
+        else:
+            conv = min((dp - 55) * 1.6, 45) + min(abs(pc or 0) * 4, 45) + 10
+            reasons = [f"Delivery {dp:.0f}% on a down day",
+                       "Distribution footprint — sellers delivering"]
+            idea = _mk_idea(sym, "SHORT", ltp, conv, reasons, 2.0, 3.0, fno=_is_fno(sym))
+        if idea:
+            ideas.append(idea)
+    return ideas
+
+
 STRATEGIES = [
     {"id": "momentum", "name": "Multi-Signal Momentum",
      "description": "Go with today's move when confirmed by unusual volume + OI buildup + breadth (1:2 RR).",
@@ -300,6 +430,15 @@ STRATEGIES = [
     {"id": "vol_breakout", "name": "Volume Breakout",
      "description": "Only >=5x volume explosions in the move's direction; tight stop, quick target.",
      "regimeFit": ["Trend-Up", "Trend-Down", "Mixed"], "generate": gen_vol_breakout},
+    {"id": "high52w", "name": "52-Week-High Momentum",
+     "description": "Buy names hugging their 52-week high (George-Hwang anchoring edge); fade names at 52w lows.",
+     "regimeFit": ["Trend-Up", "Recovery"], "generate": gen_high52w},
+    {"id": "vwap", "name": "VWAP Trend",
+     "description": "Go with price vs the institutional VWAP benchmark: above+green = LONG, below+red = SHORT.",
+     "regimeFit": ["Trend-Up", "Trend-Down"], "generate": gen_vwap},
+    {"id": "delivery", "name": "Delivery% Accumulation",
+     "description": "High delivery% = real conviction: up day = accumulation (LONG), down day = distribution (SHORT).",
+     "regimeFit": ["Trend-Up", "Range"], "generate": gen_delivery},
 ]
 
 STRATEGY_MAP = {s["id"]: s for s in STRATEGIES}
