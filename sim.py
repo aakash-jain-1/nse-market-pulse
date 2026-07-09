@@ -29,6 +29,7 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 
+import db
 import nse_client as nse
 import strategies as strat
 
@@ -71,12 +72,13 @@ def _today():
 
 
 def _default_state():
+    # Trades now live in SQLite (db.sim_trades). The JSON holds only the small,
+    # document-shaped settings + the bounded per-day rollup.
     return {
         "version": STATE_VERSION,
         "auto": True,   # sims run automatically on startup (no user input needed)
         "entryMode": "continuous",
         "maxSessions": DEFAULT_MAX_SESSIONS,
-        "strategies": {s["id"]: {"trades": []} for s in strat.STRATEGIES},
         "daily": {},
         "lastAutoDate": {},
         "createdAt": _now(),
@@ -84,17 +86,15 @@ def _default_state():
 
 
 def _load():
+    _ensure_migrated()
     if not os.path.exists(STATE_FILE):
         return _default_state()
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
             st = json.load(f)
-        # Version-gate: v1 (single-ledger) state is superseded by per-strategy v2.
         if st.get("version") != STATE_VERSION:
             return _default_state()
-        st.setdefault("strategies", {})
-        for s in strat.STRATEGIES:
-            st["strategies"].setdefault(s["id"], {"trades": []})
+        st.pop("strategies", None)   # trades moved to SQLite; drop stale blob
         st.setdefault("daily", {})
         st.setdefault("lastAutoDate", {})
         st.setdefault("entryMode", "continuous")
@@ -106,10 +106,39 @@ def _load():
 
 
 def _save(state):
+    state.pop("strategies", None)    # never persist trades back into JSON
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
     os.replace(tmp, STATE_FILE)
+
+
+_migrated = False
+
+
+def _ensure_migrated():
+    """One-time move of any trades embedded in sim_state.json into SQLite."""
+    global _migrated
+    if _migrated:
+        return
+    with _lock:
+        if _migrated:
+            return
+        db.init()
+        try:
+            if db.sim_trade_count() == 0 and os.path.exists(STATE_FILE):
+                with open(STATE_FILE, encoding="utf-8") as f:
+                    raw = json.load(f)
+                trades = []
+                for sid, book in (raw.get("strategies") or {}).items():
+                    for t in (book or {}).get("trades", []):
+                        t.setdefault("strategy", sid)
+                        trades.append(t)
+                if trades:
+                    db.sim_insert_trades(trades)
+        except Exception:
+            pass
+        _migrated = True
 
 
 def _price(symbol):
@@ -190,6 +219,8 @@ def _open_trade(idea, strategy_id, regime_label):
         "regimeAtEntry": regime_label,
         "exitPrice": None,
         "closedAt": None,
+        "closedDay": None,
+        "minsToExit": None,
     }
 
 
@@ -257,7 +288,7 @@ def _baked_epoch(ts_str):
     return int(dt.replace(tzinfo=timezone.utc).timestamp())
 
 
-def _intrabar_catchup(state):
+def _intrabar_catchup(state, open_trades):
     """
     Between the coarse 60s LTP samples a stop/target can be pierced by a wick and
     missed. Every few minutes we re-check still-OPEN trades against real 1-min
@@ -271,8 +302,7 @@ def _intrabar_catchup(state):
         return
     _last_intrabar = now
 
-    open_trades = [t for book in state["strategies"].values()
-                   for t in book["trades"] if t["status"] == "OPEN"]
+    open_trades = [t for t in open_trades if t["status"] == "OPEN"]
     if not open_trades:
         return
     try:
@@ -320,18 +350,18 @@ def _intrabar_catchup(state):
             t["maePct"] = probe["maePct"]
             t["minsToExit"] = probe.get("minsToExit")
             t["closedAt"] = probe["closedTs"].replace("T", " ")
+            t["closedDay"] = probe.get("closedDay")
 
 
 def update(ctx=None):
-    """Re-price and resolve every OPEN trade across all strategies."""
+    """Re-price and resolve every OPEN trade; persist changes to the DB ledger."""
     with _lock:
         state = _load()
-        for sid, book in state["strategies"].items():
-            for t in book["trades"]:
-                if t["status"] == "OPEN":
-                    _refresh_trade(state, t)
-        _intrabar_catchup(state)
-        _save(state)
+        open_trades = db.sim_open_trades()
+        for t in open_trades:
+            _refresh_trade(state, t)
+        _intrabar_catchup(state, open_trades)
+        db.sim_insert_trades(open_trades)   # REPLACE-updates the changed rows
         return state
 
 
@@ -350,17 +380,17 @@ def take(strategy_ids=None, ctx=None, auto=False, limit=10):
         mode = state.get("entryMode", "continuous")
         today = _today()
         added = {}
+        new_trades = []
         for sid in ids:
             if auto and mode == "open" and state["lastAutoDate"].get(sid) == today:
                 added[sid] = 0
                 continue
-            book = state["strategies"].setdefault(sid, {"trades": []})
             # One entry per (symbol, direction) per strategy per day: dedup against
             # everything opened TODAY (any status), not just still-open trades.
             # This stops continuous mode from instantly re-entering the same setup
             # the moment a trade closes. The name is free to reappear next session.
-            taken_keys = {(t["symbol"], t["direction"]) for t in book["trades"]
-                          if t.get("openedDate") == today}
+            taken_keys = {(t["symbol"], t["direction"])
+                          for t in db.sim_trades_where(strategy=sid, opened_date=today)}
             ideas = strat.generate(sid, ctx)
             longs = sorted([i for i in ideas if i["direction"] == "LONG"],
                            key=lambda x: x.get("conviction", 0), reverse=True)[:limit]
@@ -373,12 +403,14 @@ def take(strategy_ids=None, ctx=None, auto=False, limit=10):
                     continue
                 tr = _open_trade(idea, sid, regime_label)
                 if tr:
-                    book["trades"].append(tr)
+                    new_trades.append(tr)
                     taken_keys.add(key)
                     n += 1
             added[sid] = n
             if auto and mode == "open":
                 state["lastAutoDate"][sid] = today
+        if new_trades:
+            db.sim_insert_trades(new_trades)
         _save(state)
     return added
 
@@ -400,12 +432,16 @@ def daily_rollup(ctx=None):
         day["niftyLast"] = idx.get("last")
         day["priorDayMove"] = regime.get("priorDayMove")
         day["breadth"] = f"{int(regime.get('breadthAdv') or 0)}:{int(regime.get('breadthDec') or 0)}"
+        by_strat = {}
+        for t in db.sim_all_trades():
+            by_strat.setdefault(t["strategy"], []).append(t)
         strat_stats = {}
-        for sid, book in state["strategies"].items():
+        for s in strat.STRATEGIES:
+            sid = s["id"]
             opened = closed = wins = 0
             realized = 0.0
             unreal = 0.0
-            for t in book["trades"]:
+            for t in by_strat.get(sid, []):
                 if t.get("openedDate") == today:
                     opened += 1
                 if t["status"] == "OPEN":
@@ -451,19 +487,24 @@ def daily_matrix():
 _REGIME_ORDER = ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"]
 
 
-def regime_leaderboard(min_closed=1):
+def regime_leaderboard(min_closed=1, trades=None):
     """
     Aggregate every trade by (regime-at-entry × strategy): closed count, win%,
     average per-trade %, total P&L. Flags the best strategy per regime by avg %.
     This is the accumulating forward-test — 'what works on a recovery day?'.
     """
-    state = _load()
+    if trades is None:
+        _ensure_migrated()
+        trades = db.sim_all_trades()
+    by = {}
+    for t in trades:
+        by.setdefault(t["strategy"], []).append(t)
     ids = [s["id"] for s in strat.STRATEGIES]
     agg = {}
     regimes = set()
     for s in strat.STRATEGIES:
         sid = s["id"]
-        for t in state["strategies"].get(sid, {"trades": []})["trades"]:
+        for t in by.get(sid, []):
             rg = t.get("regimeAtEntry") or "?"
             regimes.add(rg)
             a = agg.setdefault((rg, sid),
@@ -502,7 +543,7 @@ def regime_leaderboard(min_closed=1):
     return {"strategies": strat.strategy_meta(), "rows": rows}
 
 
-def strategy_of_the_day(regime_label=None, min_closed=3):
+def strategy_of_the_day(regime_label=None, min_closed=3, lb=None):
     """
     Pick the strategy to lean on today: the one with the best historical avg %
     in the current regime (needs >= min_closed samples), else fall back to the
@@ -510,7 +551,8 @@ def strategy_of_the_day(regime_label=None, min_closed=3):
     """
     if regime_label is None:
         regime_label = current_regime().get("label")
-    lb = regime_leaderboard()
+    if lb is None:
+        lb = regime_leaderboard()
     row = next((r for r in lb["rows"] if r["regime"] == regime_label), None)
     ranked = []
     if row:
@@ -538,13 +580,18 @@ def strategy_of_the_day(regime_label=None, min_closed=3):
     return {"regime": regime_label, "pick": pick, "ranked": ranked}
 
 
-def equity_curves():
+def equity_curves(trades=None):
     """Cumulative realized P&L per strategy, ordered by close time (equity curve)."""
-    state = _load()
+    if trades is None:
+        _ensure_migrated()
+        trades = db.sim_all_trades()
+    by = {}
+    for t in trades:
+        by.setdefault(t["strategy"], []).append(t)
     out = {}
     for s in strat.STRATEGIES:
         sid = s["id"]
-        closed = [t for t in state["strategies"].get(sid, {"trades": []})["trades"]
+        closed = [t for t in by.get(sid, [])
                   if t["status"] != "OPEN" and t.get("closedAt")]
         closed.sort(key=lambda t: t["closedAt"])
         cum, pts = 0.0, []
@@ -558,11 +605,13 @@ def equity_curves():
 def leaderboard_bundle():
     """One call for the whole leaderboard section: table + today's pick + curves."""
     regime = current_regime()
+    trades = db.sim_all_trades()
+    lb = regime_leaderboard(trades=trades)
     return {
         "regime": regime,
-        "leaderboard": regime_leaderboard(),
-        "pick": strategy_of_the_day(regime.get("label"))["pick"],
-        "equity": equity_curves(),
+        "leaderboard": lb,
+        "pick": strategy_of_the_day(regime.get("label"), lb=lb)["pick"],
+        "equity": equity_curves(trades=trades),
         "generatedAt": _now(),
     }
 
@@ -604,15 +653,21 @@ def summary(strategy_id=None):
     state = _load()
     regime = current_regime()
 
+    all_trades = db.sim_all_trades()
+    by_strat = {}
+    for t in all_trades:
+        by_strat.setdefault(t["strategy"], []).append(t)
+
     cards = []
     for s in strat.STRATEGIES:
-        sc = _scorecard(state["strategies"].get(s["id"], {"trades": []})["trades"])
+        sc = _scorecard(by_strat.get(s["id"], []))
         cards.append({
             "id": s["id"], "name": s["name"], "description": s["description"],
             "regimeFit": s["regimeFit"], **sc,
             "fitsNow": regime.get("label") in s["regimeFit"],
         })
 
+    lb = regime_leaderboard(trades=all_trades)
     out = {
         "mode": "overview",
         "auto": state.get("auto", False),
@@ -620,13 +675,13 @@ def summary(strategy_id=None):
         "maxSessions": state.get("maxSessions", DEFAULT_MAX_SESSIONS),
         "notional": NOTIONAL,
         "regime": regime,
-        "pick": strategy_of_the_day(regime.get("label"))["pick"],
+        "pick": strategy_of_the_day(regime.get("label"), lb=lb)["pick"],
         "strategies": cards,
         "generatedAt": _now(),
     }
 
-    if strategy_id and strategy_id in state["strategies"]:
-        trades = state["strategies"][strategy_id]["trades"]
+    if strategy_id and strategy_id in strat.STRATEGY_MAP:
+        trades = by_strat.get(strategy_id, [])
         meta = strat.STRATEGY_MAP.get(strategy_id, {})
         open_t = sorted([t for t in trades if t["status"] == "OPEN"],
                         key=lambda t: t["pnlPct"], reverse=True)
@@ -670,4 +725,52 @@ def set_entry_mode(mode):
 
 def reset():
     with _lock:
+        db.sim_clear()
         _save(_default_state())
+
+
+# ----------------------------------------------------------------------------
+# All-time performance (durable, cross-session)
+# ----------------------------------------------------------------------------
+def performance():
+    """
+    Cross-session leaderboard ranked by expectancy (R). One row per strategy plus
+    a portfolio total, computed over the entire durable ledger — this is the
+    'how has each strategy actually done, all-time' view.
+    """
+    _ensure_migrated()
+    trades = db.sim_all_trades()
+    by = {}
+    for t in trades:
+        by.setdefault(t["strategy"], []).append(t)
+
+    def _extra(ts):
+        closed = [t for t in ts if t["status"] in ("TARGET", "STOP", "EXPIRED")]
+        gains = sum(t["pnl"] for t in closed if (t["pnl"] or 0) > 0)
+        losses = -sum(t["pnl"] for t in closed if (t["pnl"] or 0) < 0)
+        holds = [t["minsToExit"] for t in closed if t.get("minsToExit") is not None]
+        days = {t["openedDate"] for t in ts if t.get("openedDate")}
+        return {
+            "profitFactor": round(gains / losses, 2) if losses else (None if not gains else 99.9),
+            "avgHoldMins": int(sum(holds) / len(holds)) if holds else None,
+            "tradingDays": len(days),
+        }
+
+    rows = []
+    for s in strat.STRATEGIES:
+        ts = by.get(s["id"], [])
+        rows.append({"id": s["id"], "name": s["name"],
+                     **_scorecard(ts), **_extra(ts)})
+    # Rank by expectancy (R), strategies with no closed trades sink to the bottom.
+    rows.sort(key=lambda r: (r["expectancyR"] if r["expectancyR"] is not None else -1e9),
+              reverse=True)
+
+    totals = {**_scorecard(trades), **_extra(trades)}
+    first = min((t["openedAt"] for t in trades), default=None)
+    return {
+        "rows": rows,
+        "totals": totals,
+        "tradeCount": len(trades),
+        "since": first,
+        "generatedAt": _now(),
+    }

@@ -1,0 +1,358 @@
+"""
+Daily-bar historical backtest
+=============================
+Answers "how would our strategies have worked over the last N days?" using REAL
+NSE end-of-day history (`nse_client.get_stock_history` → daily OHLCV + delivery%),
+which is the one historical source NSE doesn't block.
+
+This is DIFFERENT from `backtest_strategies.py`:
+  - `backtest_strategies` replays the LIVE intraday context we archived in
+    `context_log` (high fidelity, but only covers days we captured).
+  - `backtest_daily` (this file) reconstructs the strategies from DAILY bars going
+    back months, so it can look back 30/60/90 days *today* — at the cost of
+    fidelity: EOD entries (enter on the signal day's close), exits resolved on
+    subsequent daily high/low (a bar that pierces both stop and target is counted
+    as a STOP first — conservative), no intrabar wick precision.
+
+Coverage: the 5 strategies computable from daily price/volume/delivery in ONE call
+per symbol — Momentum, Mean-Reversion, Delivery%, High-Proximity, Volume-Breakout.
+VWAP / ORB / iVWAP are intraday-only (no daily equivalent); OI-Smart needs the
+separate daily-OI (foCPV) feed + per-symbol expiry and is left to the live sim /
+context backtest. Sizing matches the live sim: fixed RISK_PER_TRADE, outcomes in
+R-multiples.
+"""
+import concurrent.futures as cf
+from datetime import datetime, timedelta, timezone
+
+import nse_client as nse
+from sim import RISK_PER_TRADE, size_position
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# Strategies reconstructable from a single daily-history call, with their
+# fixed stop/target (% of entry). RR is roughly comparable to the live ideas.
+STRATS = [
+    {"id": "momentum",     "name": "Multi-Signal Momentum",  "stop": 3.0, "target": 6.0,
+     "desc": "Strong daily move (>=2%) confirmed by >=1.5x volume, closing near the day's extreme."},
+    {"id": "meanrev",      "name": "Mean-Reversion Bounce",  "stop": 3.0, "target": 4.5,
+     "desc": "Fade a sharp 1-day spike: buy a >=4% drop, sell a >=5% pop, expecting reversion."},
+    {"id": "delivery",     "name": "Delivery% Accumulation", "stop": 3.0, "target": 6.0,
+     "desc": "High delivery% (>=60%) = real (non-intraday) conviction; go with the day's direction."},
+    {"id": "high52w",      "name": "High-Proximity Momentum","stop": 4.0, "target": 8.0,
+     "desc": "Within 3% of the available-history high (52w proxy) on an up day (anchoring/breakout edge)."},
+    {"id": "vol_breakout", "name": "Volume Breakout",        "stop": 3.0, "target": 6.0,
+     "desc": "Close breaks the prior 20-day high/low on a >=2x volume expansion."},
+]
+STRAT_MAP = {s["id"]: s for s in STRATS}
+
+NOT_COVERED = [
+    {"id": "oi_smart", "name": "F&O OI Smart-Money",
+     "reason": "Needs daily OI (foCPV) + per-symbol expiry — use the live sim / context backtest."},
+    {"id": "vwap", "name": "VWAP Trend",
+     "reason": "Intraday cumulative VWAP has no daily-bar equivalent."},
+    {"id": "orb", "name": "Opening-Range Breakout",
+     "reason": "Needs the 09:15-09:30 opening range (minute candles)."},
+    {"id": "ivwap", "name": "Intraday VWAP Reclaim",
+     "reason": "Needs the intraday session VWAP path (minute candles)."},
+]
+
+# A curated liquid F&O default universe (Nifty-heavyweights + high-beta favourites).
+# Kept modest so a first run is bounded (~universe_size history pulls). Users can
+# raise universe_size to sweep the whole F&O list.
+LIQUID = [
+    "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "SBIN", "AXISBANK",
+    "KOTAKBANK", "ITC", "LT", "BHARTIARTL", "HINDUNILVR", "BAJFINANCE", "MARUTI",
+    "SUNPHARMA", "TATAMOTORS", "TATASTEEL", "WIPRO", "HCLTECH", "ADANIENT",
+    "ADANIPORTS", "ONGC", "NTPC", "POWERGRID", "ULTRACEMCO", "TITAN", "ASIANPAINT",
+    "NESTLEIND", "JSWSTEEL", "COALINDIA", "GRASIM", "BAJAJFINSV", "TECHM",
+    "INDUSINDBK", "DRREDDY", "CIPLA", "EICHERMOT", "HEROMOTOCO", "BAJAJ-AUTO",
+    "HINDALCO", "BRITANNIA", "APOLLOHOSP", "BPCL", "TATACONSUM", "M&M", "SBILIFE",
+    "HDFCLIFE", "VEDL", "DLF", "PNB", "CANBK", "TRENT", "ZOMATO", "DMART",
+]
+
+
+def _now():
+    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _clean_date(b):
+    """Authoritative trade date as YYYY-MM-DD. NSE's CH_TIMESTAMP (`iso`) is baked
+    a day early (00:00 IST expressed as UTC), so trust mTIMESTAMP (`date`)."""
+    try:
+        return datetime.strptime(b["date"], "%d-%b-%Y").strftime("%Y-%m-%d")
+    except Exception:
+        return (b.get("iso") or "")[:10]
+
+
+def _universe(size):
+    """Curated liquid names first; extend with a spread sample of the rest."""
+    try:
+        fno = set(nse.get_fno_universe().get("stocks") or [])
+    except Exception:
+        fno = set()
+    base = [s for s in LIQUID if not fno or s in fno]
+    if size <= len(base):
+        return base[:size]
+    # Need more: spread-sample the remaining F&O names for A-Z coverage.
+    rest = sorted(fno - set(base))
+    if rest:
+        stride = max(1, len(rest) // max(1, size - len(base)))
+        base += rest[::stride][: size - len(base)]
+    return base[:size]
+
+
+def _features(bars):
+    """Per-index EOD features from an ascending list of daily bars."""
+    feats = []
+    highs = [b["high"] for b in bars]
+    lows = [b["low"] for b in bars]
+    vols = [b["volume"] for b in bars]
+    run_hi = run_lo = None
+    for i, b in enumerate(bars):
+        c, hi, lo = b["close"], b["high"], b["low"]
+        if None in (c, hi, lo):
+            feats.append(None)
+            continue
+        run_hi = hi if run_hi is None else max(run_hi, hi)
+        run_lo = lo if run_lo is None else min(run_lo, lo)
+        pc = b.get("prevClose") or (bars[i - 1]["close"] if i else None)
+        ret1 = (c / pc - 1) * 100 if pc else 0.0
+        rng_pos = (c - lo) / (hi - lo) if hi > lo else 0.5
+        prev_vol = [v for v in vols[max(0, i - 20):i] if v]
+        vol20 = sum(prev_vol) / len(prev_vol) if prev_vol else None
+        vol_mult = (b["volume"] / vol20) if (vol20 and b["volume"]) else None
+        prev_hi = [h for h in highs[max(0, i - 20):i] if h is not None]
+        prev_lo = [l for l in lows[max(0, i - 20):i] if l is not None]
+        feats.append({
+            "ret1": ret1, "rngPos": rng_pos, "volMult": vol_mult,
+            "hi20": max(prev_hi) if prev_hi else None,
+            "lo20": min(prev_lo) if prev_lo else None,
+            "hh": run_hi, "ll": run_lo, "delivPct": b.get("delivPct"),
+        })
+    return feats
+
+
+def _signals(f):
+    """
+    Close-independent signals (strategy_id, direction) for the as-of close of a
+    day. High-proximity and volume-breakout also depend on the raw close vs level,
+    so they're generated in the caller where the close is in hand.
+    """
+    out = []
+    ret1, vm, rp = f["ret1"], f["volMult"], f["rngPos"]
+    # Momentum
+    if vm is not None:
+        if ret1 >= 2 and vm >= 1.5 and rp >= 0.6:
+            out.append(("momentum", "LONG"))
+        elif ret1 <= -2 and vm >= 1.5 and rp <= 0.4:
+            out.append(("momentum", "SHORT"))
+    # Mean-reversion (fade the 1-day extreme)
+    if ret1 <= -4:
+        out.append(("meanrev", "LONG"))
+    elif ret1 >= 5:
+        out.append(("meanrev", "SHORT"))
+    # Delivery% accumulation/distribution
+    dp = f["delivPct"]
+    if dp is not None and dp >= 60:
+        if ret1 >= 0.5:
+            out.append(("delivery", "LONG"))
+        elif ret1 <= -0.5:
+            out.append(("delivery", "SHORT"))
+    return out
+
+
+def _resolve(direction, entry, stop_px, tgt_px, bars, i, max_hold):
+    """
+    Walk subsequent daily bars; return (status, exitPrice, exitIdx). A bar that
+    straddles both stop and target is a STOP (conservative). Time-expire at close.
+    """
+    last = len(bars) - 1
+    end = min(i + max_hold, last)
+    for j in range(i + 1, end + 1):
+        hi, lo = bars[j]["high"], bars[j]["low"]
+        if None in (hi, lo):
+            continue
+        if direction == "LONG":
+            if lo <= stop_px:
+                return "STOP", stop_px, j
+            if hi >= tgt_px:
+                return "TARGET", tgt_px, j
+        else:
+            if hi >= stop_px:
+                return "STOP", stop_px, j
+            if lo <= tgt_px:
+                return "TARGET", tgt_px, j
+    if end > i:
+        return "EXPIRED", bars[end]["close"], end
+    return "OPEN", None, None
+
+
+def _trade(sid, direction, bars, feats, i, max_hold):
+    meta = STRAT_MAP[sid]
+    entry = bars[i]["close"]
+    if not entry:
+        return None
+    sp, tp = meta["stop"], meta["target"]
+    if direction == "LONG":
+        stop_px, tgt_px = entry * (1 - sp / 100), entry * (1 + tp / 100)
+    else:
+        stop_px, tgt_px = entry * (1 + sp / 100), entry * (1 - tp / 100)
+    qty, notional = size_position(entry, stop_px)
+    status, exit_px, j = _resolve(direction, entry, stop_px, tgt_px, bars, i, max_hold)
+    t = {
+        "symbol": bars[i].get("symbol"), "strategy": sid, "direction": direction,
+        "entry": round(entry, 2), "stop": round(stop_px, 2), "target": round(tgt_px, 2),
+        "qty": qty, "notional": notional, "status": status,
+        "openedDate": bars[i]["d"], "openIdx": i,
+    }
+    if status == "OPEN":
+        t.update(exitPrice=None, closedDate=None, pnl=0.0, pnlPct=0.0,
+                 rMultiple=0.0, holdDays=None)
+        return t
+    move = ((exit_px / entry - 1) * 100) if direction == "LONG" else ((entry / exit_px - 1) * 100)
+    pnl = (exit_px - entry) * qty if direction == "LONG" else (entry - exit_px) * qty
+    t.update(exitPrice=round(exit_px, 2), closedDate=bars[j]["d"],
+             pnl=round(pnl, 2), pnlPct=round(move, 2),
+             rMultiple=round(pnl / RISK_PER_TRADE, 2), holdDays=j - i)
+    return t
+
+
+def _backtest_symbol(bars, cutoff_iso, max_hold):
+    """All trades for one symbol across every strategy (no overlapping per s/strat)."""
+    feats = _features(bars)
+    trades = []
+    busy = {}   # strategy_id -> index until which we're in a trade
+    for i, b in enumerate(bars):
+        if i + 1 >= len(bars):
+            break  # need a future bar to resolve
+        if b["d"] < cutoff_iso:
+            continue
+        f = feats[i]
+        if not f:
+            continue
+        c = b["close"]
+        sigs = list(_signals(f))
+        # close-dependent signals (need the actual close vs levels)
+        if i >= 60 and f["hh"] and f["ll"] and c:
+            if c >= 0.97 * f["hh"] and f["ret1"] >= 0:
+                sigs.append(("high52w", "LONG"))
+            elif c <= 1.03 * f["ll"] and f["ret1"] <= 0:
+                sigs.append(("high52w", "SHORT"))
+        if f["volMult"] and f["volMult"] >= 2 and f["hi20"] and f["lo20"] and c:
+            if c > f["hi20"]:
+                sigs.append(("vol_breakout", "LONG"))
+            elif c < f["lo20"]:
+                sigs.append(("vol_breakout", "SHORT"))
+        for sid, direction in sigs:
+            if busy.get(sid, -1) >= i:
+                continue   # already in a trade for this strategy on this name
+            t = _trade(sid, direction, bars, feats, i, max_hold)
+            if not t:
+                continue
+            trades.append(t)
+            if t.get("openIdx") is not None and t["status"] != "OPEN":
+                # block re-entry until this trade closes
+                close_idx = i + (t["holdDays"] or 0)
+                busy[sid] = close_idx
+    return trades
+
+
+def _median(xs):
+    xs = sorted(x for x in xs if x is not None)
+    return xs[len(xs) // 2] if xs else None
+
+
+def _scorecard(trades):
+    closed = [t for t in trades if t["status"] in ("TARGET", "STOP", "EXPIRED")]
+    wins = [t for t in closed if t["status"] == "TARGET"]
+    n = len(closed)
+    total_r = sum(t["rMultiple"] for t in closed)
+    realized = sum(t["pnl"] for t in closed)
+    avg_pct = sum(t["pnlPct"] for t in closed) / n if n else None
+    # equity curve by close date
+    cl = sorted(closed, key=lambda t: t["closedDate"] or "")
+    cum, pts = 0.0, []
+    for t in cl:
+        cum += t["pnl"]
+        pts.append(round(cum, 0))
+    return {
+        "trades": len(trades), "open": len(trades) - n, "closed": n,
+        "target": len(wins), "stop": sum(1 for t in closed if t["status"] == "STOP"),
+        "expired": sum(1 for t in closed if t["status"] == "EXPIRED"),
+        "winRate": round(len(wins) / n * 100, 1) if n else None,
+        "avgPnlPct": round(avg_pct, 2) if avg_pct is not None else None,
+        "totalR": round(total_r, 2), "expectancyR": round(total_r / n, 2) if n else None,
+        "realizedPnl": round(realized, 2),
+        "avgHoldDays": round(sum(t["holdDays"] for t in closed) / n, 1) if n else None,
+        "equity": {"points": pts, "final": round(cum, 0), "n": len(pts)},
+    }
+
+
+def run(days=30, universe_size=40, max_hold=5, chunks=3):
+    days = max(5, min(int(days), 120))
+    universe_size = max(5, min(int(universe_size), 210))
+    max_hold = max(1, min(int(max_hold), 15))
+
+    symbols = _universe(universe_size)
+    hist = {}
+
+    def _pull(sym):
+        try:
+            bars = nse.get_stock_history(sym, chunks=chunks, chunk_days=80)
+            for b in bars:
+                b["symbol"] = sym
+                b["d"] = _clean_date(b)
+            return sym, bars
+        except Exception:
+            return sym, []
+
+    with cf.ThreadPoolExecutor(max_workers=6) as pool:
+        for sym, bars in pool.map(_pull, symbols):
+            if bars:
+                hist[sym] = bars
+
+    if not hist:
+        return {"message": "No history returned from NSE (rate-limited or off-hours). Try again."}
+
+    # cutoff = last available bar date minus `days` calendar days
+    last_iso = max(b["d"] for bars in hist.values() for b in bars)
+    last_dt = datetime.strptime(last_iso, "%Y-%m-%d")
+    cutoff_iso = (last_dt - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    by_strat = {s["id"]: [] for s in STRATS}
+    first_iso = last_iso
+    for sym, bars in hist.items():
+        for t in _backtest_symbol(bars, cutoff_iso, max_hold):
+            by_strat[t["strategy"]].append(t)
+            if t["openedDate"] < first_iso:
+                first_iso = t["openedDate"]
+
+    rows = []
+    all_trades = []
+    for s in STRATS:
+        ts = by_strat[s["id"]]
+        all_trades += ts
+        sc = _scorecard(ts)
+        # a few sample trades (most recent) for drill-in
+        sample = sorted([t for t in ts if t["status"] != "OPEN"],
+                        key=lambda t: t["closedDate"] or "", reverse=True)[:12]
+        rows.append({"id": s["id"], "name": s["name"], "description": s["desc"], **sc,
+                     "sample": sample})
+    rows.sort(key=lambda r: (r["expectancyR"] if r["expectancyR"] is not None else -1e9),
+              reverse=True)
+
+    bars_counts = [len(b) for b in hist.values()]
+    return {
+        "mode": "daily",
+        "days": days,
+        "range": {"from": cutoff_iso, "to": last_iso, "firstTrade": first_iso},
+        "maxHold": max_hold,
+        "riskPerTrade": RISK_PER_TRADE,
+        "universeRequested": universe_size,
+        "universeWithData": len(hist),
+        "barsMedian": _median(bars_counts),
+        "strategies": rows,
+        "totals": _scorecard(all_trades),
+        "notCovered": NOT_COVERED,
+        "generatedAt": _now(),
+    }

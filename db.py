@@ -40,6 +40,15 @@ IV_COLS = [
     "ts", "symbol", "expiry", "atmStrike", "atmIV", "ceIV", "peIV",
     "pcr", "underlying",
 ]
+SIM_TRADE_COLS = [
+    "id", "strategy", "symbol", "direction", "conviction", "rating", "reasons",
+    "fno", "entry", "stop", "target", "stopPct", "targetPct", "rr", "qty",
+    "notional", "risk", "status", "ltp", "mfePct", "maePct", "pnl", "pnlPct",
+    "rMultiple", "openedAt", "openedDate", "regimeAtEntry", "exitPrice",
+    "closedAt", "closedDay", "minsToExit",
+]
+_SIM_TEXT = {"id", "strategy", "symbol", "direction", "rating", "status",
+             "openedAt", "openedDate", "regimeAtEntry", "closedAt", "closedDay"}
 
 
 def _conn():
@@ -80,6 +89,20 @@ def init():
                     niftyPct REAL, payload BLOB
                 )""")
             c.execute("CREATE INDEX IF NOT EXISTS ix_ctx_day ON context_log(day)")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS sim_trades (
+                    id TEXT PRIMARY KEY, strategy TEXT, symbol TEXT, direction TEXT,
+                    conviction REAL, rating TEXT, reasons TEXT, fno INTEGER,
+                    entry REAL, stop REAL, target REAL, stopPct REAL, targetPct REAL,
+                    rr REAL, qty REAL, notional REAL, risk REAL,
+                    status TEXT, ltp REAL, mfePct REAL, maePct REAL,
+                    pnl REAL, pnlPct REAL, rMultiple REAL,
+                    openedAt TEXT, openedDate TEXT, regimeAtEntry TEXT,
+                    exitPrice REAL, closedAt TEXT, closedDay TEXT, minsToExit INTEGER
+                )""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_sim_status ON sim_trades(status)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_sim_strat_day ON sim_trades(strategy, openedDate)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_sim_regime ON sim_trades(regimeAtEntry, strategy)")
         _import_legacy_csv()
         _initialized = True
 
@@ -195,6 +218,83 @@ def context_stats():
             "SUM(LENGTH(payload)) bytes FROM context_log").fetchone()
     return {"cycles": r["n"] or 0, "days": r["d"] or 0,
             "first": r["a"], "last": r["b"], "bytes": r["bytes"] or 0}
+
+
+# ----------------------------------------------------------------------------
+# Sim trades ledger (durable, queryable — replaces the JSON trades blob)
+# ----------------------------------------------------------------------------
+def _trade_to_row(t):
+    row = []
+    for col in SIM_TRADE_COLS:
+        if col == "reasons":
+            row.append(json.dumps(t.get("reasons") or []))
+        elif col == "fno":
+            row.append(1 if t.get("fno") else 0)
+        elif col in _SIM_TEXT:
+            row.append(t.get(col))
+        else:
+            row.append(_num_or_none(t.get(col)))
+    return tuple(row)
+
+
+def _row_to_trade(r):
+    t = {col: r[col] for col in SIM_TRADE_COLS}
+    try:
+        t["reasons"] = json.loads(r["reasons"]) if r["reasons"] else []
+    except Exception:
+        t["reasons"] = []
+    t["fno"] = bool(r["fno"])
+    if t["minsToExit"] is not None:
+        t["minsToExit"] = int(t["minsToExit"])
+    return t
+
+
+def sim_insert_trades(trades):
+    """Insert or update (by id) a batch of trade dicts."""
+    if not trades:
+        return 0
+    with _conn() as c:
+        c.executemany(
+            f"INSERT OR REPLACE INTO sim_trades ({','.join(SIM_TRADE_COLS)}) "
+            f"VALUES ({','.join('?' * len(SIM_TRADE_COLS))})",
+            [_trade_to_row(t) for t in trades],
+        )
+    return len(trades)
+
+
+def sim_all_trades():
+    with _conn() as c:
+        return [_row_to_trade(r) for r in c.execute(
+            "SELECT * FROM sim_trades ORDER BY openedAt")]
+
+
+def sim_open_trades():
+    with _conn() as c:
+        return [_row_to_trade(r) for r in c.execute(
+            "SELECT * FROM sim_trades WHERE status='OPEN' ORDER BY openedAt")]
+
+
+def sim_trades_where(strategy=None, opened_date=None):
+    q, args = "SELECT * FROM sim_trades WHERE 1=1", []
+    if strategy is not None:
+        q += " AND strategy=?"
+        args.append(strategy)
+    if opened_date is not None:
+        q += " AND openedDate=?"
+        args.append(opened_date)
+    q += " ORDER BY openedAt"
+    with _conn() as c:
+        return [_row_to_trade(r) for r in c.execute(q, args)]
+
+
+def sim_trade_count():
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) n FROM sim_trades").fetchone()["n"]
+
+
+def sim_clear():
+    with _conn() as c:
+        c.execute("DELETE FROM sim_trades")
 
 
 # ----------------------------------------------------------------------------

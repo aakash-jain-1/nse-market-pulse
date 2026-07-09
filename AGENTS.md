@@ -35,7 +35,7 @@ NSE/
 ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
 ├── backtest_strategies.py # Offline backtester: replays strategies, resolves on OHLCV
 ├── test_intrabar.py   # Unit tests for the intrabar resolver
-├── db.py              # SQLite store (snapshots / IV / strategy-context time-series)
+├── db.py              # SQLite store (snapshots / IV / context + durable sim_trades ledger)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
@@ -50,14 +50,21 @@ NSE/
 
 ## Data storage (IMPORTANT)
 
-- **Time-series → SQLite** (`db.py`, `data/market.db`, gitignored via `*.db`).
-  Tables: `snapshots` (demand/volgainers board), `iv_log` (ATM IV), `context_log`
-  (a trimmed+gzipped snapshot of the full strategy context each cycle, ~6 KB/cycle).
-  WAL mode for concurrent reads; indexed by view/ts/symbol/day. Reads no longer
-  slurp whole CSVs into memory. On first run any legacy `snapshots.csv` /
-  `iv_log.csv` is auto-imported (`db._import_legacy_csv`).
-- **Small state → JSON** (`sim_state.json`, `paper_state.json`). Tiny, document-
-  shaped, rewritten atomically — no DB needed. Don't "upgrade" these to SQLite.
+- **Time-series + the sim ledger → SQLite** (`db.py`, `data/market.db`, gitignored
+  via `*.db`). Tables: `snapshots` (demand/volgainers board), `iv_log` (ATM IV),
+  `context_log` (a trimmed+gzipped snapshot of the full strategy context each cycle,
+  ~6 KB/cycle), and `sim_trades` (the durable strategy-sim ledger — every trade
+  every strategy ever took, all sessions; indexed on `status`,
+  `(strategy, openedDate)`, `(regimeAtEntry, strategy)`). WAL mode for concurrent
+  reads; indexed by view/ts/symbol/day. Reads no longer slurp whole CSVs into
+  memory. On first run any legacy `snapshots.csv` / `iv_log.csv` is auto-imported
+  (`db._import_legacy_csv`), and trades embedded in an older `sim_state.json` are
+  auto-migrated into `sim_trades` (`sim._ensure_migrated`).
+- **Small state → JSON** (`sim_state.json`, `paper_state.json`). `sim_state.json`
+  now holds ONLY settings (auto/entryMode/maxSessions/lastAutoDate) + the bounded
+  per-day rollup — the trades live in SQLite. Tiny, document-shaped, rewritten
+  atomically. Don't move these small blobs to SQLite, and don't put trades back in
+  the JSON.
 - Not Postgres/Mongo/Timescale — those need a server and are overkill for a
   single-user local tool. If analytical backtests ever get huge, DuckDB is the
   drop-in upgrade, but we're nowhere near that.
@@ -322,15 +329,19 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     Recovery / Pullback / Range / Mixed from NIFTY %change + advance-decline
     breadth (`nse.get_index_snapshot()` → `/api/allIndices`, cached 30s) + the
     prior session's move.
-  - **Per-strategy sims** (`sim.py` v2, `sim_state.json` version-gated): `take()`
-    snapshots each strategy's ideas (risk-based sizing via `size_position()`:
-    each trade risks a fixed ₹2,000 to its stop, notional-capped at ₹5L; dedup
-    one entry per symbol+direction per strategy per day);
-    `update()` marks to market and closes on target/stop **or a multi-day
-    horizon** (`maxSessions`, default 3, then time-expire); entry mode is
-    **selectable** — `continuous` (auto-take all day) or `open` (one snapshot/
+  - **Per-strategy sims** (`sim.py` v2; trades in SQLite `sim_trades`, settings +
+    daily rollup in `sim_state.json`): `take()` snapshots each strategy's ideas
+    (risk-based sizing via `size_position()`: each trade risks a fixed ₹2,000 to
+    its stop, notional-capped at ₹5L; dedup one entry per symbol+direction per
+    strategy per day, checked via `db.sim_trades_where`); `update()` loads open
+    trades with `db.sim_open_trades()`, marks to market and closes on target/stop
+    **or a multi-day horizon** (`maxSessions`, default 3, then time-expire), then
+    writes back with `db.sim_insert_trades()` (INSERT-OR-REPLACE by id). Entry mode
+    is **selectable** — `continuous` (auto-take all day) or `open` (one snapshot/
     day). `daily_rollup()` stores each day's regime + per-strategy win-rate/P&L →
-    `daily_matrix()` powers a **day × strategy heatmap**.
+    `daily_matrix()` powers a **day × strategy heatmap**. All aggregate reads
+    (`summary`, `regime_leaderboard`, `equity_curves`, `performance`) group
+    `db.sim_all_trades()` in Python — same logic as before, just a durable source.
   - **Risk-based sizing + expectancy**: `sim.size_position(entry, stop)` sizes
     every trade to a fixed ₹2,000 risk (per-share risk = |entry-stop|), so each
     trade's outcome is measured in **R-multiples** (+1R = made what you risked,
@@ -343,9 +354,12 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     #trades), flags the best strategy per regime (⭐), and picks the one to lean
     on today (best history in the current regime, ≥3 closed trades, else the
     design-fit strategy). Per-strategy **equity curves** (cumulative realized ₹)
-    render as sparklines. This is the accumulating forward-test (a true offline
-    backtest isn't possible — snapshots.csv only logs demand/volgainers, not the
-    per-strategy inputs like VWAP/delivery/52wH/OI).
+    render as sparklines. This is the accumulating forward-test.
+  - **All-time performance** (`sim.performance()` → `/api/sim/performance`, 🧪 Sim
+    tab "Performance (all-time)" table): one ranked row per strategy over the whole
+    `sim_trades` ledger — expectancy R, total R, win%, realized ₹, profit factor,
+    avg hold (mins), #trading-days — plus a portfolio total. Ranked by expectancy
+    R. This is the durable cross-session scorecard (survives restarts).
   - **UI**: regime banner, ⭐ strategy-of-the-day card, strategy cards (click to
     expand that strategy's open/closed tables), the **regime leaderboard** grid
     (+ equity sparklines), and the daily comparison heatmap. **Sim alerts** toast/
@@ -380,9 +394,9 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     its holding window with entry/target/stop/exit lines overlaid + MFE/MAE and
     time-to-exit stats. On demand via `/api/ohlc/<sym>?from=&to=` (baked epochs);
     no storage — trades are within NSE's ~30-40 day 1-min retention.
-  - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,backtest
-    [?resolve=intrabar|ltp],regime,take,auto,mode,reset}`. Still SEPARATE from the
-    manual paper account.
+  - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,performance,
+    backtest[?resolve=intrabar|ltp],regime,take,auto,mode,reset}`. Still SEPARATE
+    from the manual paper account.
 - **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
   notional), long **and** short with netting/flip-through-zero, MTM on live
   near-month price. New route `/api/paper/futures_order`; traded from the detail

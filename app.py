@@ -203,6 +203,12 @@ def api_sim_leaderboard():
     return jsonify(sim.leaderboard_bundle())
 
 
+@app.route("/api/sim/performance")
+def api_sim_performance():
+    import sim
+    return jsonify(sim.performance())
+
+
 @app.route("/api/sim/backtest")
 def api_sim_backtest():
     import backtest_strategies as bt
@@ -220,6 +226,17 @@ def api_sim_backtest():
         max_sessions=int(request.args.get("maxSessions", 3)),
         entry_mode=request.args.get("entryMode", "continuous"),
         resolve=resolve,
+    ))
+
+
+@app.route("/api/sim/backtest_daily")
+def api_sim_backtest_daily():
+    """Daily-bar historical backtest over REAL NSE end-of-day history."""
+    import backtest_daily as btd
+    return jsonify(btd.run(
+        days=int(request.args.get("days", 30)),
+        universe_size=int(request.args.get("universe", 40)),
+        max_hold=int(request.args.get("maxHold", 5)),
     ))
 
 

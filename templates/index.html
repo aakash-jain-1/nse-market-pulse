@@ -375,6 +375,7 @@
         <label class="chk"><input type="checkbox" id="simAuto"> Auto (market hours)</label>
         <button id="simReset" class="sell" style="padding:6px 12px">Reset</button>
         <button id="simBacktest" style="padding:6px 12px">⏮ Backtest history</button>
+        <button id="simBacktestDaily" style="padding:6px 12px">📅 Daily 30d (real EOD)</button>
         <span style="color:var(--muted);font-size:11px">Risk-based sizing: each trade risks ₹2,000 to its stop · target=right, stop=wrong · multi-day hold (≤3 sessions). Expectancy in R.</span>
       </div>
       <div id="scanFilters" class="scan-filters" style="display:none">
@@ -1819,7 +1820,54 @@
         ${lbGrid}</div>`;
     }
 
-    function renderSim(sum, daily, lb) {
+    // All-time performance: one ranked row per strategy over the whole durable
+    // (SQLite) ledger — survives restarts, accumulates across every session.
+    function renderSimPerformance(perf) {
+      if (!perf || !(perf.rows || []).length) return "";
+      const rk = (v, unit, good) => v == null ? `<td style="color:var(--muted)">—</td>`
+        : `<td class="${(good===false?-v:v) >= 0 ? 'pos' : 'neg'}">${_sgn(v)}${v}${unit||''}</td>`;
+      const rows = perf.rows.map(s => {
+        const wr = s.winRate == null ? "—" : s.winRate + "%";
+        const pf = s.profitFactor == null ? "—" : s.profitFactor;
+        const hold = s.avgHoldMins == null ? "—" : s.avgHoldMins + "m";
+        return `<tr>
+          <td class="sym" title="${s.name}">${s.name}</td>
+          <td>${s.open + s.closed}</td><td>${s.closed}</td>
+          <td class="pos">${s.target}</td><td class="neg">${s.stop}</td><td style="color:var(--muted)">${s.expired}</td>
+          <td class="${(s.winRate||0)>=50?'pos':'neg'}">${wr}</td>
+          ${rk(s.expectancyR, 'R')}
+          ${rk(s.totalR, 'R')}
+          <td class="${(s.realizedPnl||0)>=0?'pos':'neg'}">${_sgn(s.realizedPnl)}₹${fmtNum(s.realizedPnl)}</td>
+          <td>${pf}</td><td style="color:var(--muted)">${hold}</td>
+          <td style="color:var(--muted)">${s.tradingDays||0}</td></tr>`;
+      }).join("");
+      const t = perf.totals || {};
+      const totRow = `<tr style="border-top:2px solid var(--border);font-weight:600">
+        <td class="sym">All strategies</td>
+        <td>${(t.open||0)+(t.closed||0)}</td><td>${t.closed||0}</td>
+        <td class="pos">${t.target||0}</td><td class="neg">${t.stop||0}</td><td style="color:var(--muted)">${t.expired||0}</td>
+        <td class="${(t.winRate||0)>=50?'pos':'neg'}">${t.winRate==null?"—":t.winRate+"%"}</td>
+        ${rk(t.expectancyR, 'R')}${rk(t.totalR, 'R')}
+        <td class="${(t.realizedPnl||0)>=0?'pos':'neg'}">${_sgn(t.realizedPnl)}₹${fmtNum(t.realizedPnl)}</td>
+        <td>${t.profitFactor==null?"—":t.profitFactor}</td><td style="color:var(--muted)">${t.avgHoldMins==null?"—":t.avgHoldMins+"m"}</td>
+        <td style="color:var(--muted)">${t.tradingDays||0}</td></tr>`;
+      const since = perf.since ? ` since ${simDT(perf.since)}` : "";
+      return `<h3 class="reco-colhead" style="margin-top:18px">Performance (all-time) — ranked by expectancy</h3>
+        <table class="tbl"><thead><tr>
+          <th>Strategy</th><th title="Open + closed trades, all-time">Trades</th><th>Closed</th>
+          <th title="Hit target">✓Tgt</th><th title="Hit stop">✗Stop</th><th title="Time-expired at horizon">⏱Exp</th>
+          <th title="% of closed trades that hit target">Win%</th>
+          <th title="Expectancy: average profit per trade in units of risk (R). >0 = statistical edge.">Exp. R</th>
+          <th title="Sum of R-multiples across all closed trades (total edge harvested)">Total R</th>
+          <th title="Realized rupee P&amp;L from closed trades">Realized</th>
+          <th title="Profit factor = gross gains ÷ gross losses. >1 = profitable.">PF</th>
+          <th title="Average minutes a trade stayed open before exit">Hold</th>
+          <th title="Distinct sessions this strategy took trades">Days</th>
+        </tr></thead><tbody>${rows}${totRow}</tbody></table>
+        <div class="chart-note">Durable ledger${since}: ${perf.tradeCount||0} trades across all sessions (stored in SQLite, survives restarts). Ranked by <b>expectancy (R)</b> — the average edge per trade in units of risk. This is the honest, cross-session scorecard.</div>`;
+    }
+
+    function renderSim(sum, daily, lb, perf) {
       const anyTrades = (sum.strategies || []).some(s => s.open || s.closed);
       const banner = renderSimBanner(sum.regime);
       const pick = renderSimPick(sum.pick);
@@ -1828,8 +1876,71 @@
         `<div class="loading"><b>Auto is on</b> — every strategy snapshots its live ideas automatically each minute during market hours (09:15–15:30 IST); no action needed. Each is tracked independently so you can compare, day by day, which one fits the regime. (Outside market hours there are no live prices yet.) You can also <b>“Take all strategies ▶”</b> now.</div>`;
       const detail = sum.detail ? renderSimTrades(sum.detail)
         : `<div class="chart-note" style="margin:2px 0 6px">Click a strategy card above to see its open &amp; closed trades.</div>`;
-      return banner + pick + cards + hint + detail + renderSimLeaderboard(lb) +
-        renderSimDaily(daily) + `<div id="btResult"></div>`;
+      return banner + pick + cards + hint + detail + renderSimPerformance(perf) +
+        renderSimLeaderboard(lb) + renderSimDaily(daily) +
+        `<div id="btResult">${window._btHtml || ""}</div>` +
+        `<div id="btDailyResult">${window._btDailyHtml || ""}</div>`;
+    }
+
+    // Backtest panels are injected on button click, but the Sim tab auto-refreshes
+    // and rebuilds the whole panel — so we cache the rendered HTML in a global and
+    // re-inject it on every render (and after the async fetch, re-query the div by
+    // id since a poll may have replaced the node mid-flight).
+    function setBtHtml(id, globalKey, html) {
+      window[globalKey] = html;
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = html;
+    }
+
+    // Daily-bar historical backtest over REAL NSE end-of-day data (last N days).
+    // Different engine from the context-replay backtest: real months of history,
+    // but daily-bar fidelity (see caveat note).
+    function renderDailyBacktest(bt) {
+      if (!bt) return "";
+      if (bt.message)
+        return `<div class="chart-note" style="margin-top:8px">${bt.message}</div>`;
+      const rows = (bt.strategies || []).map(s => {
+        const wr = s.winRate == null ? "—" : s.winRate + "%";
+        const er = s.expectancyR == null ? "—" : _sgn(s.expectancyR) + s.expectancyR + "R";
+        return `<tr title="${s.description || ''}">
+          <td class="sym">${s.name}</td>
+          <td>${s.trades}</td><td>${s.closed}</td>
+          <td class="pos">${s.target}</td><td class="neg">${s.stop}</td><td style="color:var(--muted)">${s.expired}</td>
+          <td class="${(s.winRate||0)>=50?'pos':'neg'}">${wr}</td>
+          <td class="${(s.avgPnlPct||0)>=0?'pos':'neg'}">${s.avgPnlPct==null?"—":_sgn(s.avgPnlPct)+s.avgPnlPct+"%"}</td>
+          <td class="${(s.expectancyR||0)>=0?'pos':'neg'}">${er}</td>
+          <td class="${(s.expectancyR||0)>=0?'pos':'neg'}">${s.totalR==null?"—":_sgn(s.totalR)+s.totalR}</td>
+          <td class="${(s.realizedPnl||0)>=0?'pos':'neg'}">${_sgn(s.realizedPnl)}₹${fmtNum(s.realizedPnl)}</td>
+          <td style="color:var(--muted)">${s.avgHoldDays==null?"—":s.avgHoldDays+"d"}</td>
+          <td>${miniSpark(s.equity.points, 110, 26)}</td></tr>`;
+      }).join("");
+      const t = bt.totals || {};
+      const totRow = `<tr style="border-top:2px solid var(--border);font-weight:600">
+        <td class="sym">All ${(bt.strategies||[]).length} strategies</td>
+        <td>${t.trades||0}</td><td>${t.closed||0}</td>
+        <td class="pos">${t.target||0}</td><td class="neg">${t.stop||0}</td><td style="color:var(--muted)">${t.expired||0}</td>
+        <td class="${(t.winRate||0)>=50?'pos':'neg'}">${t.winRate==null?"—":t.winRate+"%"}</td>
+        <td class="${(t.avgPnlPct||0)>=0?'pos':'neg'}">${t.avgPnlPct==null?"—":_sgn(t.avgPnlPct)+t.avgPnlPct+"%"}</td>
+        <td class="${(t.expectancyR||0)>=0?'pos':'neg'}">${t.expectancyR==null?"—":_sgn(t.expectancyR)+t.expectancyR+"R"}</td>
+        <td class="${(t.totalR||0)>=0?'pos':'neg'}">${t.totalR==null?"—":_sgn(t.totalR)+t.totalR}</td>
+        <td class="${(t.realizedPnl||0)>=0?'pos':'neg'}">${_sgn(t.realizedPnl)}₹${fmtNum(t.realizedPnl)}</td>
+        <td colspan="2"></td></tr>`;
+      const nc = (bt.notCovered || []).map(x => `<b>${x.name}</b> (${x.reason})`).join("; ");
+      return `<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:12px">
+        <h3 class="reco-colhead">📅 Daily-bar historical backtest — real NSE end-of-day, last ${bt.days} days</h3>
+        <div class="chart-note"><b>${bt.universeWithData}</b> liquid F&amp;O names · ${bt.range.from} → ${bt.range.to} · ~${bt.barsMedian} bars/name · hold ≤${bt.maxHold} trading days · risk ₹${fmtNum(bt.riskPerTrade)}/trade.</div>
+        <table class="tbl"><thead><tr>
+          <th>Strategy</th><th title="All reconstructed trades in the window">Trades</th><th>Closed</th>
+          <th title="Target hit">✓Tgt</th><th title="Stop hit">✗Stop</th><th title="Time-expired at horizon close">⏱Exp</th>
+          <th title="% of closed that hit target">Win%</th>
+          <th title="Average % move captured per closed trade">Avg%</th>
+          <th title="Expectancy: avg R per trade. >0 = edge.">Exp. R</th>
+          <th title="Sum of R across closed trades">Tot R</th>
+          <th title="Realized rupee P&amp;L">Realized</th>
+          <th title="Average trading days held">Hold</th><th>Equity</th>
+        </tr></thead><tbody>${rows}${totRow}</tbody></table>
+        <div class="chart-note" style="margin-top:8px">⚠️ <b>Daily-bar approximation</b>, not the exact intraday logic: entries at the signal day's <b>close</b>, exits resolved on subsequent daily high/low (a bar piercing both stop &amp; target counts as a <b>stop</b>). A small liquid sample over a short window — read it as directional, not statistically final. Not covered here: ${nc}. The live sim (auto, every session) accumulates the pure, intrabar-accurate version over time.</div>
+      </div>`;
     }
 
     // Fire a toast/beep/notification when a strategy takes new ideas or a trade
@@ -1885,15 +1996,16 @@
       try {
         if (current === "sim") {
           const sel = window._simStrategy || "";
-          const [sum, daily, lb] = await Promise.all([
+          const [sum, daily, lb, perf] = await Promise.all([
             fetch("/api/sim/summary" + (sel ? "?strategy=" + sel : "")).then(r => r.json()),
             fetch("/api/sim/daily").then(r => r.json()),
             fetch("/api/sim/leaderboard").then(r => r.json()),
+            fetch("/api/sim/performance").then(r => r.json()),
           ]);
           document.getElementById("simAuto").checked = !!sum.auto;
           document.getElementById("simMode").value = sum.entryMode || "continuous";
           simAlerts(sum);
-          wrap.innerHTML = renderSim(sum, daily, lb);
+          wrap.innerHTML = renderSim(sum, daily, lb, perf);
           // Strategy card click → select/deselect that strategy's detail.
           wrap.querySelectorAll("[data-strat]").forEach(el =>
             el.onclick = () => {
@@ -2638,18 +2750,29 @@
     };
     document.getElementById("simBacktest").onclick = async () => {
       const btn = document.getElementById("simBacktest");
-      const host = document.getElementById("btResult");
-      if (!host) return;
       btn.disabled = true; btn.textContent = "⏳ Replaying…";
       host.innerHTML = `<div class="loading">Replaying all strategies over archived context…</div>`;
+      setBtHtml("btResult", "_btHtml", `<div class="loading" style="margin-top:12px">Replaying archived context…</div>`);
       try {
         const mode = document.getElementById("simMode").value || "continuous";
         const bt = await fetch("/api/sim/backtest?entryMode=" + mode).then(r => r.json());
-        host.innerHTML = renderBacktest(bt);
+        setBtHtml("btResult", "_btHtml", renderBacktest(bt));
       } catch (e) {
-        host.innerHTML = `<div class="chart-note">Backtest failed: ${e}</div>`;
+        setBtHtml("btResult", "_btHtml", `<div class="chart-note">Backtest failed: ${e}</div>`);
       }
       btn.disabled = false; btn.textContent = "⏮ Backtest history";
+    };
+    document.getElementById("simBacktestDaily").onclick = async () => {
+      const btn = document.getElementById("simBacktestDaily");
+      btn.disabled = true; btn.textContent = "⏳ Pulling EOD history…";
+      setBtHtml("btDailyResult", "_btDailyHtml", `<div class="loading" style="margin-top:12px">Fetching ~40 names' daily history from NSE and reconstructing strategies… first run ~20-40s, then cached.</div>`);
+      try {
+        const bt = await fetch("/api/sim/backtest_daily?days=30&universe=40").then(r => r.json());
+        setBtHtml("btDailyResult", "_btDailyHtml", renderDailyBacktest(bt));
+      } catch (e) {
+        setBtHtml("btDailyResult", "_btDailyHtml", `<div class="chart-note">Daily backtest failed: ${e}</div>`);
+      }
+      btn.disabled = false; btn.textContent = "📅 Daily 30d (real EOD)";
     };
     document.getElementById("fReset").onclick = () => {
       document.getElementById("fDir").value = "any";

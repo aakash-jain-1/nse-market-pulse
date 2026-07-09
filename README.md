@@ -39,7 +39,7 @@ layers analytics on top:
 - a **composite demand score** and a filterable **scanner**,
 - an **Ideas engine** that turns signals into LONG/SHORT setups with entry / stop
   / target,
-- a **library of 7 named strategies**, each forward-tested in its **own parallel
+- a **library of 9 named strategies**, each forward-tested in its **own parallel
   simulation** and compared **day-by-day against the market regime**,
 - an **offline backtester** that replays those strategies over archived data,
 - **paper trading** for equities, futures (margin/leverage) and options (lot-size
@@ -115,7 +115,8 @@ flowchart LR
     SIM --> STRAT
     BT --> DB
     LOG --> SIM & DB
-    SIM -->|state| SIMJSON[("sim_state.json")]
+    SIM -->|trade ledger| DB
+    SIM -->|settings + daily rollup| SIMJSON[("sim_state.json")]
     PAPER -->|state| PJSON[("paper_state.json")]
 ```
 
@@ -140,7 +141,7 @@ flowchart TB
         direction TB
         R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}"]
         R2["/api/{recommendations,deepdive,quote,<br/>chart,optionchain,fno/universe}"]
-        R3["/api/sim/{strategies,summary,daily,<br/>leaderboard,backtest,regime,take,auto,mode,reset}"]
+        R3["/api/sim/{strategies,summary,daily,leaderboard,<br/>performance,backtest,regime,take,auto,mode,reset}"]
         R4["/api/paper/{portfolio,order,option_order,<br/>futures_order,reset}"]
         R5["/api/log/{status,snapshot,backtest,iv,download}<br/>/api/iv/rank"]
     end
@@ -268,6 +269,11 @@ flowchart LR
 - **Regime leaderboard:** aggregates every trade by *regime × strategy* to answer
   "which strategy wins on a recovery day vs a trend-up day", and picks a
   **strategy-of-the-day**.
+- **All-time performance** (`/api/sim/performance`): a durable, cross-session
+  scorecard — one row per strategy over the *entire* SQLite ledger, ranked by
+  **expectancy (R)**, with win%, total R, realized P&L, profit factor, average
+  hold and #trading-days, plus a portfolio total. Survives restarts and
+  accumulates every session (the ledger lives in `db.sim_trades`, not JSON).
 - **Offline backtest** (`/api/sim/backtest[?resolve=intrabar|ltp]`): replays the
   *same* generators over archived `context_log`, opening trades from the context
   and resolving exits on real minute candles — no need to wait for live days once
@@ -311,12 +317,31 @@ erDiagram
         real niftyPct
         blob payload "gzip(JSON of trimmed strategy context)"
     }
+    SIM_TRADES {
+        text id PK
+        text strategy
+        text symbol
+        text direction
+        text status "OPEN/TARGET/STOP/EXPIRED"
+        text regimeAtEntry
+        real entry
+        real pnl
+        real rMultiple
+        text openedDate
+        text closedDay
+    }
 ```
 
 - `snapshots` — the demand/volume-gainers board, one row per symbol per snapshot.
 - `iv_log` — ATM implied-volatility captures.
 - `context_log` — a trimmed, gzipped snapshot of the full strategy context each
   cycle (~6 KB), which powers the offline backtest.
+- `sim_trades` — the **durable strategy-sim ledger**: every trade every strategy
+  ever took, across all sessions. Indexed on `status`, `(strategy, openedDate)`,
+  and `(regimeAtEntry, strategy)` so the scorecards / regime leaderboard /
+  all-time performance are fast SQL-backed reads. Only the small settings and the
+  bounded per-day rollup stay in `sim_state.json`; trades embedded in an older
+  `sim_state.json` are auto-migrated into this table on first run.
 - WAL mode + indexes on `view/ts/symbol/day`. Legacy `snapshots.csv` / `iv_log.csv`
   are auto-imported on first run.
 
@@ -384,6 +409,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/optionchain/<sym>[/summary]` | Full option chain / analytics (PCR, Max-Pain, Greeks) |
 | `GET /api/fno/universe` | List of F&O underlyings |
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads |
+| `GET /api/sim/performance` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
