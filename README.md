@@ -253,12 +253,21 @@ flowchart LR
   size = risk ÷ stop-distance, notional-capped), so results are reported in
   **R-multiples** and **expectancy** (avg R/trade) — a fair comparison across
   strategies regardless of price or stop width.
+- **Intrabar resolution:** target/stop are resolved against **real 1-min OHLCV**
+  (a LONG stop is hit when a bar's *low* ≤ stop, a target when its *high* ≥
+  target; a bar straddling both is assumed to hit the stop first). This removes
+  the missed-wick / late-fill bias of sampling a single LTP, and yields true
+  **MFE/MAE** (max favorable/adverse excursion) and **time-to-exit**. Symbols with
+  no charting token fall back to LTP resolution. See `intrabar.py`.
 - **Regime leaderboard:** aggregates every trade by *regime × strategy* to answer
   "which strategy wins on a recovery day vs a trend-up day", and picks a
   **strategy-of-the-day**.
-- **Offline backtest** (`/api/sim/backtest`): replays the *same* generators over
-  archived `context_log` on a virtual clock — no need to wait for live days once
+- **Offline backtest** (`/api/sim/backtest[?resolve=intrabar|ltp]`): replays the
+  *same* generators over archived `context_log`, opening trades from the context
+  and resolving exits on real minute candles — no need to wait for live days once
   context has been captured.
+- **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
+  entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
 
 ---
 
@@ -369,7 +378,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/optionchain/<sym>[/summary]` | Full option chain / analytics (PCR, Max-Pain, Greeks) |
 | `GET /api/fno/universe` | List of F&O underlyings |
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads |
-| `GET /api/sim/backtest[?entryMode=&maxSessions=&days=]` | Offline strategy backtest |
+| `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger + signal backtest + CSV export |
@@ -383,10 +392,12 @@ python nse_demand.py losers     # top losers
 nse-market-pulse/
 ├── app.py                  # Flask server + JSON API (thin routes) — port 5055
 ├── nse_client.py           # NSE session mgmt + hot lists + scanner + ideas (CORE)
-├── nse_quote.py            # Per-stock quote/chart/depth + option chain + Greeks
+├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
 ├── strategies.py           # 7 strategy generators + market-regime detector
 ├── sim.py                  # Multi-strategy forward-tester + regime leaderboard
-├── backtest_strategies.py  # Offline backtester (replays strategies over history)
+├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
+├── backtest_strategies.py  # Offline backtester (replays strategies, OHLCV exits)
+├── test_intrabar.py        # Unit tests for the intrabar resolver
 ├── paper.py                # Paper-trading engine (equity/futures/options)
 ├── snapshot_logger.py      # Background logger (snapshots + IV + context) → SQLite
 ├── db.py                   # SQLite store (time-series)
@@ -432,7 +443,9 @@ raw field names.
 - Data is only meaningful during **NSE market hours** (Mon–Fri, 09:15–15:30 IST);
   outside that you'll see the last snapshot or empty lists.
 - The **offline backtest** only has real signal once the logger has archived
-  strategy context across live sessions.
+  strategy *context* across live sessions (idea generation can't be back-filled —
+  NSE doesn't retain the hot-lists / scores). Exit resolution, by contrast, uses
+  on-demand minute OHLCV, so it's accurate as soon as there's context to replay.
 - OHLCV candlesticks come from `charting.nseindia.com` (fetched on demand, cached
   ~30s); NSE itself retains the history (~30–40 days of 1-min, years of daily), so
   we don't archive candles — we just query the window we need. Symbols without a

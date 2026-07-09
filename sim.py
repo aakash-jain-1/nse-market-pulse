@@ -26,6 +26,7 @@ sessions) after which the trade is time-expired at the current price.
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 
 import nse_client as nse
@@ -245,6 +246,82 @@ def _refresh_trade(state, t):
     t["rMultiple"] = round(t["pnl"] / t.get("risk", RISK_PER_TRADE), 2)
 
 
+_last_intrabar = 0.0
+INTRABAR_INTERVAL = 180   # seconds between minute-candle catch-up sweeps
+
+
+def _baked_epoch(ts_str):
+    dt = datetime.fromisoformat(str(ts_str).replace(" ", "T"))
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return int(dt.replace(tzinfo=timezone.utc).timestamp())
+
+
+def _intrabar_catchup(state):
+    """
+    Between the coarse 60s LTP samples a stop/target can be pierced by a wick and
+    missed. Every few minutes we re-check still-OPEN trades against real 1-min
+    candles and close any that actually hit their level intrabar. Only CLOSES are
+    applied here (open trades keep their live LTP mark); LTP remains the fallback
+    for symbols with no charting token.
+    """
+    global _last_intrabar
+    now = time.time()
+    if now - _last_intrabar < INTRABAR_INTERVAL:
+        return
+    _last_intrabar = now
+
+    open_trades = [t for book in state["strategies"].values()
+                   for t in book["trades"] if t["status"] == "OPEN"]
+    if not open_trades:
+        return
+    try:
+        import concurrent.futures as cf
+        import nse_quote
+        import intrabar
+    except Exception:
+        return
+
+    first = {}
+    for t in open_trades:
+        s = t["symbol"]
+        if s not in first or t["openedAt"] < first[s]:
+            first[s] = t["openedAt"]
+    to = nse_quote._baked_now()
+    max_sessions = state.get("maxSessions", DEFAULT_MAX_SESSIONS)
+
+    def _one(s):
+        try:
+            d = nse_quote.get_ohlc(s, interval=1,
+                                   from_ts=_baked_epoch(first[s]) - 120, to_ts=to)
+            return s, (d.get("points") or []) if not d.get("error") else []
+        except Exception:
+            return s, []
+
+    with cf.ThreadPoolExecutor(max_workers=6) as ex:
+        candles = dict(ex.map(_one, sorted(first)))
+
+    for t in open_trades:
+        bars = candles.get(t["symbol"])
+        if not bars:
+            continue
+        probe = dict(t)
+        probe["openedTs"] = t["openedAt"]
+        probe["maxSessions"] = max_sessions
+        res = intrabar.resolve(probe, bars, RISK_PER_TRADE, max_sessions=max_sessions)
+        if res in ("TARGET", "STOP", "EXPIRED"):
+            t["status"] = res
+            t["exitPrice"] = probe["exitPrice"]
+            t["ltp"] = probe["ltp"]
+            t["pnl"] = probe["pnl"]
+            t["pnlPct"] = probe["pnlPct"]
+            t["rMultiple"] = probe["rMultiple"]
+            t["mfePct"] = probe["mfePct"]
+            t["maePct"] = probe["maePct"]
+            t["minsToExit"] = probe.get("minsToExit")
+            t["closedAt"] = probe["closedTs"].replace("T", " ")
+
+
 def update(ctx=None):
     """Re-price and resolve every OPEN trade across all strategies."""
     with _lock:
@@ -253,6 +330,7 @@ def update(ctx=None):
             for t in book["trades"]:
                 if t["status"] == "OPEN":
                     _refresh_trade(state, t)
+        _intrabar_catchup(state)
         _save(state)
         return state
 

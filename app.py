@@ -121,9 +121,13 @@ def api_ohlc(symbol):
     interval = int(request.args.get("interval", 1))
     chart_type = "D" if request.args.get("type") == "D" else "I"
     days = request.args.get("days")
+    frm = request.args.get("from")
+    to = request.args.get("to")
     return jsonify(nse_quote.get_ohlc(
         symbol, interval=interval, chart_type=chart_type,
-        days=int(days) if days else None))
+        days=int(days) if days else None,
+        from_ts=int(frm) if frm else None,
+        to_ts=int(to) if to else None))
 
 
 @app.route("/api/optionchain/<symbol>")
@@ -207,10 +211,14 @@ def api_sim_backtest():
         from datetime import datetime, timezone, timedelta
         ist = timezone(timedelta(hours=5, minutes=30))
         since = (datetime.now(ist) - timedelta(days=int(days))).strftime("%Y-%m-%d")
+    resolve = request.args.get("resolve", "intrabar")
+    if resolve not in ("intrabar", "ltp"):
+        resolve = "intrabar"
     return jsonify(bt.run(
         since_day=since,
         max_sessions=int(request.args.get("maxSessions", 3)),
         entry_mode=request.args.get("entryMode", "continuous"),
+        resolve=resolve,
     ))
 
 

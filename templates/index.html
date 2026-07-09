@@ -477,6 +477,23 @@
     </div>
   </div>
 
+  <!-- Sim trade replay modal -->
+  <div class="overlay" id="rpOverlay">
+    <div class="modal" style="width:min(760px,95vw)">
+      <div class="modal-head">
+        <h3 id="rpTitle">Trade replay</h3>
+        <button class="close" id="rpClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="chart-box">
+          <div id="rpChart"></div>
+          <div class="chart-note" id="rpNote"></div>
+        </div>
+        <div class="metrics" id="rpStats"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Portfolio modal -->
   <div class="overlay" id="pfOverlay">
     <div class="modal" style="width:min(820px,94vw)">
@@ -1503,6 +1520,15 @@
       }).join("") + `</div>`;
     }
 
+    // Per-trade replay: stash the trade objects so the ▶ button can look them up.
+    window._simTradeMap = window._simTradeMap || {};
+    function rpBtn(t) {
+      const id = t.id || (t.symbol + "|" + t.openedAt);
+      window._simTradeMap[id] = t;
+      return `<button class="drill" title="Replay this trade on the candles"
+        onclick="event.stopPropagation();simReplay('${id.replace(/'/g,"")}')">▶</button>`;
+    }
+
     function renderSimTrades(det) {
       if (!det) return "";
       const sc = det.scorecard || {};
@@ -1513,7 +1539,7 @@
         const toT = t.targetPct || 1, toS = Math.abs(t.stopPct || 1);
         const prog = t.pnlPct >= 0 ? Math.min(100, t.pnlPct / toT * 100) : Math.max(-100, t.pnlPct / toS * 100);
         return `<tr data-sym="${t.symbol}" style="cursor:pointer">
-          <td class="sym">${t.symbol} ${drillBtn(t.symbol)}</td><td>${dirTag(t)}</td><td>${t.conviction ?? "—"}</td>
+          <td class="sym">${t.symbol} ${drillBtn(t.symbol)}${rpBtn(t)}</td><td>${dirTag(t)}</td><td>${t.conviction ?? "—"}</td>
           <td style="color:var(--muted);font-size:11px;white-space:nowrap">${simDT(t.openedAt)}</td>
           <td style="color:var(--muted);font-size:11px">${t.regimeAtEntry||""}</td>
           <td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.ltp)}</td>
@@ -1530,7 +1556,7 @@
         : s === "STOP" ? `<span class="neg">✗ STOP</span>`
         : `<span style="color:var(--muted)">⏱ EXPIRED</span>`;
       const closedRows = (det.closed || []).map(t => `<tr data-sym="${t.symbol}" style="cursor:pointer">
-          <td class="sym">${t.symbol} ${drillBtn(t.symbol)}</td><td>${dirTag(t)}</td><td>${t.conviction ?? "—"}</td>
+          <td class="sym">${t.symbol} ${drillBtn(t.symbol)}${rpBtn(t)}</td><td>${dirTag(t)}</td><td>${t.conviction ?? "—"}</td>
           <td style="color:var(--muted);font-size:11px">${t.regimeAtEntry||""}</td>
           <td>${fmtPrice(t.entry)}</td><td>${fmtPrice(t.exitPrice)}</td>
           <td>${outcome(t.status)}</td>
@@ -1546,6 +1572,104 @@
 
       return `<div style="border-top:1px solid var(--border);margin:6px 0 4px;padding-top:12px">${head}${openTable}${closedTable}
         ${(!openTable && !closedTable) ? `<div class="chart-note">No trades yet for this strategy.</div>` : ""}</div>`;
+    }
+
+    // Baked epoch (seconds) for an IST wall-clock string, matching how
+    // charting.nseindia.com expects fromDate/toDate (IST baked as UTC).
+    function bakedEpoch(istStr) {
+      return Math.floor(Date.parse(istStr.slice(0, 19).replace(" ", "T") + "Z") / 1000);
+    }
+
+    async function simReplay(id) {
+      const t = window._simTradeMap[id];
+      if (!t) return;
+      const ov = document.getElementById("rpOverlay");
+      document.getElementById("rpTitle").innerHTML =
+        `${t.symbol} <span class="${t.direction==='LONG'?'pos':'neg'}">${t.direction}</span> — replay`;
+      document.getElementById("rpChart").innerHTML = "";
+      document.getElementById("rpStats").innerHTML = "";
+      document.getElementById("rpNote").textContent = "Loading candles…";
+      ov.classList.add("show");
+      window._rpId = id;
+
+      const startDay = (t.openedAt || "").slice(0, 10);
+      const endDay = (t.closedAt || t.openedAt || "").slice(0, 10);
+      const frm = bakedEpoch(startDay + " 09:14:00");
+      const to = bakedEpoch(endDay + " 15:36:00");
+      try {
+        const d = await (await fetch(
+          `/api/ohlc/${encodeURIComponent(t.symbol)}?interval=1&from=${frm}&to=${to}`)).json();
+        if (window._rpId !== id) return;
+        const pts = d.points || [];
+        if (d.error || pts.length < 2) {
+          document.getElementById("rpNote").textContent =
+            "No candles available for this trade's window (symbol may lack a charting token, or data aged out).";
+          return;
+        }
+        document.getElementById("rpChart").innerHTML = replayChart(pts, t);
+        document.getElementById("rpNote").textContent =
+          `Real 1-min candles · ${istTime(pts[0].t)}–${istTime(pts[pts.length-1].t)} · entry/target/stop overlaid`;
+        renderReplayStats(t);
+      } catch (e) {
+        document.getElementById("rpNote").textContent = "Replay unavailable: " + e.message;
+      }
+    }
+
+    function renderReplayStats(t) {
+      const cell = (k, v) => `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+      const out = [
+        cell("Entry", "₹" + fmtPrice(t.entry)),
+        cell(t.status === "OPEN" ? "LTP" : "Exit", "₹" + fmtPrice(t.status === "OPEN" ? t.ltp : t.exitPrice)),
+        cell("Target", "₹" + fmtPrice(t.target)),
+        cell("Stop", "₹" + fmtPrice(t.stop)),
+        cell("P&L%", `<span class="${t.pnlPct>=0?'pos':'neg'}">${_sgn(t.pnlPct)}${t.pnlPct}%</span>`),
+      ];
+      if (t.mfePct != null) out.push(cell("Max favorable", `<span class="pos">+${t.mfePct}%</span>`));
+      if (t.maePct != null) out.push(cell("Max adverse", `<span class="neg">${t.maePct}%</span>`));
+      if (t.minsToExit != null) out.push(cell("Time to exit", t.minsToExit + " min"));
+      if (t.status && t.status !== "OPEN") out.push(cell("Outcome", t.status));
+      document.getElementById("rpStats").innerHTML = out.join("");
+      annotateInfo(document.getElementById("rpStats"));
+    }
+
+    // Candlesticks + volume with entry/target/stop marker lines overlaid. The
+    // price scale is stretched to include the marker levels so they're visible.
+    function replayChart(pts, t, w = 640, h = 230) {
+      const n = pts.length;
+      const priceBot = h - 46, top = 8, volTop = priceBot + 6, volBot = h - 2;
+      let lo = Infinity, hi = -Infinity, vmax = 0;
+      for (const p of pts) {
+        if (p.l != null) lo = Math.min(lo, p.l);
+        if (p.h != null) hi = Math.max(hi, p.h);
+        if (p.v != null) vmax = Math.max(vmax, p.v);
+      }
+      [t.entry, t.stop, t.target, (t.status !== "OPEN" ? t.exitPrice : null)].forEach(v => {
+        if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+      });
+      const rng = (hi - lo) || 1;
+      const y = v => top + (1 - (v - lo) / rng) * (priceBot - top);
+      const vy = v => volBot - (v / (vmax || 1)) * (volBot - volTop);
+      const step = w / n, bw = Math.max(1, step * 0.62);
+      let bars = "";
+      for (let i = 0; i < n; i++) {
+        const p = pts[i]; if (p.o == null) continue;
+        const cx = i * step + step / 2, up = p.c >= p.o, col = up ? "#26d07c" : "#ff5c68";
+        const yO = y(p.o), yC = y(p.c), bt = Math.min(yO, yC), bh = Math.max(1, Math.abs(yC - yO));
+        bars += `<line x1="${cx.toFixed(1)}" y1="${y(p.h).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${y(p.l).toFixed(1)}" stroke="${col}" stroke-width="1"/>`;
+        bars += `<rect x="${(cx-bw/2).toFixed(1)}" y="${bt.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${col}"/>`;
+        if (p.v != null) bars += `<rect x="${(cx-bw/2).toFixed(1)}" y="${vy(p.v).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0.5,volBot-vy(p.v)).toFixed(1)}" fill="${col}" opacity="0.4"/>`;
+      }
+      const mark = (v, col, lab) => v == null ? "" :
+        `<line x1="0" y1="${y(v).toFixed(1)}" x2="${w}" y2="${y(v).toFixed(1)}" stroke="${col}" stroke-width="1" stroke-dasharray="5 4" opacity="0.9"/>
+         <text x="${w-4}" y="${(y(v)-3).toFixed(1)}" fill="${col}" font-size="10" text-anchor="end">${lab} ₹${fmtPrice(v)}</text>`;
+      return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <line x1="0" y1="${priceBot}" x2="${w}" y2="${priceBot}" stroke="#2a3446" stroke-width="1"/>
+        ${bars}
+        ${mark(t.entry, "#e6edf3", "entry")}
+        ${mark(t.target, "#26d07c", "target")}
+        ${mark(t.stop, "#ff5c68", "stop")}
+        ${t.status !== "OPEN" ? mark(t.exitPrice, "#f0b429", "exit") : ""}
+      </svg>`;
     }
 
     function heatColor(v, kind) {
@@ -2585,6 +2709,11 @@
       () => document.getElementById("pfOverlay").classList.remove("show");
     document.getElementById("pfOverlay").onclick = (e) => {
       if (e.target.id === "pfOverlay") e.currentTarget.classList.remove("show");
+    };
+    document.getElementById("rpClose").onclick =
+      () => { window._rpId = null; document.getElementById("rpOverlay").classList.remove("show"); };
+    document.getElementById("rpOverlay").onclick = (e) => {
+      if (e.target.id === "rpOverlay") { window._rpId = null; e.currentTarget.classList.remove("show"); }
     };
     document.getElementById("pfReset").onclick = async () => {
       if (!confirm("Reset paper portfolio to ₹10,00,000 and clear all positions?")) return;

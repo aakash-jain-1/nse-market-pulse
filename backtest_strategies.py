@@ -18,13 +18,28 @@ Method (mirrors the live sim's trade lifecycle, on a virtual clock):
 Educational forward-/back-test of signal quality — NOT investment advice.
 """
 
+import concurrent.futures as cf
+from datetime import datetime, timedelta, timezone
+
 import db
+import intrabar
+import nse_quote
 import sim
 import strategies as strat
 
 RISK_PER_TRADE = sim.RISK_PER_TRADE
 DEFAULT_MAX_SESSIONS = 3
+IST = timezone(timedelta(hours=5, minutes=30))
 _REGIME_ORDER = ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"]
+
+
+def _epoch_s(ts_iso):
+    """Cycle/trade timestamps are IST wall-clock. charting.nseindia.com expects
+    that wall clock baked as UTC (see nse_quote._baked_epoch), NOT real unix."""
+    dt = datetime.fromisoformat(str(ts_iso).replace(" ", "T"))
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)   # keep the IST wall clock, drop the offset
+    return int(dt.replace(tzinfo=timezone.utc).timestamp())
 
 
 def _price_map(ctx):
@@ -72,6 +87,14 @@ def _resolve(t, px, sessions):
     return False
 
 
+def _median(xs):
+    xs = sorted(v for v in xs if v is not None)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
 def _scorecard(trades):
     closed = [t for t in trades if t["status"] in ("TARGET", "STOP", "EXPIRED")]
     open_t = [t for t in trades if t["status"] == "OPEN"]
@@ -80,6 +103,9 @@ def _scorecard(trades):
     realized = sum(t["pnl"] for t in closed)
     total_r = sum(t.get("rMultiple") or 0 for t in closed)
     avg_pct = sum(t["pnlPct"] for t in closed) / n if n else None
+    mfes = [t.get("mfePct") for t in closed if t.get("mfePct") is not None]
+    maes = [t.get("maePct") for t in closed if t.get("maePct") is not None]
+    mins = [t.get("minsToExit") for t in closed if t.get("minsToExit") is not None]
     return {
         "trades": len(trades), "open": len(open_t), "closed": n,
         "target": wins, "stop": sum(1 for t in closed if t["status"] == "STOP"),
@@ -89,6 +115,9 @@ def _scorecard(trades):
         "realizedPnl": round(realized, 2),
         "totalR": round(total_r, 2),
         "expectancyR": round(total_r / n, 2) if n else None,
+        "avgMfePct": round(sum(mfes) / len(mfes), 2) if mfes else None,
+        "avgMaePct": round(sum(maes) / len(maes), 2) if maes else None,
+        "medianMinsToExit": int(_median(mins)) if mins else None,
     }
 
 
@@ -134,56 +163,27 @@ def _leaderboard(all_trades, ids, names):
     return {"strategies": [{"id": i, "name": names[i]} for i in ids], "rows": rows}
 
 
-def run(strategy_ids=None, since_day=None, max_sessions=DEFAULT_MAX_SESSIONS,
-        entry_mode="continuous", limit=10):
-    db.init()
-    cycles = db.context_cycles(since_day=since_day)
-    if len(cycles) < 2:
-        return {"message": "Not enough archived context yet — the logger captures "
-                           "a strategy-context snapshot every few minutes during "
-                           "market hours. Let it run, then backtest.",
-                "cycles": len(cycles), "strategies": [], "leaderboard": None}
-
-    ids = strategy_ids or [s["id"] for s in strat.STRATEGIES]
-    names = {s["id"]: s["name"] for s in strat.STRATEGIES}
-    days_sorted = sorted({c["day"] for c in cycles})
-    day_index = {d: i for i, d in enumerate(days_sorted)}
-    first_cycle_of_day = set()
-    seen_days = set()
+def _take_entries(cycles, ids, day_index, entry_mode, max_sessions, limit):
+    """Pass 1: walk cycles chronologically and open trades (no resolution).
+    Also returns a per-symbol LTP series (for the fallback resolver)."""
+    first_cycle_of_day, seen_days = set(), set()
     for c in cycles:
         if c["day"] not in seen_days:
             seen_days.add(c["day"])
             first_cycle_of_day.add(c["ts"])
 
     books = {sid: [] for sid in ids}
-
+    series = {}   # symbol -> [(ts, day, px), ...] chronological
     for c in cycles:
         ctx = c["ctx"]
         ctx["scannerSyms"] = {r["symbol"] for r in ctx.get("scanner", []) if r.get("symbol")}
         ctx["regime"] = {"label": c["regime"]}
         day, ts = c["day"], c["ts"]
         pm = _price_map(ctx)
+        for s, px in pm.items():
+            series.setdefault(s, []).append((ts, day, px))
 
         for sid in ids:
-            # 1) reprice open trades
-            for t in books[sid]:
-                if t["status"] != "OPEN":
-                    continue
-                px = pm.get(t["symbol"])
-                if px is None:
-                    continue
-                t["ltp"] = round(px, 2)
-                sessions = day_index[day] - day_index[t["openedDay"]] + 1
-                if _resolve(t, px, sessions):
-                    t["closedTs"] = ts
-                    t["closedDay"] = day
-                else:
-                    t["pnlPct"] = round(_move_pct(t["direction"], t["entry"], px), 2)
-                    t["pnl"] = round(t["qty"] * (px - t["entry"]) *
-                                     (1 if t["direction"] == "LONG" else -1), 2)
-                    t["rMultiple"] = round(t["pnl"] / RISK_PER_TRADE, 2)
-
-            # 2) take fresh ideas (respect entry mode)
             if entry_mode == "open" and ts not in first_cycle_of_day:
                 continue
             taken = {(t["symbol"], t["direction"]) for t in books[sid]
@@ -205,11 +205,94 @@ def run(strategy_ids=None, since_day=None, max_sessions=DEFAULT_MAX_SESSIONS,
                     "stop": idea.get("stop"), "target": idea.get("target"),
                     "qty": qty, "maxSessions": max_sessions,
                     "status": "OPEN", "ltp": round(entry, 2), "pnl": 0.0, "pnlPct": 0.0,
-                    "rMultiple": 0.0, "openedTs": ts, "openedDay": day,
-                    "regimeAtEntry": c["regime"],
+                    "rMultiple": 0.0, "mfePct": 0.0, "maePct": 0.0, "minsToExit": None,
+                    "openedTs": ts, "openedDay": day, "regimeAtEntry": c["regime"],
                     "exitPrice": None, "closedTs": None, "closedDay": None,
                 })
                 taken.add(key)
+    return books, series
+
+
+def _fetch_candles(symbols, opened_lo, opened_hi, max_sessions):
+    """Pass 2 prep: pull 1-min OHLCV once per unique symbol (bounded pool)."""
+    frm = _epoch_s(opened_lo) - 120
+    to = min(_epoch_s(opened_hi) + (max_sessions + 1) * 86400, nse_quote._baked_now())
+
+    def _one(sym):
+        try:
+            d = nse_quote.get_ohlc(sym, interval=1, from_ts=frm, to_ts=to)
+            return sym, (d.get("points") or []) if not d.get("error") else []
+        except Exception:
+            return sym, []
+
+    out = {}
+    if not symbols:
+        return out
+    with cf.ThreadPoolExecutor(max_workers=6) as ex:
+        for sym, pts in ex.map(_one, sorted(symbols)):
+            out[sym] = pts
+    return out
+
+
+def _resolve_ltp(trade, series, day_index):
+    """Fallback: resolve against the coarse per-cycle LTP series (no candles)."""
+    opened_day = trade["openedDay"]
+    for ts, day, px in series:
+        if ts < trade["openedTs"]:
+            continue
+        trade["ltp"] = round(px, 2)
+        sessions = day_index.get(day, 0) - day_index.get(opened_day, 0) + 1
+        if _resolve(trade, px, sessions):
+            trade["closedTs"], trade["closedDay"] = ts, day
+            return
+        trade["pnlPct"] = round(_move_pct(trade["direction"], trade["entry"], px), 2)
+        trade["pnl"] = round(trade["qty"] * (px - trade["entry"]) *
+                             (1 if trade["direction"] == "LONG" else -1), 2)
+        trade["rMultiple"] = round(trade["pnl"] / RISK_PER_TRADE, 2)
+
+
+def run(strategy_ids=None, since_day=None, max_sessions=DEFAULT_MAX_SESSIONS,
+        entry_mode="continuous", limit=10, resolve="intrabar"):
+    db.init()
+    cycles = db.context_cycles(since_day=since_day)
+    if len(cycles) < 2:
+        return {"message": "Not enough archived context yet — the logger captures "
+                           "a strategy-context snapshot every few minutes during "
+                           "market hours. Let it run, then backtest.",
+                "cycles": len(cycles), "strategies": [], "leaderboard": None}
+
+    ids = strategy_ids or [s["id"] for s in strat.STRATEGIES]
+    names = {s["id"]: s["name"] for s in strat.STRATEGIES}
+    days_sorted = sorted({c["day"] for c in cycles})
+    day_index = {d: i for i, d in enumerate(days_sorted)}
+
+    # Pass 1 — open all trades from archived context.
+    books, series = _take_entries(cycles, ids, day_index, entry_mode,
+                                  max_sessions, limit)
+
+    # Pass 2 — resolve exits against real minute candles (LTP fallback).
+    candles = {}
+    intrabar_syms = fallback_syms = 0
+    if resolve == "intrabar":
+        all_trades = [t for sid in ids for t in books[sid]]
+        if all_trades:
+            symbols = {t["symbol"] for t in all_trades}
+            lo = min(t["openedTs"] for t in all_trades)
+            hi = max(t["openedTs"] for t in all_trades)
+            candles = _fetch_candles(symbols, lo, hi, max_sessions)
+
+    for sid in ids:
+        for t in books[sid]:
+            bars = candles.get(t["symbol"]) if resolve == "intrabar" else None
+            res = None
+            if bars:
+                res = intrabar.resolve(t, bars, RISK_PER_TRADE,
+                                       max_sessions=max_sessions)
+            if res is None:
+                fallback_syms += 1
+                _resolve_ltp(t, series.get(t["symbol"], []), day_index)
+            else:
+                intrabar_syms += 1
 
     strat_out = []
     for sid in ids:
@@ -227,6 +310,8 @@ def run(strategy_ids=None, since_day=None, max_sessions=DEFAULT_MAX_SESSIONS,
         "range": {"from": cycles[0]["ts"], "to": cycles[-1]["ts"]},
         "maxSessions": max_sessions,
         "entryMode": entry_mode,
+        "resolve": resolve,
+        "resolved": {"intrabar": intrabar_syms, "ltpFallback": fallback_syms},
         "riskPerTrade": RISK_PER_TRADE,
         "strategies": strat_out,
         "leaderboard": _leaderboard(books, ids, names),

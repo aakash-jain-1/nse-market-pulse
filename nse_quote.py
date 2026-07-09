@@ -249,36 +249,60 @@ def get_token(symbol, series="EQ"):
     return token
 
 
-def _ist_session_start_epoch():
+# charting.nseindia.com bakes IST wall-clock into the epoch as if it were UTC —
+# for BOTH the returned candle `time` AND the fromDate/toDate query bounds. So we
+# must build query epochs from the IST wall clock treated as UTC (NOT the real
+# unix timestamp, which is 5:30 behind and returns a clamped/wrong window).
+def _baked_epoch(dt_naive_ist):
+    import datetime as _dt
+    return int(dt_naive_ist.replace(tzinfo=_dt.timezone.utc).timestamp())
+
+
+def _now_ist_naive():
     import datetime as _dt
     ist = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
-    now = _dt.datetime.now(ist)
-    return int(now.replace(hour=9, minute=15, second=0, microsecond=0).timestamp())
+    return _dt.datetime.now(ist).replace(tzinfo=None)
 
 
-def get_ohlc(symbol, interval=1, chart_type="I", days=None):
+def _baked_now():
+    return _baked_epoch(_now_ist_naive())
+
+
+def _ist_session_start_epoch():
+    start = _now_ist_naive().replace(hour=9, minute=15, second=0, microsecond=0)
+    return _baked_epoch(start)
+
+
+def get_ohlc(symbol, interval=1, chart_type="I", days=None,
+             from_ts=None, to_ts=None):
     """
     Real OHLC + volume candles.
-      interval   : minutes per candle (1/5/15/…) for intraday
-      chart_type : 'I' intraday (default) or 'D' daily
-      days       : lookback window; intraday defaults to the current session,
-                   daily defaults to ~180 days.
+      interval           : minutes per candle (1/5/15/…) for intraday
+      chart_type         : 'I' intraday (default) or 'D' daily
+      days               : lookback window; intraday defaults to the current
+                           session, daily defaults to ~180 days.
+      from_ts / to_ts    : explicit epoch-SECONDS window (overrides `days`);
+                           used by the backtester to pull a trade's exact
+                           holding period in one call.
     Returns {symbol, token, interval, chartType, points:[{t,o,h,l,c,v}]}.
     """
     symbol = symbol.upper().strip()
-    key = ("ohlc", symbol, interval, chart_type, days)
+    key = ("ohlc", symbol, interval, chart_type, days, from_ts, to_ts)
     hit = _cache.get(key)
     if hit and (time.time() - hit[0]) < _OHLC_TTL:
         return hit[1]
 
     token = get_token(symbol)
-    now = int(time.time())
-    if chart_type == "D":
-        frm = now - (days or 180) * 86400
+    now = _baked_now()
+    if from_ts is not None:
+        frm = int(from_ts)
+        to = int(to_ts) if to_ts is not None else now
+    elif chart_type == "D":
+        frm, to = now - (days or 180) * 86400, now
     elif days:
-        frm = now - days * 86400
+        frm, to = now - days * 86400, now
     else:
-        frm = _ist_session_start_epoch()
+        frm, to = _ist_session_start_epoch(), now
 
     out = {"symbol": symbol, "token": token, "interval": interval,
            "chartType": chart_type, "points": []}
@@ -288,7 +312,7 @@ def get_ohlc(symbol, interval=1, chart_type="I", days=None):
 
     try:
         data = _charting_get(
-            f"/charts/symbolHistoricalData?token={token}&fromDate={frm}&toDate={now}"
+            f"/charts/symbolHistoricalData?token={token}&fromDate={frm}&toDate={to}"
             f"&symbol={symbol}-EQ&symbolType=Equity&chartType={chart_type}"
             f"&timeInterval={interval}"
         )

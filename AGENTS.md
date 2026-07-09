@@ -28,11 +28,13 @@ intraday momentum and unusual activity. It pulls data from NSE India's public
 NSE/
 ├── app.py             # Flask server + JSON API endpoints (runs on port 5055)
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
-├── nse_quote.py       # Per-stock quote/chart/depth via NextApi gateway
+├── nse_quote.py       # Per-stock quote/chart/depth (NextApi) + OHLCV candles (charting)
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
 ├── strategies.py      # Strategy library (7 generators) + market-regime detector
 ├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
-├── backtest_strategies.py # Offline backtester: replays strategies over stored context
+├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
+├── backtest_strategies.py # Offline backtester: replays strategies, resolves on OHLCV
+├── test_intrabar.py   # Unit tests for the intrabar resolver
 ├── db.py              # SQLite store (snapshots / IV / strategy-context time-series)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
@@ -336,17 +338,37 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     beep/notify when a strategy takes new ideas or a trade hits target/stop
     (diffs per-strategy counts across polls). Controls: Take all, entry-mode
     dropdown, Auto, Reset.
-  - **Offline backtest** (`backtest_strategies.py`, `/api/sim/backtest`): replays
-    the SAME generators over the archived `context_log` on a virtual clock —
-    reprice open trades (target/stop/multi-day-expiry), take fresh ideas (one per
-    symbol+direction per day; `open` vs `continuous` entry), forward-price from
-    later cycles. Returns per-strategy scorecards + equity curves + a regime
-    leaderboard. This is the real backtest (unlike the live forward-sim, it
-    doesn't need days to accumulate — but it needs the logger to have archived
-    context, which it does every ~5 min during market hours). UI: "⏮ Backtest
-    history" button in the Sim tab.
-  - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,backtest,
-    regime,take,auto,mode,reset}`. Still SEPARATE from the manual paper account.
+  - **Offline backtest** (`backtest_strategies.py`, `/api/sim/backtest`): two
+    passes. Pass 1 replays the SAME generators over the archived `context_log`
+    and OPENS trades only (one per symbol+direction per day; `open` vs
+    `continuous` entry). Pass 2 resolves exits against **real 1-min OHLCV**
+    (`intrabar.resolve`, see below), fetched once per unique symbol. Returns
+    per-strategy scorecards (win%, expectancy R, avg MFE/MAE, median mins-to-exit)
+    + equity curves + a regime leaderboard, plus `resolve` mode and a
+    `{intrabar, ltpFallback}` count. `?resolve=ltp` reverts to the old coarse
+    per-cycle LTP resolution. UI: "⏮ Backtest history" button in the Sim tab.
+  - **Intrabar resolution** (`intrabar.py`): the sims used to decide target/stop
+    against a single LTP per cycle (60s live, 5-min backtest), which misses wicks
+    and detects exits late. `intrabar.resolve(trade, bars, risk, max_sessions)`
+    walks minute candles: LONG STOP when a bar LOW <= stop, TARGET when HIGH >=
+    target (mirror for SHORT); a bar that straddles both is assumed to hit the
+    STOP first (conservative). Tracks true intrabar MFE/MAE and mins-to-exit;
+    returns None when a symbol has no candles (renamed ticker / index) so callers
+    fall back to LTP. The live sim runs a bounded catch-up sweep (`_intrabar_catchup`,
+    every ~180s) to close trades whose stop/target was pierced between LTP samples.
+  - **EPOCH GOTCHA:** `charting.nseindia.com` bakes IST wall-clock into the epoch
+    as if it were UTC — for BOTH returned candle `time` AND the fromDate/toDate
+    query bounds. Build query epochs from the IST wall clock treated as UTC
+    (`nse_quote._baked_now` / `_baked_epoch`), NOT the real unix timestamp (which
+    is 5:30 behind and returns a clamped/wrong window). `intrabar.candle_dt` reads
+    the ms back with `utcfromtimestamp` to recover true IST.
+  - **Per-trade replay** (Sim tab ▶ button): opens the trade's 1-min candles for
+    its holding window with entry/target/stop/exit lines overlaid + MFE/MAE and
+    time-to-exit stats. On demand via `/api/ohlc/<sym>?from=&to=` (baked epochs);
+    no storage — trades are within NSE's ~30-40 day 1-min retention.
+  - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,backtest
+    [?resolve=intrabar|ltp],regime,take,auto,mode,reset}`. Still SEPARATE from the
+    manual paper account.
 - **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
   notional), long **and** short with netting/flip-through-zero, MTM on live
   near-month price. New route `/api/paper/futures_order`; traded from the detail
