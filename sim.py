@@ -252,8 +252,12 @@ def take(strategy_ids=None, ctx=None, auto=False, limit=10):
                 added[sid] = 0
                 continue
             book = state["strategies"].setdefault(sid, {"trades": []})
-            open_keys = {(t["symbol"], t["direction"])
-                         for t in book["trades"] if t["status"] == "OPEN"}
+            # One entry per (symbol, direction) per strategy per day: dedup against
+            # everything opened TODAY (any status), not just still-open trades.
+            # This stops continuous mode from instantly re-entering the same setup
+            # the moment a trade closes. The name is free to reappear next session.
+            taken_keys = {(t["symbol"], t["direction"]) for t in book["trades"]
+                          if t.get("openedDate") == today}
             ideas = strat.generate(sid, ctx)
             longs = sorted([i for i in ideas if i["direction"] == "LONG"],
                            key=lambda x: x.get("conviction", 0), reverse=True)[:limit]
@@ -262,12 +266,12 @@ def take(strategy_ids=None, ctx=None, auto=False, limit=10):
             n = 0
             for idea in longs + shorts:
                 key = (idea["symbol"], idea["direction"])
-                if key in open_keys:
+                if key in taken_keys:
                     continue
                 tr = _open_trade(idea, sid, regime_label)
                 if tr:
                     book["trades"].append(tr)
-                    open_keys.add(key)
+                    taken_keys.add(key)
                     n += 1
             added[sid] = n
             if auto and mode == "open":
