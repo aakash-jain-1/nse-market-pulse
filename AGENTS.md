@@ -409,6 +409,16 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     `run()` reports `resolve` + `resolved:{intrabar,daily}` + `cache.minCache`. In
     practice it closely CONFIRMS the daily numbers here (stop/target 9% apart → ~0%
     same-day both-touched), so it's a fidelity/validation toggle, not a rewrite.
+    **OI gate (tightened):** `oi_smart` now needs `OI_MIN_PCT=8` OI rise **and**
+    `volMult>=OI_MIN_VOL_MULT(1.2)` **and** `|ret1|>=OI_MIN_RET(0.5)` (was a loose
+    ≥3% any-volume gate that made it ~44% of all trades / the biggest drag) — cuts
+    it ~59% (724→294 on the full universe). **Scorecard MFE/MAE:** `_resolve` now
+    tracks max favorable / adverse excursion from entry over the hold (daily wicks in
+    daily mode; `_reresolve_intrabar` overwrites with true intraday wicks in minute
+    mode), surfaced as avg `avgMfePct`/`avgMaePct` columns. `medMinsToExit` is
+    computed but NOT rendered in this table (multi-day holds make it wall-clock
+    minutes ≈ holdDays×1440, redundant with Hold; keep it for the short-hold live
+    sim).
   - **Intrabar resolution** (`intrabar.py`): the sims used to decide target/stop
     against a single LTP per cycle (60s live, 5-min backtest), which misses wicks
     and detects exits late. `intrabar.resolve(trade, bars, risk, max_sessions)`

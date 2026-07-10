@@ -289,7 +289,12 @@ flowchart LR
   40/80/150 or **All F&O (~210)**. A **persistent SQLite cache** (`eod_bars` /
   `eod_oi`, 12h freshness TTL) stores the daily history: the first full sweep is
   ~3 min, then repeat runs and wider look-backs (60/90d) are near-instant with zero
-  re-fetching. "Force refresh" re-pulls from NSE.
+  re-fetching. "Force refresh" re-pulls from NSE. OI Smart-Money uses a **tightened
+  gate** (≥8% near-month OI rise on ≥1.2× volume with a directional close) so it no
+  longer over-fires (~59% fewer trades). Each scorecard row also reports **MFE/MAE**
+  (avg max favorable / adverse excursion per trade) alongside Tgt% / Profit% — a big
+  MFE with low Tgt% flags targets set too far, MAE near the stop flags stops getting
+  tagged.
   - **Minute-accurate mode** ("minute-accurate" checkbox / `resolve=intrabar`):
     re-resolves each trade on **real 1-minute candles** (`intrabar.py`) so exits
     follow the true intraday path — which-came-first, wick timing, MFE/MAE — rather

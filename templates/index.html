@@ -1919,6 +1919,8 @@
           <td class="${(s.winRate||0)>=50?'pos':'neg'}">${wr}</td>
           <td class="${(s.profitRate||0)>=50?'pos':'neg'}">${s.profitRate==null?"—":s.profitRate+"%"}</td>
           <td class="${(s.avgPnlPct||0)>=0?'pos':'neg'}">${s.avgPnlPct==null?"—":_sgn(s.avgPnlPct)+s.avgPnlPct+"%"}</td>
+          <td class="pos">${s.avgMfePct==null?"—":"+"+s.avgMfePct+"%"}</td>
+          <td class="neg">${s.avgMaePct==null?"—":s.avgMaePct+"%"}</td>
           <td class="${(s.expectancyR||0)>=0?'pos':'neg'}">${er}</td>
           <td class="${(s.expectancyR||0)>=0?'pos':'neg'}">${s.totalR==null?"—":_sgn(s.totalR)+s.totalR}</td>
           <td class="${(s.realizedPnl||0)>=0?'pos':'neg'}">${_sgn(s.realizedPnl)}₹${fmtNum(s.realizedPnl)}</td>
@@ -1933,6 +1935,8 @@
         <td class="${(t.winRate||0)>=50?'pos':'neg'}">${t.winRate==null?"—":t.winRate+"%"}</td>
         <td class="${(t.profitRate||0)>=50?'pos':'neg'}">${t.profitRate==null?"—":t.profitRate+"%"}</td>
         <td class="${(t.avgPnlPct||0)>=0?'pos':'neg'}">${t.avgPnlPct==null?"—":_sgn(t.avgPnlPct)+t.avgPnlPct+"%"}</td>
+        <td class="pos">${t.avgMfePct==null?"—":"+"+t.avgMfePct+"%"}</td>
+        <td class="neg">${t.avgMaePct==null?"—":t.avgMaePct+"%"}</td>
         <td class="${(t.expectancyR||0)>=0?'pos':'neg'}">${t.expectancyR==null?"—":_sgn(t.expectancyR)+t.expectancyR+"R"}</td>
         <td class="${(t.totalR||0)>=0?'pos':'neg'}">${t.totalR==null?"—":_sgn(t.totalR)+t.totalR}</td>
         <td class="${(t.realizedPnl||0)>=0?'pos':'neg'}">${_sgn(t.realizedPnl)}₹${fmtNum(t.realizedPnl)}</td>
@@ -1950,12 +1954,14 @@
           <th title="% of closed trades that ran all the way to the FULL target">Tgt%</th>
           <th title="% of closed trades that ended PROFITABLE — includes trades that time-expired in partial profit before reaching the full target. This is the realistic hit rate.">Profit%</th>
           <th title="Average % move captured per closed trade">Avg%</th>
+          <th title="Avg Maximum Favorable Excursion — how far into profit trades ran before exit (daily-granularity in daily mode, true intraday wicks in minute-accurate mode). Big MFE but low Tgt% ⇒ targets set too far or exits too late.">MFE</th>
+          <th title="Avg Maximum Adverse Excursion — how much heat trades took against the entry. MAE sitting near your stop ⇒ stops are being tagged; much smaller ⇒ room to tighten.">MAE</th>
           <th title="Expectancy: avg R per trade. >0 = edge.">Exp. R</th>
           <th title="Sum of R across closed trades">Tot R</th>
           <th title="Realized rupee P&amp;L">Realized</th>
           <th title="Average trading days held">Hold</th><th>Equity</th>
         </tr></thead><tbody>${rows}${totRow}</tbody></table>
-        <div class="chart-note" style="margin-top:8px">📊 <b>How to read it:</b> <b>Tgt%</b> = ran to the full target; <b>Profit%</b> = ended positive (many trades time-expire in partial profit, so Profit% ≫ Tgt%). <b>Exp. R</b> is the real edge (avg R/trade); <b>Realized ₹</b> just sums every trade at ₹${fmtNum(bt.riskPerTrade)} risk — it's <i>not</i> a portfolio you'd hold (you'd never run all these at once), so judge by Exp. R, not the rupee total.</div>
+        <div class="chart-note" style="margin-top:8px">📊 <b>How to read it:</b> <b>Tgt%</b> = ran to the full target; <b>Profit%</b> = ended positive (many trades time-expire in partial profit, so Profit% ≫ Tgt%). <b>Exp. R</b> is the real edge (avg R/trade); <b>Realized ₹</b> just sums every trade at ₹${fmtNum(bt.riskPerTrade)} risk — it's <i>not</i> a portfolio you'd hold (you'd never run all these at once), so judge by Exp. R, not the rupee total. <b>MFE/MAE</b> = avg best/worst excursion: a big MFE with low Tgt% means winners give it back (exit sooner / trail), while MAE hugging the stop means stops are getting tagged.</div>
         <div class="chart-note" style="margin-top:6px">⚠️ <b>Daily-bar approximation</b>, not the exact intraday logic: entries at the signal day's <b>close</b>, exits resolved on subsequent daily high/low (a bar piercing both stop &amp; target counts as a <b>stop</b>). A small liquid sample over a short window — read it as directional, not statistically final. Not covered here: ${nc}. The live sim (auto, every session) accumulates the pure, intrabar-accurate version over time.</div>
       </div>`;
     }

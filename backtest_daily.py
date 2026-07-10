@@ -53,13 +53,17 @@ STRATS = [
     {"id": "vol_breakout", "name": "Volume Breakout",        "stop": 3.0, "target": 6.0,
      "desc": "Close breaks the prior 20-day high/low on a >=2x volume expansion."},
     {"id": "oi_smart",     "name": "F&O OI Smart-Money",     "stop": 3.0, "target": 6.0,
-     "desc": "Rising near-month OI (>=3%) with price confirming: long buildup (price up + OI up) -> long, short buildup (price down + OI up) -> short. Entered/resolved on the equity bars."},
+     "desc": "Meaningful near-month OI build (>=8%) on >=1.2x volume with a real directional close: long buildup (price up + OI up) -> long, short buildup (price down + OI up) -> short. Entered/resolved on the equity bars."},
 ]
 STRAT_MAP = {s["id"]: s for s in STRATS}
 
-# OI Smart-Money only fires when we could load that symbol's daily OI; below is
-# the fixed magnitude gate.
-OI_MIN_PCT = 3.0
+# OI Smart-Money gates. A rising-OI buildup must be a MEANINGFUL OI jump on
+# ABOVE-AVERAGE volume with a real directional close, else it fires on noise —
+# the old loose >=3% (any volume, any move) gate made it ~44% of all trades and
+# the single biggest drag.
+OI_MIN_PCT = 8.0
+OI_MIN_VOL_MULT = 1.2
+OI_MIN_RET = 0.5
 
 NOT_COVERED = [
     {"id": "vwap", "name": "VWAP Trend",
@@ -344,28 +348,35 @@ def _signals(f):
 
 def _resolve(direction, entry, stop_px, tgt_px, bars, i, max_hold):
     """
-    Walk subsequent daily bars; return (status, exitPrice, exitIdx). A bar that
-    straddles both stop and target is a STOP (conservative). Time-expire at close.
+    Walk subsequent daily bars; return (status, exitPrice, exitIdx, mfePct, maePct).
+    A bar that straddles both stop and target is a STOP (conservative). Time-expire
+    at close. MFE/MAE are the best/worst excursions from entry over the hold
+    (daily-granularity here; minute mode recomputes them from real intraday wicks).
     """
     last = len(bars) - 1
     end = min(i + max_hold, last)
+    mfe = mae = 0.0
     for j in range(i + 1, end + 1):
         hi, lo = bars[j]["high"], bars[j]["low"]
         if None in (hi, lo):
             continue
         if direction == "LONG":
+            mfe = max(mfe, (hi / entry - 1) * 100)
+            mae = min(mae, (lo / entry - 1) * 100)
             if lo <= stop_px:
-                return "STOP", stop_px, j
+                return "STOP", stop_px, j, mfe, mae
             if hi >= tgt_px:
-                return "TARGET", tgt_px, j
+                return "TARGET", tgt_px, j, mfe, mae
         else:
+            mfe = max(mfe, (entry / lo - 1) * 100)
+            mae = min(mae, (entry / hi - 1) * 100)
             if hi >= stop_px:
-                return "STOP", stop_px, j
+                return "STOP", stop_px, j, mfe, mae
             if lo <= tgt_px:
-                return "TARGET", tgt_px, j
+                return "TARGET", tgt_px, j, mfe, mae
     if end > i:
-        return "EXPIRED", bars[end]["close"], end
-    return "OPEN", None, None
+        return "EXPIRED", bars[end]["close"], end, mfe, mae
+    return "OPEN", None, None, mfe, mae
 
 
 def _trade(sid, direction, bars, feats, i, max_hold):
@@ -379,12 +390,14 @@ def _trade(sid, direction, bars, feats, i, max_hold):
     else:
         stop_px, tgt_px = entry * (1 + sp / 100), entry * (1 - tp / 100)
     qty, notional = size_position(entry, stop_px)
-    status, exit_px, j = _resolve(direction, entry, stop_px, tgt_px, bars, i, max_hold)
+    status, exit_px, j, mfe, mae = _resolve(direction, entry, stop_px, tgt_px,
+                                            bars, i, max_hold)
     t = {
         "symbol": bars[i].get("symbol"), "strategy": sid, "direction": direction,
         "entry": round(entry, 2), "stop": round(stop_px, 2), "target": round(tgt_px, 2),
         "qty": qty, "notional": notional, "status": status,
         "openedDate": bars[i]["d"], "openIdx": i,
+        "mfePct": round(mfe, 2), "maePct": round(mae, 2), "minsToExit": None,
     }
     if status == "OPEN":
         t.update(exitPrice=None, closedDate=None, pnl=0.0, pnlPct=0.0,
@@ -424,13 +437,16 @@ def _backtest_symbol(bars, oi_map, cutoff_iso, max_hold):
                 sigs.append(("vol_breakout", "LONG"))
             elif c < f["lo20"]:
                 sigs.append(("vol_breakout", "SHORT"))
-        # OI Smart-Money: rising OI (>= OI_MIN_PCT) + price confirming = buildup.
+        # OI Smart-Money: a meaningful OI build (>= OI_MIN_PCT) on above-average
+        # volume with a real directional close = smart-money buildup (not noise).
         if oi_map:
             oi_pct = oi_map.get(b["d"])
-            if oi_pct is not None and oi_pct >= OI_MIN_PCT:
-                if f["ret1"] > 0:
+            vm = f["volMult"]
+            if (oi_pct is not None and oi_pct >= OI_MIN_PCT
+                    and vm is not None and vm >= OI_MIN_VOL_MULT):
+                if f["ret1"] >= OI_MIN_RET:
                     sigs.append(("oi_smart", "LONG"))
-                elif f["ret1"] < 0:
+                elif f["ret1"] <= -OI_MIN_RET:
                     sigs.append(("oi_smart", "SHORT"))
         for sid, direction in sigs:
             if busy.get(sid, -1) >= i:
@@ -459,6 +475,9 @@ def _scorecard(trades):
     total_r = sum(t["rMultiple"] for t in closed)
     realized = sum(t["pnl"] for t in closed)
     avg_pct = sum(t["pnlPct"] for t in closed) / n if n else None
+    mfes = [t["mfePct"] for t in closed if t.get("mfePct") is not None]
+    maes = [t["maePct"] for t in closed if t.get("maePct") is not None]
+    mins = [t["minsToExit"] for t in closed if t.get("minsToExit") is not None]
     # equity curve by close date
     cl = sorted(closed, key=lambda t: t["closedDate"] or "")
     cum, pts = 0.0, []
@@ -476,6 +495,9 @@ def _scorecard(trades):
         "totalR": round(total_r, 2), "expectancyR": round(total_r / n, 2) if n else None,
         "realizedPnl": round(realized, 2),
         "avgHoldDays": round(sum(t["holdDays"] for t in closed) / n, 1) if n else None,
+        "avgMfePct": round(sum(mfes) / len(mfes), 2) if mfes else None,
+        "avgMaePct": round(sum(maes) / len(maes), 2) if maes else None,
+        "medMinsToExit": int(_median(mins)) if mins else None,
         "equity": {"points": pts, "final": round(cum, 0), "n": len(pts)},
     }
 
