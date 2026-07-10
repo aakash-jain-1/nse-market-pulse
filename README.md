@@ -236,6 +236,15 @@ forward-tested in parallel and compared against the day's **market regime**.
 > tab shows a **📊 Playbook scoreboard** that puts the adaptive track's expectancy
 > head-to-head against the **average** and **best** fixed strategy, so you can see
 > at a glance whether the regime playbook is actually winning.
+>
+> **Regime-conditioned position sizing** — the adaptive track also *sizes* by
+> conviction: it scales risk between **0.5× and 1.5×** the base ₹2,000 based on how
+> strong the delegated strategy's historical edge is in today's regime (strong,
+> well-sampled edge → bigger bet; weak/negative or design-fit-only → smaller bet).
+> Fixed strategies keep flat risk, so they stay comparable. Since R-multiples are
+> normalized per trade, the payoff appears as **capital-weighted expectancy**
+> (ΣPnL ÷ Σrisk) vs the equal-weight expectancy — shown right on the scoreboard, so
+> you can tell whether the bigger bets actually landed on the better trades.
 
 **Regime detection** classifies each day from NIFTY %change + advance/decline
 breadth + the prior session's move:

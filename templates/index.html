@@ -1798,10 +1798,27 @@
           : `Adaptive is <b class="neg">lagging</b> the average strategy by ${diff.toFixed(2)}R/trade.`);
       const beatBest = (best && adR != null && adR >= best.expectancyR)
         ? ` And it's <b class="pos">matching/beating the best fixed strategy</b>.` : "";
+      // Regime-conditioned sizing payoff: capital-weighted expectancy (weightedR,
+      // = ΣPnL/Σrisk) vs equal-weight expectancy (expectancyR). If conviction
+      // sizing put bigger bets on the better trades, weighted > equal.
+      const rpt = sum.riskPerTrade || 2000;
+      const avgMult = (ad.riskSum && ad.closed) ? ad.riskSum / (ad.closed * rpt) : null;
+      const wR = ad.weightedR, eR = ad.expectancyR;
+      let sizeLine = "";
+      if (wR != null && eR != null) {
+        const edge = wR - eR;
+        const tag = Math.abs(edge) < 0.005
+          ? `<span style="color:var(--muted)">sizing ≈ neutral so far</span>`
+          : (edge > 0
+            ? `conviction sizing <b class="pos">added ${_sgn(edge)}${edge.toFixed(2)}R</b>`
+            : `conviction sizing <b class="neg">cost ${edge.toFixed(2)}R</b>`);
+        sizeLine = `<div class="pick-reason" style="margin-top:4px">🎚️ Conviction sizing: equal-size <b>${_sgn(eR)}${eR}R</b> → capital-weighted <b class="${wR>=0?'pos':'neg'}">${_sgn(wR)}${wR.toFixed(2)}R</b> — ${tag}${avgMult!=null?` · avg bet ×${avgMult.toFixed(2)} of ₹${fmtNum(rpt)} risk`:""}.</div>`;
+      }
       return `<div class="pick">${head}<div class="pick-body">
         <div class="pick-name">Regime-Adaptive <span class="${(adR||0)>=0?'pos':'neg'}" style="font-size:13px">${_sgn(adR)}${adR}R/trade</span>
           <span style="color:var(--muted);font-size:12px;font-weight:400"> · ${ad.winRate==null?"—":ad.winRate+"%"} win · ${ad.closed} closed · ${_sgn(ad.totalPnl)}₹${fmtNum(ad.totalPnl)}</span></div>
         <div class="pick-reason">vs field: avg fixed <b class="${(avgR||0)>=0?'pos':'neg'}">${avgR==null?"—":_sgn(avgR)+avgR.toFixed(2)+"R"}</b>${best?` · best fixed <b>${best.name}</b> ${_sgn(best.expectancyR)}${best.expectancyR}R <span style="color:var(--muted)">(hindsight)</span>`:""}. ${verdict}${beatBest}</div>
+        ${sizeLine}
       </div></div>`;
     }
 

@@ -551,7 +551,9 @@ def gen_ivwap(ctx):
 def _regime_playbook_pick(regime_label):
     """Which base strategy to follow in this regime: the historical best from the
     daily-backtest leaderboard when it's warm, else the first strategy DESIGNED
-    for the regime (a-priori). Never triggers a (blocking) backtest compute."""
+    for the regime (a-priori). Never triggers a (blocking) backtest compute.
+    Returns (strategy_id, basis, cell) where basis is 'history'|'fit'|None and
+    cell is the winning leaderboard cell (expectancyR/closed/...) or None."""
     if regime_label:
         try:
             import backtest_daily as btd
@@ -561,13 +563,35 @@ def _regime_playbook_pick(regime_label):
                 row = next((r for r in lb.get("rows", [])
                             if r.get("regime") == regime_label), None)
                 if row and row.get("best"):
-                    return row["best"], "history"
+                    cell = (row.get("cells") or {}).get(row["best"])
+                    return row["best"], "history", cell
         except Exception:
             pass
         for s in STRATEGIES:
             if s["id"] != "adaptive" and regime_label in s.get("regimeFit", []):
-                return s["id"], "fit"
-    return None, None
+                return s["id"], "fit", None
+    return None, None, None
+
+
+def _conviction_mult(basis, cell):
+    """Regime-conditioned position-sizing multiplier (× the base RISK_PER_TRADE).
+    Size UP when the delegated strategy has a strong, well-sampled historical
+    edge in this regime; size DOWN when the best available edge is weak/negative
+    or we're only going by a-priori fit. Bounded to [0.5, 1.5]."""
+    if basis == "history" and cell:
+        exp, n = cell.get("expectancyR"), cell.get("closed") or 0
+        if exp is None:
+            return 0.75
+        if exp >= 0.30 and n >= 10:
+            return 1.5
+        if exp >= 0.15 and n >= 5:
+            return 1.25
+        if exp >= 0.05:
+            return 1.0
+        if exp >= 0.0:
+            return 0.75
+        return 0.5      # even the regime's best strategy is net-negative here
+    return 0.75         # a-priori fit only — no historical conviction to size on
 
 
 def gen_adaptive(ctx):
@@ -576,19 +600,26 @@ def gen_adaptive(ctx):
     sim's 'follow the playbook' track — it measures whether regime-switching
     beats any single fixed strategy over time."""
     regime_label = (ctx.get("regime") or {}).get("label")
-    sid, basis = _regime_playbook_pick(regime_label)
+    sid, basis, cell = _regime_playbook_pick(regime_label)
     if not sid or sid == "adaptive":
         return []
     meta = STRATEGY_MAP.get(sid)
     if not meta:
         return []
+    mult = _conviction_mult(basis, cell)
     lead = (f"Regime playbook: {regime_label} day → {meta['name']}"
             + (" (best historical edge)" if basis == "history" else " (designed fit)"))
+    edge_txt = ""
+    if basis == "history" and cell and cell.get("expectancyR") is not None:
+        edge_txt = (f" — regime edge {cell['expectancyR']:+.2f}R over "
+                    f"{cell.get('closed', 0)} trades")
+    size_note = f"Conviction sizing \u00d7{mult:g}{edge_txt}"
     ideas = []
     for idea in (meta["generate"](ctx) or []):
         merged = dict(idea)
-        merged["reasons"] = [lead] + list(idea.get("reasons", []))
+        merged["reasons"] = [lead, size_note] + list(idea.get("reasons", []))
         merged["via"] = sid
+        merged["sizeMult"] = mult
         ideas.append(merged)
     return ideas
 

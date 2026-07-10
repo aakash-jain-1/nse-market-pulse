@@ -338,6 +338,19 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     deliberately absent from `backtest_daily.STRATS` so `cached_regime_leaderboard`
     → `run()` can't recurse — and forward-tests whether "follow the playbook" beats
     any single fixed strategy.
+  - **Regime-conditioned position sizing** (adaptive only): `_conviction_mult`
+    maps the delegated strategy's leaderboard cell (expectancy R + sample size in
+    today's regime) to a risk multiplier in **[0.5, 1.5]** — size up on a strong,
+    well-sampled edge (≥0.30R·≥10 trades → 1.5×), size down when the best available
+    edge is weak/negative (<0 → 0.5×) or we're only on a-priori fit (0.75×). Each
+    idea carries `sizeMult`; `sim._open_trade` sets `risk = RISK_PER_TRADE × sizeMult`
+    and `size_position(entry, stop, risk=...)` scales qty accordingly. Fixed
+    strategies never set `sizeMult` (stay 1.0), so cross-strategy comparability is
+    intact. Because `rMultiple` is normalized to each trade's OWN risk, expectancy R
+    stays size-agnostic; the sizing payoff shows only in the **capital-weighted
+    expectancy** `weightedR = ΣPnL/Σrisk` (closed trades) vs equal-weight
+    `expectancyR` — surfaced in the Playbook scoreboard. `riskSum`/`weightedR` are
+    added to each `_scorecard`; summary exposes `riskPerTrade`.
   - **Regime detector** (`detect_regime`): tags each day Trend-Up / Trend-Down /
     Recovery / Pullback / Range / Mixed from NIFTY %change + advance-decline
     breadth (`nse.get_index_snapshot()` → `/api/allIndices`, cached 30s) + the

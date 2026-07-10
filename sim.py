@@ -42,19 +42,20 @@ DEFAULT_MAX_SESSIONS = 3
 STATE_VERSION = 2
 
 
-def size_position(entry, stop):
+def size_position(entry, stop, risk=RISK_PER_TRADE):
     """
     Risk-based sizing: pick a quantity so that hitting the stop loses exactly
-    RISK_PER_TRADE rupees (per-share risk = |entry - stop|). Capped by
-    MAX_NOTIONAL. Falls back to flat NOTIONAL when there's no usable stop.
-    Returns (qty, notional). This is what makes each trade risk the same, so
-    equity curves / expectancy are comparable across strategies.
+    `risk` rupees (per-share risk = |entry - stop|). Capped by MAX_NOTIONAL.
+    Falls back to flat NOTIONAL when there's no usable stop.
+    Returns (qty, notional). With the default risk every trade risks the same,
+    so equity curves / expectancy are comparable across strategies; passing a
+    scaled `risk` lets a strategy size up/down by conviction (see gen_adaptive).
     """
     if not entry or entry <= 0:
         return 0.0, 0.0
     risk_per_share = abs(entry - stop) if stop else 0
     if risk_per_share > 0:
-        qty = RISK_PER_TRADE / risk_per_share
+        qty = risk / risk_per_share
         qty = min(qty, MAX_NOTIONAL / entry)
     else:
         qty = NOTIONAL / entry
@@ -187,7 +188,12 @@ def _open_trade(idea, strategy_id, regime_label):
     if not entry:
         return None
     direction = idea["direction"]
-    qty, notional = size_position(entry, idea.get("stop"))
+    # Regime-conditioned sizing: strategies may carry a conviction multiplier
+    # (only the adaptive playbook does today). 1.0 = the standard fixed risk, so
+    # every fixed strategy stays perfectly comparable.
+    size_mult = idea.get("sizeMult") or 1.0
+    risk = round(RISK_PER_TRADE * size_mult, 2)
+    qty, notional = size_position(entry, idea.get("stop"), risk=risk)
     return {
         "id": f"{strategy_id}|{idea['symbol']}|{direction}|"
               f"{datetime.now(IST).strftime('%Y%m%d%H%M%S')}",
@@ -206,7 +212,7 @@ def _open_trade(idea, strategy_id, regime_label):
         "rr": idea.get("rr"),
         "qty": qty,
         "notional": notional,
-        "risk": RISK_PER_TRADE,
+        "risk": risk,
         "status": "OPEN",
         "ltp": round(entry, 2),
         "mfePct": 0.0,
@@ -338,7 +344,8 @@ def _intrabar_catchup(state, open_trades):
         probe = dict(t)
         probe["openedTs"] = t["openedAt"]
         probe["maxSessions"] = max_sessions
-        res = intrabar.resolve(probe, bars, RISK_PER_TRADE, max_sessions=max_sessions)
+        res = intrabar.resolve(probe, bars, t.get("risk", RISK_PER_TRADE),
+                               max_sessions=max_sessions)
         if res in ("TARGET", "STOP", "EXPIRED"):
             t["status"] = res
             t["exitPrice"] = probe["exitPrice"]
@@ -627,6 +634,7 @@ def _scorecard(trades):
     realized = sum(t["pnl"] for t in closed)
     unreal = sum(t["pnl"] for t in open_t)
     total_r = sum(t.get("rMultiple") or 0 for t in closed)
+    risk_sum = sum(t.get("risk") or RISK_PER_TRADE for t in closed)
     today = _today()
     today_closed = [t for t in closed if (t.get("closedAt") or "").startswith(today)]
     today_wins = sum(1 for t in today_closed if t["status"] == "TARGET")
@@ -641,7 +649,9 @@ def _scorecard(trades):
         "unrealizedPnl": round(unreal, 2),
         "totalPnl": round(realized + unreal, 2),
         "totalR": round(total_r, 2),
+        "riskSum": round(risk_sum, 2),
         "expectancyR": round(total_r / n, 2) if n else None,
+        "weightedR": round(realized / risk_sum, 3) if risk_sum else None,
         "todayClosed": len(today_closed),
         "todayWinRate": round(today_wins / len(today_closed) * 100, 1) if today_closed else None,
     }
@@ -674,6 +684,7 @@ def summary(strategy_id=None):
         "entryMode": state.get("entryMode", "continuous"),
         "maxSessions": state.get("maxSessions", DEFAULT_MAX_SESSIONS),
         "notional": NOTIONAL,
+        "riskPerTrade": RISK_PER_TRADE,
         "regime": regime,
         "pick": strategy_of_the_day(regime.get("label"), lb=lb)["pick"],
         "strategies": cards,
