@@ -1811,8 +1811,9 @@
       // conviction size. This is the visible counterpart to the flip/conviction alerts.
       const adx = sum.adaptive || {};
       const convCls = adx.sizeMult >= 1.5 ? "pos" : adx.sizeMult <= 0.5 ? "neg" : "";
+      const clarity = adx.strength != null ? ` · regime clarity <b>${Math.round(adx.strength * 100)}%</b>` : "";
       const nowLine = adx.via
-        ? `<div class="pick-reason" style="margin-bottom:6px">Following <b>${adx.viaName || adx.via}</b> now · ${adx.regime || "?"} regime · conviction <b class="${convCls}">×${adx.sizeMult}</b> <span style="color:var(--muted)">${adx.basis === "history" ? "(historical edge)" : "(design fit)"}</span></div>`
+        ? `<div class="pick-reason" style="margin-bottom:6px">Following <b>${adx.viaName || adx.via}</b> now · ${adx.regime || "?"} regime · conviction <b class="${convCls}">×${adx.sizeMult}</b> <span style="color:var(--muted)">${adx.basis === "history" ? "(historical edge)" : "(design fit)"}</span>${clarity}</div>`
         : "";
       if (!ad.closed) {
         return `<div class="pick">${head}<div class="pick-body">

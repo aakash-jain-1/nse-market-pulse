@@ -350,11 +350,19 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     deliberately absent from `backtest_daily.STRATS` so `cached_regime_leaderboard`
     → `run()` can't recurse — and forward-tests whether "follow the playbook" beats
     any single fixed strategy.
-  - **Regime-conditioned position sizing** (adaptive only): `_conviction_mult`
-    maps the delegated strategy's leaderboard cell (expectancy R + sample size in
-    today's regime) to a risk multiplier in **[0.5, 1.5]** — size up on a strong,
-    well-sampled edge (≥0.30R·≥10 trades → 1.5×), size down when the best available
-    edge is weak/negative (<0 → 0.5×) or we're only on a-priori fit (0.75×). Each
+  - **Regime-conditioned position sizing** (adaptive only): `conviction_mult`
+    combines two signals into a risk multiplier in **[0.5, 1.5]**. (1) The
+    delegated strategy's *historical edge* — `_conviction_mult` maps its leaderboard
+    cell (expectancy R + sample size in today's regime) to a base band: size up on a
+    strong, well-sampled edge (≥0.30R·≥10 trades → 1.5×), down when weak/negative
+    (<0 → 0.5×) or on a-priori fit (0.75×). (2) The *live regime clarity* —
+    `regime_strength(regime)`∈[0,1] scores how textbook-clear today is (decisive
+    NIFTY move + lopsided breadth for trends; tight+balanced for Range; sharp
+    counter-move for Recovery/Pullback; Mixed≈0.3). The band is tilted ±20%
+    (`factor = 0.8 + 0.4·strength`) and re-clamped, so a strong edge on a *borderline*
+    regime day is trimmed (e.g. Trend-Up +0.87%/40:10 → strength 0.45 → 1.5×→1.47×)
+    while a decisive day keeps the full bet. Emergent bonus: the 🔥 high-conviction
+    alert (≥1.5×) now needs BOTH a strong edge AND a clear regime. Each
     idea carries `sizeMult`; `sim._open_trade` sets `risk = RISK_PER_TRADE × sizeMult`
     and `size_position(entry, stop, risk=...)` scales qty accordingly. Fixed
     strategies never set `sizeMult` (stay 1.0), so cross-strategy comparability is

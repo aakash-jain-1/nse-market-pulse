@@ -240,7 +240,11 @@ forward-tested in parallel and compared against the day's **market regime**.
 > **Regime-conditioned position sizing** — the adaptive track also *sizes* by
 > conviction: it scales risk between **0.5× and 1.5×** the base ₹2,000 based on how
 > strong the delegated strategy's historical edge is in today's regime (strong,
-> well-sampled edge → bigger bet; weak/negative or design-fit-only → smaller bet).
+> well-sampled edge → bigger bet; weak/negative or design-fit-only → smaller bet),
+> then **tilts that ±20% by how clear today's regime actually is** — a decisive
+> trend/quiet-range/sharp-recovery day sizes up, a borderline "barely-qualified" day
+> is trimmed (a *regime clarity %* shown on the scoreboard). So the biggest bets
+> need both a proven edge *and* a textbook regime.
 > Fixed strategies keep flat risk, so they stay comparable. Since R-multiples are
 > normalized per trade, the payoff appears as **capital-weighted expectancy**
 > (ΣPnL ÷ Σrisk) vs the equal-weight expectancy — shown right on the scoreboard, so

@@ -700,7 +700,8 @@ def summary(strategy_id=None):
         "via": a_via,
         "viaName": strat.STRATEGY_MAP.get(a_via, {}).get("name") if a_via else None,
         "basis": a_basis,
-        "sizeMult": strat._conviction_mult(a_basis, a_cell) if a_via else None,
+        "sizeMult": strat.conviction_mult(a_basis, a_cell, regime) if a_via else None,
+        "strength": strat.regime_strength(regime),
     }
 
     if strategy_id and strategy_id in strat.STRATEGY_MAP:

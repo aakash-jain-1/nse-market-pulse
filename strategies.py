@@ -594,6 +594,55 @@ def _conviction_mult(basis, cell):
     return 0.75         # a-priori fit only — no historical conviction to size on
 
 
+def _clamp(x, lo, hi):
+    return lo if x < lo else hi if x > hi else x
+
+
+def regime_strength(regime):
+    """How *textbook-clear* today's regime is, in [0,1]. Days sitting right on the
+    classification boundary (or in the residual 'Mixed' bucket) score low — the
+    per-regime historical edge is less trustworthy there; decisive trend/reversal/
+    quiet days score high. Used to tilt position size (see conviction_mult)."""
+    if not regime:
+        return 0.5
+    label = regime.get("label")
+    npct = regime.get("niftyPct")
+    if npct is None:
+        return 0.5
+    adv = regime.get("breadthAdv") or 0
+    dec = regime.get("breadthDec") or 0
+    prior = regime.get("priorDayMove")
+    tot = adv + dec
+    skew = abs(adv - dec) / tot if tot else 0.0          # breadth lopsidedness [0,1]
+    mag = abs(npct)
+    if label in ("Trend-Up", "Trend-Down"):
+        # decisive move (0.6% → 1.5%+) AND lopsided breadth
+        move = _clamp((mag - 0.6) / (1.5 - 0.6), 0, 1)
+        return round(0.5 * move + 0.5 * skew, 2)
+    if label == "Range":
+        # the tighter/more balanced, the stronger the range (0.4% → 0.0%)
+        quiet = _clamp((0.4 - mag) / 0.4, 0, 1)
+        return round(0.6 * quiet + 0.4 * (1 - skew), 2)
+    if label in ("Recovery", "Pullback"):
+        # decisive counter-move today + a sizeable prior-day extreme to revert from
+        move = _clamp((mag - 0.3) / (1.2 - 0.3), 0, 1)
+        pmag = _clamp((abs(prior) - 1.0) / (2.5 - 1.0), 0, 1) if prior is not None else 0.3
+        return round(0.6 * move + 0.4 * pmag, 2)
+    return 0.3          # Mixed / Unknown — residual bucket, inherently low conviction
+
+
+def conviction_mult(basis, cell, regime=None):
+    """Final regime-conditioned size multiplier in [0.5, 1.5]: the historical-edge
+    band (_conviction_mult) tilted ±20% by how clear today's regime is. A strong
+    edge on a decisive regime day sizes biggest; the same edge on a borderline day
+    is trimmed. Without a regime it degrades to the plain edge band."""
+    edge = _conviction_mult(basis, cell)
+    if regime is None:
+        return edge
+    factor = 0.8 + 0.4 * regime_strength(regime)         # weak day 0.8× → strong 1.2×
+    return round(_clamp(edge * factor, 0.5, 1.5), 2)
+
+
 def gen_adaptive(ctx):
     """J — Regime-Adaptive: each session delegate to the strategy with the best
     historical edge in today's regime (the strategy-of-the-day). This is the
@@ -606,14 +655,16 @@ def gen_adaptive(ctx):
     meta = STRATEGY_MAP.get(sid)
     if not meta:
         return []
-    mult = _conviction_mult(basis, cell)
+    regime = ctx.get("regime") or {}
+    mult = conviction_mult(basis, cell, regime)
     lead = (f"Regime playbook: {regime_label} day → {meta['name']}"
             + (" (best historical edge)" if basis == "history" else " (designed fit)"))
     edge_txt = ""
     if basis == "history" and cell and cell.get("expectancyR") is not None:
         edge_txt = (f" — regime edge {cell['expectancyR']:+.2f}R over "
                     f"{cell.get('closed', 0)} trades")
-    size_note = f"Conviction sizing \u00d7{mult:g}{edge_txt}"
+    size_note = (f"Conviction sizing \u00d7{mult:g}{edge_txt} · "
+                 f"regime clarity {int(round(regime_strength(regime) * 100))}%")
     ideas = []
     for idea in (meta["generate"](ctx) or []):
         merged = dict(idea)
