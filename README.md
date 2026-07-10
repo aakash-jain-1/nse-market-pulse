@@ -268,7 +268,15 @@ flowchart LR
   no charting token fall back to LTP resolution. See `intrabar.py`.
 - **Regime leaderboard:** aggregates every trade by *regime × strategy* to answer
   "which strategy wins on a recovery day vs a trend-up day", and picks a
-  **strategy-of-the-day**.
+  **live forward-test leader** for the current regime from the sim ledger.
+- **🎯 Strategy of the Day** (`/api/sim/strategy_of_day`): reads today's **live
+  regime** and surfaces the strategy with the best **historical** expectancy on
+  that kind of day, drawn from the ~60-session daily-backtest leaderboard (far
+  richer evidence than the young forward-test ledger). Falls back to the a-priori
+  `regimeFit` design when a regime is thin in the sample; flags a pick that only
+  wins *outside* its designed regime. The leaderboard is memoised (6h) and
+  pre-warmed in a daemon thread at startup, so the Sim-tab card is instant and the
+  cold ~30s computation never stalls the UI.
 - **All-time performance** (`/api/sim/performance`): a durable, cross-session
   scorecard — one row per strategy over the *entire* SQLite ledger, ranked by
   **expectancy (R)**, with win%, total R, realized P&L, profit factor, average
@@ -480,6 +488,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/fno/universe` | List of F&O underlyings |
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads |
 | `GET /api/sim/performance` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
+| `GET /api/sim/strategy_of_day[?days=60&universe=60]` | Today's live regime + the historically best strategy for it (memoised daily-backtest leaderboard) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
 | `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar]` | Daily-bar historical backtest over real NSE EOD (6 strategies); SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves exits on real 1-min candles |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls |

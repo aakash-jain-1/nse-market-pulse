@@ -23,12 +23,15 @@ backtest. Sizing matches the live sim: fixed RISK_PER_TRADE, outcomes in
 R-multiples.
 """
 import concurrent.futures as cf
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import db
 import intrabar
 import nse_client as nse
 import nse_quote
+import sim
 import strategies as strat
 from sim import RISK_PER_TRADE, size_position
 
@@ -65,6 +68,13 @@ STRAT_MAP = {s["id"]: s for s in STRATS}
 OI_MIN_PCT = 8.0
 OI_MIN_VOL_MULT = 1.2
 OI_MIN_RET = 0.5
+
+# Strategy-of-the-day reads today's live regime and the historical regime
+# leaderboard. The leaderboard comes from a (cheap, EOD-cached) backtest, so we
+# memoise it in-process to keep page polls from recomputing it every time.
+_SOD_TTL_S = 6 * 3600
+_sod_cache = {"key": None, "ts": 0.0, "data": None}
+_sod_lock = threading.Lock()
 
 NOT_COVERED = [
     {"id": "vwap", "name": "VWAP Trend",
@@ -723,5 +733,93 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
         "regimeDist": regime_dist,
         "gated": gated,
         "notCovered": NOT_COVERED,
+        "generatedAt": _now(),
+    }
+
+
+# ----------------------------------------------------------------------------
+# Strategy of the day — read today's LIVE regime, then surface the strategy with
+# the best HISTORICAL edge on that kind of day (from the daily-bar leaderboard).
+# ----------------------------------------------------------------------------
+def cached_regime_leaderboard(days=60, universe_size=60, resolve="daily"):
+    """Memoised regime leaderboard for strategy-of-the-day (recomputed <=1/6h)."""
+    key = (int(days), int(universe_size), resolve)
+    c = _sod_cache
+    if c["key"] == key and c["data"] and (time.time() - c["ts"]) < _SOD_TTL_S:
+        return c["data"]
+    with _sod_lock:
+        if c["key"] == key and c["data"] and (time.time() - c["ts"]) < _SOD_TTL_S:
+            return c["data"]
+        r = run(days=days, universe_size=universe_size, resolve=resolve)
+        data = {
+            "regimeLeaderboard": r.get("regimeLeaderboard") or {"order": [], "rows": []},
+            "regimeDist": r.get("regimeDist") or {},
+            "days": r.get("days"),
+            "range": r.get("range"),
+            "universeWithData": r.get("universeWithData"),
+        }
+        _sod_cache.update(key=key, ts=time.time(), data=data)
+        return data
+
+
+def strategy_of_day(days=60, universe_size=60, min_closed=5):
+    """Today's live regime + the strategy with the best historical expectancy on
+    that regime. Falls back to the a-priori regimeFit design when history is thin."""
+    try:
+        regime = sim.current_regime() or {}
+    except Exception:
+        regime = {}
+    label = regime.get("label")
+
+    try:
+        lb_data = cached_regime_leaderboard(days=days, universe_size=universe_size)
+    except Exception:
+        lb_data = {"regimeLeaderboard": {"order": [], "rows": []}, "regimeDist": {},
+                   "days": days, "range": None, "universeWithData": 0}
+    lb = lb_data["regimeLeaderboard"]
+    names = {s["id"]: s["name"] for s in STRATS}
+
+    row = next((r for r in lb.get("rows", []) if r["regime"] == label), None)
+    ranked = []
+    if row:
+        for sid in lb.get("order", []):
+            c = (row["cells"] or {}).get(sid)
+            if c and c["closed"] >= min_closed:
+                ranked.append({
+                    "id": sid, "name": names.get(sid, sid),
+                    "expectancyR": c["expectancyR"], "winRate": c["winRate"],
+                    "avgPnlPct": c["avgPnlPct"], "closed": c["closed"],
+                    "fits": label in _regime_fit(sid),
+                })
+        ranked.sort(key=lambda x: x["expectancyR"], reverse=True)
+
+    if ranked:
+        top = ranked[0]
+        pick = {**top,
+                "reason": (f"Best historical edge on {label} days: "
+                           f"{top['expectancyR']:+.2f}R/trade, {top['winRate']}% win "
+                           f"over {top['closed']} trades.")}
+        basis = "history"
+    else:
+        fit = [s for s in STRATS if label in _regime_fit(s["id"])]
+        if fit:
+            s = fit[0]
+            pick = {"id": s["id"], "name": s["name"], "expectancyR": None,
+                    "winRate": None, "closed": 0, "fits": True,
+                    "reason": (f"No {label}-day history in the sample yet — "
+                               f"{s['name']} is the strategy designed for this regime.")}
+            basis = "fit"
+        else:
+            pick, basis = None, "none"
+
+    return {
+        "regime": regime,
+        "basis": basis,
+        "pick": pick,
+        "ranked": ranked,
+        "sample": {"days": lb_data.get("days"),
+                   "universeWithData": lb_data.get("universeWithData"),
+                   "range": lb_data.get("range"),
+                   "regimeDays": (lb_data.get("regimeDist") or {}).get(label)},
         "generatedAt": _now(),
     }

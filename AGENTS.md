@@ -437,6 +437,20 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     but DISPLAY expectancy R (the backtest's headline metric). In minute mode the R
     is the intrabar-accurate one (regimeAtEntry is set pre-resolution, R updated
     after).
+    **🎯 Strategy of the day** (`strategy_of_day()`, `/api/sim/strategy_of_day`):
+    reads today's LIVE regime (`sim.current_regime()`) and returns the strategy
+    with the best HISTORICAL expectancy R on that regime, from
+    `cached_regime_leaderboard()` (a `run(days=60, universe=60)` memoised
+    in-process for `_SOD_TTL_S=6h` behind `_sod_lock`; `min_closed=5` per cell).
+    Falls back to the a-priori `regimeFit` design when the regime is thin
+    (`basis: history|fit|none`); `pick.fits` flags a pick winning OUTSIDE its
+    designed regime. Pre-warmed in a daemon thread at startup (app.py `__main__`)
+    so the first Sim-tab poll is instant — the cold ~30s compute happens in the
+    background. UI: `renderStrategyOfDay` renders a `#sodCard` hero fetched
+    SEPARATELY from the sim Promise.all (never stalls the tab), HTML cached in
+    `window._sodHtml` and re-injected/re-bound each poll. The old live-ledger pick
+    (`sim.strategy_of_the_day`) still shows, relabelled "⭐ Live forward-test
+    leader" to disambiguate.
   - **Intrabar resolution** (`intrabar.py`): the sims used to decide target/stop
     against a single LTP per cycle (60s live, 5-min backtest), which misses wicks
     and detects exits late. `intrabar.resolve(trade, bars, risk, max_sessions)`

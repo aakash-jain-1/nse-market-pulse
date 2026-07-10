@@ -249,6 +249,16 @@ def api_sim_regime():
     return jsonify(sim.current_regime())
 
 
+@app.route("/api/sim/strategy_of_day")
+def api_sim_strategy_of_day():
+    """Today's live regime + the historically best strategy for that regime."""
+    import backtest_daily as btd
+    return jsonify(btd.strategy_of_day(
+        days=int(request.args.get("days", 60)),
+        universe_size=int(request.args.get("universe", 60)),
+    ))
+
+
 @app.route("/api/sim/take", methods=["POST"])
 def api_sim_take():
     import sim
@@ -371,6 +381,13 @@ if __name__ == "__main__":
         import sim
         sim.set_auto(True)
         snaplog.start()
+        # Pre-warm the strategy-of-the-day leaderboard (a cheap, EOD-cached
+        # backtest) in a daemon thread so the Sim tab's card is ready without
+        # stalling the first poll with a cold ~30s computation.
+        import threading
+        import backtest_daily as _btd
+        threading.Thread(target=_btd.cached_regime_leaderboard,
+                         daemon=True).start()
     # threaded so a long request (e.g. a full-universe daily backtest, ~2-3 min)
     # doesn't block the dashboard's auto-refresh polling.
     app.run(debug=DEBUG, port=5055, threaded=True)
