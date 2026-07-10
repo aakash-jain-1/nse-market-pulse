@@ -232,7 +232,10 @@ forward-tested in parallel and compared against the day's **market regime**.
 > session delegates to the base strategy with the best historical edge in the
 > current regime (the strategy-of-the-day). It's a live-sim track only — excluded
 > from the daily backtest to avoid recursion — and lets you measure whether
-> "follow the regime playbook" beats any single fixed strategy over time.
+> "follow the regime playbook" beats any single fixed strategy over time. The Sim
+> tab shows a **📊 Playbook scoreboard** that puts the adaptive track's expectancy
+> head-to-head against the **average** and **best** fixed strategy, so you can see
+> at a glance whether the regime playbook is actually winning.
 
 **Regime detection** classifies each day from NIFTY %change + advance/decline
 breadth + the prior session's move:

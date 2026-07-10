@@ -1774,6 +1774,37 @@
         <div class="pick-body">${body}</div></div>`;
     }
 
+    // Playbook scoreboard: is the Regime-Adaptive track (which follows the
+    // strategy-of-the-day) actually beating the field? Computed client-side from
+    // the per-strategy cards already in the summary — no extra request.
+    function renderAdaptiveScore(sum) {
+      const cards = sum.strategies || [];
+      const ad = cards.find(s => s.id === "adaptive");
+      if (!ad) return "";
+      const head = `<div class="pick-lab">📊 Playbook scoreboard <span style="color:var(--muted);font-weight:400">· Regime-Adaptive vs the field (live forward-test)</span></div>`;
+      if (!ad.closed) {
+        return `<div class="pick">${head}<div class="pick-body">
+          <div class="pick-reason">Following today's playbook — <b>${ad.open || 0} open</b> / 0 closed so far. The head-to-head vs the field fills in as these resolve.</div>
+        </div></div>`;
+      }
+      const fixedClosed = cards.filter(s => s.id !== "adaptive" && s.closed > 0 && s.expectancyR != null);
+      const adR = ad.expectancyR;
+      const avgR = fixedClosed.length ? fixedClosed.reduce((a, s) => a + s.expectancyR, 0) / fixedClosed.length : null;
+      const best = fixedClosed.slice().sort((a, b) => b.expectancyR - a.expectancyR)[0] || null;
+      const diff = (avgR != null && adR != null) ? adR - avgR : null;
+      const verdict = diff == null ? "" :
+        (diff >= 0
+          ? `Adaptive is <b class="pos">beating</b> the average strategy by ${_sgn(diff)}${diff.toFixed(2)}R/trade.`
+          : `Adaptive is <b class="neg">lagging</b> the average strategy by ${diff.toFixed(2)}R/trade.`);
+      const beatBest = (best && adR != null && adR >= best.expectancyR)
+        ? ` And it's <b class="pos">matching/beating the best fixed strategy</b>.` : "";
+      return `<div class="pick">${head}<div class="pick-body">
+        <div class="pick-name">Regime-Adaptive <span class="${(adR||0)>=0?'pos':'neg'}" style="font-size:13px">${_sgn(adR)}${adR}R/trade</span>
+          <span style="color:var(--muted);font-size:12px;font-weight:400"> · ${ad.winRate==null?"—":ad.winRate+"%"} win · ${ad.closed} closed · ${_sgn(ad.totalPnl)}₹${fmtNum(ad.totalPnl)}</span></div>
+        <div class="pick-reason">vs field: avg fixed <b class="${(avgR||0)>=0?'pos':'neg'}">${avgR==null?"—":_sgn(avgR)+avgR.toFixed(2)+"R"}</b>${best?` · best fixed <b>${best.name}</b> ${_sgn(best.expectancyR)}${best.expectancyR}R <span style="color:var(--muted)">(hindsight)</span>`:""}. ${verdict}${beatBest}</div>
+      </div></div>`;
+    }
+
     function renderSimPick(pick) {
       if (!pick) return "";
       const meta = pick.basis === "history"
@@ -1918,7 +1949,7 @@
       const detail = sum.detail ? renderSimTrades(sum.detail)
         : `<div class="chart-note" style="margin:2px 0 6px">Click a strategy card above to see its open &amp; closed trades.</div>`;
       const sod = `<div id="sodCard">${window._sodHtml || '<div class="chart-note" style="margin:2px 0">🎯 Analyzing the last 60 sessions for today\'s best strategy…</div>'}</div>`;
-      return banner + sod + pick + cards + hint + detail + renderSimPerformance(perf) +
+      return banner + sod + renderAdaptiveScore(sum) + pick + cards + hint + detail + renderSimPerformance(perf) +
         renderSimLeaderboard(lb) + renderSimDaily(daily) +
         `<div id="btResult">${window._btHtml || ""}</div>` +
         `<div id="btDailyResult">${window._btDailyHtml || ""}</div>`;
