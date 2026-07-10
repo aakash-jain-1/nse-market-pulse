@@ -250,7 +250,10 @@ def _run_cycle():
         ctx = sim.build_ctx()
         sim.update(ctx)
         if sim.get_auto():
-            sim.take(ctx=ctx, auto=True)
+            # Two parallel books off the SAME context: the all-market 'cash' book
+            # and the dedicated 'fno' book (F&O-eligible ideas only).
+            sim.take(ctx=ctx, auto=True, book="cash")
+            sim.take(ctx=ctx, auto=True, book="fno")
         sim.daily_rollup(ctx)
         if (time.time() - _last_context_run) >= CONTEXT_INTERVAL:
             capture_context(ctx)

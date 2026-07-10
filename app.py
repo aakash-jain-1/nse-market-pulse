@@ -185,34 +185,40 @@ def api_sim_strategies():
     return jsonify({"strategies": strategies.strategy_meta()})
 
 
+def _book():
+    b = (request.args.get("book") or "cash").lower()
+    return "fno" if b == "fno" else "cash"
+
+
 @app.route("/api/sim/summary")
 def api_sim_summary():
     import sim
-    return jsonify(sim.summary(strategy_id=request.args.get("strategy")))
+    return jsonify(sim.summary(strategy_id=request.args.get("strategy"), book=_book()))
 
 
 @app.route("/api/sim/daily")
 def api_sim_daily():
     import sim
-    return jsonify({**sim.daily_matrix(), "perf": sim.daily_performance()})
+    book = _book()
+    return jsonify({**sim.daily_matrix(book=book), "perf": sim.daily_performance(book=book)})
 
 
 @app.route("/api/sim/day")
 def api_sim_day():
     import sim
-    return jsonify(sim.day_trades(request.args.get("date", "")))
+    return jsonify(sim.day_trades(request.args.get("date", ""), book=_book()))
 
 
 @app.route("/api/sim/leaderboard")
 def api_sim_leaderboard():
     import sim
-    return jsonify(sim.leaderboard_bundle())
+    return jsonify(sim.leaderboard_bundle(book=_book()))
 
 
 @app.route("/api/sim/performance")
 def api_sim_performance():
     import sim
-    return jsonify(sim.performance())
+    return jsonify(sim.performance(book=_book()))
 
 
 @app.route("/api/sim/backtest")
@@ -269,10 +275,11 @@ def api_sim_strategy_of_day():
 def api_sim_take():
     import sim
     body = request.get_json(silent=True) or {}
+    book = "fno" if (body.get("book") or "cash").lower() == "fno" else "cash"
     strat = body.get("strategy")
     ids = [strat] if strat else None
-    added = sim.take(strategy_ids=ids)
-    out = sim.summary(strategy_id=strat)
+    added = sim.take(strategy_ids=ids, book=book)
+    out = sim.summary(strategy_id=strat, book=book)
     out["added"] = added
     return jsonify(out)
 
@@ -294,8 +301,12 @@ def api_sim_mode():
 @app.route("/api/sim/reset", methods=["POST"])
 def api_sim_reset():
     import sim
-    sim.reset()
-    return jsonify(sim.summary())
+    body = request.get_json(silent=True) or {}
+    # A specific book clears only that book; omit to wipe everything + settings.
+    raw = (body.get("book") or "").lower()
+    book = "fno" if raw == "fno" else ("cash" if raw == "cash" else None)
+    sim.reset(book=book)
+    return jsonify(sim.summary(book=book or "cash"))
 
 
 @app.route("/api/paper/futures_order", methods=["POST"])

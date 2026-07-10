@@ -647,6 +647,8 @@
         desc: "Ranked LONG & SHORT setups derived from live signals (momentum, OI buildup, unusual volume, money flow), each with a conviction score, reasons and an entry/stop/target plan. Signal summary — NOT investment advice." },
       { key: "sim",        label: "🧪 Sim", title: "Recommendation Simulator — did the ideas work?",
         desc: "Forward-test of the Ideas engine: 'buy' the recommendations at their entry and track each against its own target/stop. Hit target = right, hit stop = wrong. Runs automatically from startup — Auto snapshots fresh ideas every minute during market hours (you can also Take manually). Educational — NOT advice." },
+      { key: "fnosim",     label: "🎯 F&O Sim", title: "F&O Recommendation Simulator — F&O-eligible names only",
+        desc: "The same forward-test as the Sim tab, but a dedicated parallel book that only trades F&O-eligible stocks (ones you can actually take with futures/leverage). Same strategies, same live signals, same risk-based sizing (₹2k/trade) — so you can compare F&O-only performance against the all-market book. Educational — NOT advice." },
       { key: "scanner",    label: "🔎 Scanner", title: "In-Demand Scanner",
         desc: "One ranked board combining volume spikes, money flow, momentum & OI buildup. Use the filters to hunt for exactly the setup you want." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
@@ -847,7 +849,7 @@
       document.getElementById("recoBar").style.display =
         current === "recos" ? "flex" : "none";
       document.getElementById("simBar").style.display =
-        current === "sim" ? "flex" : "none";
+        (current === "sim" || current === "fnosim") ? "flex" : "none";
       if (current !== "futures")
         document.getElementById("futMomentum").style.display = "none";
     }
@@ -1549,7 +1551,7 @@
     }
 
     function renderSimCards(sum) {
-      const sel = window._simStrategy || "";
+      const sel = ((window._simSel || {})[window._simBook || "cash"]) || "";
       return `<div class="strat-cards">` + (sum.strategies || []).map(s => {
         const wr = s.winRate == null ? "—" : s.winRate + "%";
         const wrCls = s.winRate == null ? "" : (s.winRate >= 50 ? "pos" : "neg");
@@ -1799,16 +1801,19 @@
     // Expand/collapse a day's trade drill-down. State + fetched trades live in
     // globals so they survive the Sim tab's per-poll re-render; each expand
     // re-fetches so "today" always reflects the latest closes.
+    const _inSim = () => current === "sim" || current === "fnosim";
     async function toggleDay(d) {
       if (!d) return;
+      const book = window._simBook || "cash";
+      const key = book + "|" + d;                  // drill-down is per book
       const open = window._dayOpen || (window._dayOpen = new Set());
       const cache = window._dayCache || (window._dayCache = {});
-      if (open.has(d)) { open.delete(d); if (current === "sim") load(); return; }
-      open.add(d);
-      if (current === "sim") load();               // instant: caret flips + "Loading…" placeholder
-      try { cache[d] = await fetch("/api/sim/day?date=" + encodeURIComponent(d)).then(r => r.json()); }
-      catch (e) { cache[d] = { error: String(e) }; }
-      if (current === "sim" && open.has(d)) load(); // re-render with the trades
+      if (open.has(key)) { open.delete(key); if (_inSim()) load(); return; }
+      open.add(key);
+      if (_inSim()) load();                         // instant: caret flips + "Loading…" placeholder
+      try { cache[key] = await fetch(`/api/sim/day?date=${encodeURIComponent(d)}&book=${book}`).then(r => r.json()); }
+      catch (e) { cache[key] = { error: String(e) }; }
+      if (_inSim() && open.has(key)) load();        // re-render with the trades
     }
 
     // Date-wise realized P&L across all strategies (ledger-backed, survives restarts).
@@ -1816,14 +1821,16 @@
     function renderDailyPnl(perf) {
       const rows = (perf && perf.rows) || [];
       if (!rows.length) return "";
+      const book = window._simBook || "cash";
       const todayDate = perf.today && perf.today.date;
       const open = window._dayOpen || (window._dayOpen = new Set());
       const cache = window._dayCache || (window._dayCache = {});
       const body = rows.map(r => {
+        const key = book + "|" + r.date;
         const cls = REGIME_CLS[r.regime] || "neutral";
         const ico = REGIME_ICON[r.regime] || "";
         const isToday = r.date === todayDate;
-        const isOpen = open.has(r.date);
+        const isOpen = open.has(key);
         const caret = `<span style="color:var(--muted);display:inline-block;width:12px">${isOpen ? "▾" : "▸"}</span>`;
         let tr = `<tr class="day-row" data-day="${r.date}"${isToday ? ' style="background:var(--panel-2)"' : ''}>
           <td class="day">${caret}<b>${simDT(r.date).split(",")[0]}</b>${isToday ? ' <span class="badge" style="font-size:9px;padding:1px 6px">today</span>' : ''}</td>
@@ -1835,7 +1842,7 @@
           <td class="${r.realized >= 0 ? 'pos' : 'neg'}">${_sgn(r.realized)}₹${fmtNum(Math.round(r.realized))}</td>
         </tr>`;
         if (isOpen)
-          tr += `<tr class="day-exp"><td colspan="7">${renderDayTrades(cache[r.date])}</td></tr>`;
+          tr += `<tr class="day-exp"><td colspan="7">${renderDayTrades(cache[key])}</td></tr>`;
         return tr;
       }).join("");
       return `<h3 class="reco-colhead" style="margin-top:18px">Daily P&amp;L — realized by date (all strategies)</h3>
@@ -2123,7 +2130,10 @@
 
     function renderSim(sum, daily, lb, perf) {
       const anyTrades = (sum.strategies || []).some(s => s.open || s.closed);
-      const banner = renderSimBanner(sum.regime);
+      const bookBadge = (sum.book === "fno")
+        ? `<div class="chart-note" style="margin:0 0 8px"><span class="badge" style="background:var(--accent);color:#04121f;font-weight:700;padding:2px 8px">🎯 F&amp;O BOOK</span> Dedicated parallel book — F&amp;O-eligible names only, same strategies &amp; ₹${fmtNum(sum.riskPerTrade || 2000)}/trade sizing as the all-market Sim, so the two are directly comparable.</div>`
+        : "";
+      const banner = bookBadge + renderSimBanner(sum.regime);
       const pick = renderSimPick(sum.pick);
       const cards = renderSimCards(sum);
       const hint = anyTrades ? "" :
@@ -2278,8 +2288,12 @@
 
     // Fire a toast/beep/notification when a strategy takes new ideas or a trade
     // resolves (target/stop), by diffing per-strategy counts across polls.
-    function simAlerts(sum) {
-      const prev = window._simPrev;
+    function simAlerts(sum, book) {
+      book = book || "cash";
+      const tag = book === "fno" ? "F&O · " : "";
+      window._simPrevByBook = window._simPrevByBook || {};
+      window._simAdaptivePrevByBook = window._simAdaptivePrevByBook || {};
+      const prev = window._simPrevByBook[book];
       const cur = {};
       (sum.strategies || []).forEach(s => {
         cur[s.id] = { name: s.name, open: s.open, target: s.target, stop: s.stop };
@@ -2289,29 +2303,29 @@
         (sum.strategies || []).forEach(s => {
           const p = prev[s.id]; if (!p) return;
           const dTgt = s.target - p.target, dStop = s.stop - p.stop, dOpen = s.open - p.open;
-          if (dTgt > 0) fireSimAlert(`✓ ${s.name}`, `${dTgt} trade${dTgt>1?'s':''} hit TARGET`, true);
-          if (dStop > 0) fireSimAlert(`✗ ${s.name}`, `${dStop} trade${dStop>1?'s':''} hit STOP`, false);
+          if (dTgt > 0) fireSimAlert(`✓ ${tag}${s.name}`, `${dTgt} trade${dTgt>1?'s':''} hit TARGET`, true);
+          if (dStop > 0) fireSimAlert(`✗ ${tag}${s.name}`, `${dStop} trade${dStop>1?'s':''} hit STOP`, false);
           if (dOpen > 0 && dTgt <= 0 && dStop <= 0) {
             // The adaptive track fires at a regime-driven conviction size — call
             // out a high-conviction (>=1.5x risk) burst distinctly from routine entries.
             if (s.id === "adaptive" && ad && ad.sizeMult >= 1.5)
-              fireSimAlert(`🔥 ${s.name}`,
+              fireSimAlert(`🔥 ${tag}${s.name}`,
                 `${dOpen} high-conviction bet${dOpen>1?'s':''} at ×${ad.sizeMult} risk${ad.viaName?` — following ${ad.viaName}`:""}`, null);
             else
-              fireSimAlert(`▶ ${s.name}`, `${dOpen} new idea${dOpen>1?'s':''} taken`, null);
+              fireSimAlert(`▶ ${tag}${s.name}`, `${dOpen} new idea${dOpen>1?'s':''} taken`, null);
           }
         });
         // Playbook flip: the adaptive track switched which strategy it follows
         // (a new regime rotated the strategy-of-the-day).
-        const pa = window._simAdaptivePrev;
+        const pa = window._simAdaptivePrevByBook[book];
         if (pa && ad && ad.via && pa.via && ad.via !== pa.via) {
           const mult = ad.sizeMult != null ? ` · ×${ad.sizeMult} risk` : "";
-          fireSimAlert(`🎯 Playbook flip`,
+          fireSimAlert(`🎯 ${tag}Playbook flip`,
             `${ad.regime || "?"} regime → now following ${ad.viaName || ad.via}${mult}`, null);
         }
       }
-      window._simPrev = cur;
-      if (ad) window._simAdaptivePrev = { via: ad.via, sizeMult: ad.sizeMult, regime: ad.regime };
+      window._simPrevByBook[book] = cur;
+      if (ad) window._simAdaptivePrevByBook[book] = { via: ad.via, sizeMult: ad.sizeMult, regime: ad.regime };
     }
     function fireSimAlert(title, msg, good) {
       const box = document.getElementById("toasts");
@@ -2344,25 +2358,30 @@
       const dot = document.getElementById("liveDot");
       dot.style.background = "var(--accent)";
       try {
-        if (current === "sim") {
-          const sel = window._simStrategy || "";
+        if (current === "sim" || current === "fnosim") {
+          // Two parallel books share this whole view; the tab picks which.
+          const book = current === "fnosim" ? "fno" : "cash";
+          window._simBook = book;
+          const bq = "book=" + book;
+          window._simSel = window._simSel || { cash: "", fno: "" };
+          const sel = window._simSel[book] || "";
+          const setSel = id => {
+            window._simSel[book] = (window._simSel[book] === id) ? "" : id;
+            load();
+          };
           const [sum, daily, lb, perf] = await Promise.all([
-            fetch("/api/sim/summary" + (sel ? "?strategy=" + sel : "")).then(r => r.json()),
-            fetch("/api/sim/daily").then(r => r.json()),
-            fetch("/api/sim/leaderboard").then(r => r.json()),
-            fetch("/api/sim/performance").then(r => r.json()),
+            fetch("/api/sim/summary?" + bq + (sel ? "&strategy=" + sel : "")).then(r => r.json()),
+            fetch("/api/sim/daily?" + bq).then(r => r.json()),
+            fetch("/api/sim/leaderboard?" + bq).then(r => r.json()),
+            fetch("/api/sim/performance?" + bq).then(r => r.json()),
           ]);
           document.getElementById("simAuto").checked = !!sum.auto;
           document.getElementById("simMode").value = sum.entryMode || "continuous";
-          simAlerts(sum);
+          simAlerts(sum, book);
           wrap.innerHTML = renderSim(sum, daily, lb, perf);
           // Strategy card click → select/deselect that strategy's detail.
           wrap.querySelectorAll("[data-strat]").forEach(el =>
-            el.onclick = () => {
-              const id = el.getAttribute("data-strat");
-              window._simStrategy = (window._simStrategy === id) ? "" : id;
-              load();
-            });
+            el.onclick = () => setSel(el.getAttribute("data-strat")));
           wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
             tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
           // Daily-P&L rows drill down into that day's individual trades.
@@ -2370,18 +2389,15 @@
             tr.onclick = () => toggleDay(tr.getAttribute("data-day")));
           // Strategy-of-the-day is fetched separately so a cold (first-of-session)
           // 60-day computation never stalls the tab; its HTML is cached in a global
-          // and re-injected on every poll, then re-bound for click-through.
+          // and re-injected on every poll, then re-bound for click-through. It's
+          // regime/backtest-driven (book-independent), so shared by both books.
           fetch("/api/sim/strategy_of_day").then(r => r.json()).then(sod => {
             window._sodHtml = renderStrategyOfDay(sod);
             const el = document.getElementById("sodCard");
             if (!el) return;
             el.innerHTML = window._sodHtml;
             el.querySelectorAll("[data-strat]").forEach(x =>
-              x.onclick = () => {
-                const id = x.getAttribute("data-strat");
-                window._simStrategy = (window._simStrategy === id) ? "" : id;
-                load();
-              });
+              x.onclick = () => setSel(x.getAttribute("data-strat")));
           }).catch(() => {});
           document.getElementById("futMomentum").style.display = "none";
           document.getElementById("updated").textContent =
@@ -3089,7 +3105,7 @@
       try {
         const r = await fetch("/api/sim/take", {
           method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({}),
+          body: JSON.stringify({ book: window._simBook || "cash" }),
         });
         const d = await r.json();
         const total = Object.values(d.added || {}).reduce((a, b) => a + b, 0);
@@ -3111,9 +3127,14 @@
       });
     };
     document.getElementById("simReset").onclick = async () => {
-      if (!confirm("Reset the simulator? All tracked trades across every strategy will be cleared.")) return;
-      window._simStrategy = "";
-      await fetch("/api/sim/reset", { method: "POST" });
+      const book = window._simBook || "cash";
+      const label = book === "fno" ? "the F&O book" : "the all-market (cash) book";
+      if (!confirm(`Reset ${label}? All tracked trades in this book will be cleared (the other book is untouched).`)) return;
+      window._simSel = window._simSel || {}; window._simSel[book] = "";
+      await fetch("/api/sim/reset", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ book }),
+      });
       load();
     };
     document.getElementById("simBacktest").onclick = async () => {

@@ -11,6 +11,15 @@ regime, so a day-by-day rollup shows WHICH strategy works in WHICH regime
 Kept SEPARATE from the manual paper account (`paper.py`). State persists to
 `sim_state.json` (gitignored). Educational only — NOT investment advice.
 
+Books
+-----
+Trades carry a `book` tag so two parallel portfolios run off the SAME live
+context and strategies:
+- `cash` : the all-market book (every idea) — the original sim.
+- `fno`  : only F&O-eligible ideas (idea['fno']) — a dedicated F&O book.
+Both use identical risk-based sizing, so their scorecards are directly
+comparable. All read views take a `book=` argument (default 'cash').
+
 Entry modes
 -----------
 - `continuous` : auto-take fresh qualifying ideas every cycle (deduped).
@@ -183,7 +192,7 @@ def current_regime():
 # ----------------------------------------------------------------------------
 # Trades
 # ----------------------------------------------------------------------------
-def _open_trade(idea, strategy_id, regime_label):
+def _open_trade(idea, strategy_id, regime_label, book="cash"):
     entry = idea.get("entry") or idea.get("ltp")
     if not entry:
         return None
@@ -195,8 +204,9 @@ def _open_trade(idea, strategy_id, regime_label):
     risk = round(RISK_PER_TRADE * size_mult, 2)
     qty, notional = size_position(entry, idea.get("stop"), risk=risk)
     return {
-        "id": f"{strategy_id}|{idea['symbol']}|{direction}|"
+        "id": f"{book}|{strategy_id}|{idea['symbol']}|{direction}|"
               f"{datetime.now(IST).strftime('%Y%m%d%H%M%S')}",
+        "book": book,
         "strategy": strategy_id,
         "symbol": idea["symbol"],
         "direction": direction,
@@ -372,12 +382,16 @@ def update(ctx=None):
         return state
 
 
-def take(strategy_ids=None, ctx=None, auto=False, limit=10):
+def take(strategy_ids=None, ctx=None, auto=False, limit=10, book="cash"):
     """
-    Snapshot ideas into each strategy's ledger. Dedups by (symbol, direction)
-    among that strategy's OPEN trades. Honors entry mode for AUTO calls (in
-    'open' mode, only the first take per strategy per day). Returns per-strategy
-    counts of new trades.
+    Snapshot ideas into each strategy's ledger, for one BOOK. Dedups by
+    (symbol, direction) among that strategy's trades opened today IN THAT BOOK.
+    Honors entry mode for AUTO calls (in 'open' mode, only the first take per
+    strategy per day per book). Returns per-strategy counts of new trades.
+
+    The 'fno' book takes only F&O-eligible ideas (idea['fno']) from the SAME
+    shared context — a filtered, parallel portfolio of the exact same setups,
+    so cash-vs-F&O performance is directly comparable (same risk-based sizing).
     """
     ctx = ctx or build_ctx()
     regime_label = (ctx.get("regime") or {}).get("label", "?")
@@ -389,16 +403,20 @@ def take(strategy_ids=None, ctx=None, auto=False, limit=10):
         added = {}
         new_trades = []
         for sid in ids:
-            if auto and mode == "open" and state["lastAutoDate"].get(sid) == today:
+            akey = f"{book}:{sid}"
+            if auto and mode == "open" and state["lastAutoDate"].get(akey) == today:
                 added[sid] = 0
                 continue
-            # One entry per (symbol, direction) per strategy per day: dedup against
-            # everything opened TODAY (any status), not just still-open trades.
-            # This stops continuous mode from instantly re-entering the same setup
-            # the moment a trade closes. The name is free to reappear next session.
+            # One entry per (symbol, direction) per strategy per day per book: dedup
+            # against everything opened TODAY in this book (any status), not just
+            # still-open trades. This stops continuous mode from instantly
+            # re-entering the same setup the moment a trade closes. The name is free
+            # to reappear next session.
             taken_keys = {(t["symbol"], t["direction"])
-                          for t in db.sim_trades_where(strategy=sid, opened_date=today)}
+                          for t in db.sim_trades_where(strategy=sid, opened_date=today, book=book)}
             ideas = strat.generate(sid, ctx)
+            if book == "fno":
+                ideas = [i for i in ideas if i.get("fno")]
             longs = sorted([i for i in ideas if i["direction"] == "LONG"],
                            key=lambda x: x.get("conviction", 0), reverse=True)[:limit]
             shorts = sorted([i for i in ideas if i["direction"] == "SHORT"],
@@ -408,14 +426,14 @@ def take(strategy_ids=None, ctx=None, auto=False, limit=10):
                 key = (idea["symbol"], idea["direction"])
                 if key in taken_keys:
                     continue
-                tr = _open_trade(idea, sid, regime_label)
+                tr = _open_trade(idea, sid, regime_label, book)
                 if tr:
                     new_trades.append(tr)
                     taken_keys.add(key)
                     n += 1
             added[sid] = n
             if auto and mode == "open":
-                state["lastAutoDate"][sid] = today
+                state["lastAutoDate"][akey] = today
         if new_trades:
             db.sim_insert_trades(new_trades)
         _save(state)
@@ -439,37 +457,43 @@ def daily_rollup(ctx=None):
         day["niftyLast"] = idx.get("last")
         day["priorDayMove"] = regime.get("priorDayMove")
         day["breadth"] = f"{int(regime.get('breadthAdv') or 0)}:{int(regime.get('breadthDec') or 0)}"
-        by_strat = {}
+        # Per-book × per-strategy stats for the heatmap. by[book][sid] = [trades].
+        by = {"cash": {}, "fno": {}}
         for t in db.sim_all_trades():
-            by_strat.setdefault(t["strategy"], []).append(t)
-        strat_stats = {}
-        for s in strat.STRATEGIES:
-            sid = s["id"]
-            opened = closed = wins = 0
-            realized = 0.0
-            unreal = 0.0
-            for t in by_strat.get(sid, []):
-                if t.get("openedDate") == today:
-                    opened += 1
-                if t["status"] == "OPEN":
-                    unreal += t["pnl"]
-                elif (t.get("closedAt") or "").startswith(today):
-                    closed += 1
-                    realized += t["pnl"]
-                    if t["status"] == "TARGET":
-                        wins += 1
-            strat_stats[sid] = {
-                "opened": opened, "closed": closed, "wins": wins,
-                "winRate": round(wins / closed * 100, 1) if closed else None,
-                "realized": round(realized, 2),
-                "unrealized": round(unreal, 2),
-            }
-        day["strategies"] = strat_stats
+            bk = t.get("book") or "cash"
+            by.setdefault(bk, {}).setdefault(t["strategy"], []).append(t)
+
+        def _stats_for(book_map):
+            out = {}
+            for s in strat.STRATEGIES:
+                sid = s["id"]
+                opened = closed = wins = 0
+                realized = unreal = 0.0
+                for t in book_map.get(sid, []):
+                    if t.get("openedDate") == today:
+                        opened += 1
+                    if t["status"] == "OPEN":
+                        unreal += t["pnl"]
+                    elif (t.get("closedAt") or "").startswith(today):
+                        closed += 1
+                        realized += t["pnl"]
+                        if t["status"] == "TARGET":
+                            wins += 1
+                out[sid] = {
+                    "opened": opened, "closed": closed, "wins": wins,
+                    "winRate": round(wins / closed * 100, 1) if closed else None,
+                    "realized": round(realized, 2),
+                    "unrealized": round(unreal, 2),
+                }
+            return out
+
+        day["books"] = {bk: _stats_for(by.get(bk, {})) for bk in ("cash", "fno")}
+        day["strategies"] = day["books"]["cash"]   # back-compat (cash = all-market)
         _save(state)
         return day
 
 
-def daily_performance(days=30):
+def daily_performance(days=30, book="cash"):
     """
     Date-wise P&L across ALL strategies, straight from the durable ledger — the
     'what happened today / this week' view. For each calendar day we attribute:
@@ -485,7 +509,7 @@ def daily_performance(days=30):
     the heavy reprice here would double it on a large open book.
     """
     _ensure_migrated()
-    trades = db.sim_all_trades()
+    trades = db.sim_all_trades(book=book)
     today = _today()
     ctxd = _load().get("daily", {})
 
@@ -544,7 +568,7 @@ def daily_performance(days=30):
     return {"today": today_card, "rows": rows, "riskPerTrade": RISK_PER_TRADE}
 
 
-def day_trades(date, limit=400):
+def day_trades(date, limit=400, book="cash"):
     """Individual trades for one calendar date — the drill-down behind a daily row:
     trades that CLOSED that day (the realized P&L) + trades OPENED that day that are
     still running. Trimmed to display fields, newest first, each tagged with its
@@ -553,7 +577,7 @@ def day_trades(date, limit=400):
     date = (date or "")[:10]
     names = {s["id"]: s["name"] for s in strat.STRATEGIES}
     closed, opened_open = [], []
-    for t in db.sim_all_trades():
+    for t in db.sim_all_trades(book=book):
         if t["status"] == "OPEN":
             if t.get("openedDate") == date:
                 opened_open.append(t)
@@ -585,20 +609,26 @@ def day_trades(date, limit=400):
     }
 
 
-def daily_matrix():
-    """Day × strategy comparison grid for the heatmap."""
+def daily_matrix(book="cash"):
+    """Day × strategy comparison grid for the heatmap (per book)."""
     state = _load()
     ids = [s["id"] for s in strat.STRATEGIES]
     dates = sorted(state.get("daily", {}).keys(), reverse=True)
     rows = []
     for d in dates:
         day = state["daily"][d]
+        # Prefer the per-book stats; fall back to the legacy 'strategies' blob
+        # (all-market = cash) for days logged before the book split.
+        cells_src = (day.get("books", {}) or {}).get(book)
+        if cells_src is None and book == "cash":
+            cells_src = day.get("strategies", {})
+        cells_src = cells_src or {}
         rows.append({
             "date": d,
             "regime": day.get("regime"),
             "niftyPct": day.get("niftyPct"),
             "breadth": day.get("breadth"),
-            "cells": {sid: (day.get("strategies", {}) or {}).get(sid) for sid in ids},
+            "cells": {sid: cells_src.get(sid) for sid in ids},
         })
     return {"strategies": strat.strategy_meta(), "rows": rows}
 
@@ -610,7 +640,7 @@ def daily_matrix():
 _REGIME_ORDER = ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"]
 
 
-def regime_leaderboard(min_closed=1, trades=None):
+def regime_leaderboard(min_closed=1, trades=None, book="cash"):
     """
     Aggregate every trade by (regime-at-entry × strategy): closed count, win%,
     average per-trade %, total P&L. Flags the best strategy per regime by avg %.
@@ -618,7 +648,7 @@ def regime_leaderboard(min_closed=1, trades=None):
     """
     if trades is None:
         _ensure_migrated()
-        trades = db.sim_all_trades()
+        trades = db.sim_all_trades(book=book)
     by = {}
     for t in trades:
         by.setdefault(t["strategy"], []).append(t)
@@ -725,10 +755,10 @@ def equity_curves(trades=None):
     return out
 
 
-def leaderboard_bundle():
+def leaderboard_bundle(book="cash"):
     """One call for the whole leaderboard section: table + today's pick + curves."""
     regime = current_regime()
-    trades = db.sim_all_trades()
+    trades = db.sim_all_trades(book=book)
     lb = regime_leaderboard(trades=trades)
     return {
         "regime": regime,
@@ -773,13 +803,13 @@ def _scorecard(trades):
     }
 
 
-def summary(strategy_id=None):
+def summary(strategy_id=None, book="cash"):
     """Overview scorecards + regime; plus one strategy's trade detail if asked."""
     update()
     state = _load()
     regime = current_regime()
 
-    all_trades = db.sim_all_trades()
+    all_trades = db.sim_all_trades(book=book)
     by_strat = {}
     for t in all_trades:
         by_strat.setdefault(t["strategy"], []).append(t)
@@ -796,6 +826,7 @@ def summary(strategy_id=None):
     lb = regime_leaderboard(trades=all_trades)
     out = {
         "mode": "overview",
+        "book": book,
         "auto": state.get("auto", False),
         "entryMode": state.get("entryMode", "continuous"),
         "maxSessions": state.get("maxSessions", DEFAULT_MAX_SESSIONS),
@@ -863,23 +894,28 @@ def set_entry_mode(mode):
         return mode
 
 
-def reset():
+def reset(book=None):
+    """Clear the ledger. book=None wipes everything + resets settings; a specific
+    book clears only that book's trades (settings and the other book untouched)."""
     with _lock:
-        db.sim_clear()
-        _save(_default_state())
+        if book is None:
+            db.sim_clear()
+            _save(_default_state())
+        else:
+            db.sim_clear(book=book)
 
 
 # ----------------------------------------------------------------------------
 # All-time performance (durable, cross-session)
 # ----------------------------------------------------------------------------
-def performance():
+def performance(book="cash"):
     """
     Cross-session leaderboard ranked by expectancy (R). One row per strategy plus
     a portfolio total, computed over the entire durable ledger — this is the
     'how has each strategy actually done, all-time' view.
     """
     _ensure_migrated()
-    trades = db.sim_all_trades()
+    trades = db.sim_all_trades(book=book)
     by = {}
     for t in trades:
         by.setdefault(t["strategy"], []).append(t)

@@ -320,6 +320,23 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
 
 ## Done recently
 
+- **Two parallel books — 🧪 Sim (cash) + 🎯 F&O Sim** (`book` tag on every
+  `sim_trades` row; `cash` | `fno`): both books run the SAME 10 strategies off the
+  SAME live context each cycle, but the `fno` book only takes F&O-eligible ideas
+  (`idea['fno']`, via `strategies._is_fno` = lot-size lookup). Identical risk-based
+  sizing (₹2k/trade) → the two scorecards are directly comparable. The auto loop
+  (`snapshot_logger`) calls `sim.take(..., book="cash")` **and** `sim.take(...,
+  book="fno")`. Every read view takes `book=` (default `cash`): `summary`,
+  `daily_matrix`, `daily_performance`, `day_trades`, `regime_leaderboard`,
+  `leaderboard_bundle`, `performance`. DB: `sim_all_trades/open_trades/trades_where/
+  clear/trade_count(book=)`, index `ix_sim_book`, and an `ALTER TABLE … ADD COLUMN
+  book DEFAULT 'cash'` migration (all legacy trades → cash). Trade `id` is prefixed
+  with the book so both books can hold the same setup. Routes accept `?book=fno`
+  (GET) / `{book}` (take & reset POST bodies); `reset(book)` clears just that book,
+  `reset(None)` wipes everything + settings. **UI:** a top-level **🎯 F&O Sim** tab
+  mirrors the whole Sim view for `book=fno` (`window._simBook` drives fetches +
+  per-book state: `_simSel`, `_dayOpen/_dayCache` keyed `book|date`, alert diffs in
+  `_simPrevByBook`). Adaptive/strategy-of-the-day stays backtest-driven (book-shared).
 - **Multi-strategy Sim + regime-aware daily comparison** (`strategies.py` +
   `sim.py`, 🧪 Sim tab): the Sim now forward-tests **10 strategies in parallel**,
   each with its **own ledger**, so we can see which one fits which market day.

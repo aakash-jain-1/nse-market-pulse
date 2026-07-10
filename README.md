@@ -58,6 +58,7 @@ layers analytics on top:
 | ⚡ **Futures** *(default)* | Stock futures with basis (premium/discount to spot), annualized carry, OI buildup, and a **Momentum panel** ranking the strongest bullish/bearish movers. Toggle **All F&O** to sweep the full ~215-name universe. |
 | 💡 **Ideas** | Ranked LONG & SHORT setups from live signals (momentum, OI buildup, unusual volume, money flow) — each with a conviction score, plain-English reasons, and an entry/stop/target plan. |
 | 🧪 **Sim** | The multi-strategy forward-test + regime leaderboard + offline backtest (see [below](#strategy-sim-regimes--backtest)). |
+| 🎯 **F&O Sim** | The **same** forward-test as Sim, but a dedicated **parallel book that only trades F&O-eligible names** (ones you can actually take with futures/leverage). Same strategies, same live signals, same ₹2k/trade sizing — so you can compare F&O-only performance against the all-market book side by side. |
 | 🔎 **Scanner** | One ranked board combining volume spikes, money flow, momentum & OI buildup, with filters (direction, %chg, volume ×avg, value, OI signal, F&O-only). |
 | ★ **Demand Score** | Composite ranking — stocks appearing across gainers, money-flow & volume spikes float to the top. |
 | **Volume Gainers** | Stocks trading far above their average volume. |
@@ -403,6 +404,7 @@ erDiagram
     }
     SIM_TRADES {
         text id PK
+        text book "cash | fno"
         text strategy
         text symbol
         text direction
@@ -539,13 +541,13 @@ python nse_demand.py losers     # top losers
 | `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
 | `GET /api/optionchain/<sym>[/summary]` | Full option chain / analytics (PCR, Max-Pain, Greeks) |
 | `GET /api/fno/universe` | List of F&O underlyings |
-| `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads (`/daily` also returns `perf`: date-wise realized P&L + a today card with open-book MTM) |
-| `GET /api/sim/day?date=YYYY-MM-DD` | One day's individual trades (closed that day + opened-that-day still open) — the Daily-P&L row drill-down |
-| `GET /api/sim/performance` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
+| `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads (`/daily` also returns `perf`: date-wise realized P&L + a today card with open-book MTM). All accept `?book=cash\|fno` (default `cash`) to pick the all-market vs dedicated F&O book. |
+| `GET /api/sim/day?date=YYYY-MM-DD[&book=]` | One day's individual trades (closed that day + opened-that-day still open) — the Daily-P&L row drill-down |
+| `GET /api/sim/performance[?book=]` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
 | `GET /api/sim/strategy_of_day[?days=60&universe=60]` | Today's live regime + the historically best strategy for it (memoised daily-backtest leaderboard) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
 | `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar]` | Daily-bar historical backtest over real NSE EOD (6 strategies); SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves exits on real 1-min candles |
-| `POST /api/sim/take · /auto · /mode · /reset` | Sim controls |
+| `POST /api/sim/take · /auto · /mode · /reset` | Sim controls (`take`/`reset` accept `{book}` — reset a specific book, or omit to wipe everything) |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
 | `GET /api/iv/rank/<sym>` | IV rank/percentile from logged ATM-IV history |
