@@ -419,6 +419,24 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     computed but NOT rendered in this table (multi-day holds make it wall-clock
     minutes ≈ holdDays×1440, redundant with Hold; keep it for the short-hold live
     sim).
+    **Regime leaderboard + gating:** `_regime_map(hist)` builds a per-day market
+    regime from an equal-weight proxy over the SAME fetched universe (`_median`
+    1-day move + adv/dec breadth) classified by `_classify_regime` (identical
+    thresholds to `strategies.detect_regime`, so labels match the live sim: Trend-Up
+    / Recovery / Range / Pullback / Mixed / Trend-Down). Every trade gets
+    `regimeAtEntry` = the label of its `openedDate`. `_regime_leaderboard(all_trades)`
+    → regime × strategy matrix of expectancy R / win% / count with the best strategy
+    per regime (≥3 samples) — pure attribution, NO look-ahead. `_gated(by_strat)`
+    applies an **a-priori** gate: keep only trades whose entry regime is in the
+    strategy's `strategies.STRATEGY_MAP[sid]["regimeFit"]` (designed by trading
+    logic, not fit to this window) and reports per-strategy all-vs-in-fit plus the
+    combined gated portfolio, so Δ is an honest "does trading only your regime
+    help?". `run()` adds `regimeLeaderboard` + `regimeDist` (days per regime in the
+    window) + `gated`; the UI renders both (`renderDailyRegime`, reuses
+    `REGIME_CLS`/`REGIME_ICON`/`heatColor`). Leaderboard cells colour by avgPnlPct
+    but DISPLAY expectancy R (the backtest's headline metric). In minute mode the R
+    is the intrabar-accurate one (regimeAtEntry is set pre-resolution, R updated
+    after).
   - **Intrabar resolution** (`intrabar.py`): the sims used to decide target/stop
     against a single LTP per cycle (60s live, 5-min backtest), which misses wicks
     and detects exits late. `intrabar.resolve(trade, bars, risk, max_sessions)`

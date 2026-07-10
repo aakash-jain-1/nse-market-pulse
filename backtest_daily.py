@@ -29,6 +29,7 @@ import db
 import intrabar
 import nse_client as nse
 import nse_quote
+import strategies as strat
 from sim import RISK_PER_TRADE, size_position
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -467,6 +468,115 @@ def _median(xs):
     return xs[len(xs) // 2] if xs else None
 
 
+# ----------------------------------------------------------------------------
+# Market regime per trading day. We have no historical NIFTY feed here, so we
+# build an equal-weight proxy from the SAME universe we already fetched: the
+# median 1-day move + advance/decline breadth, classified with the identical
+# thresholds as the live detector (strategies.detect_regime) so the labels line
+# up. Every trade is then tagged with the regime of its ENTRY day.
+# ----------------------------------------------------------------------------
+_REGIME_ORDER = ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"]
+
+
+def _classify_regime(today, adv, dec, prior):
+    if today is None:
+        return "Unknown"
+    if prior is not None and prior <= -1.0 and today >= 0.3:
+        return "Recovery"
+    if prior is not None and prior >= 1.0 and today <= -0.3:
+        return "Pullback"
+    if today >= 0.6 and adv >= dec:
+        return "Trend-Up"
+    if today <= -0.6 and dec >= adv:
+        return "Trend-Down"
+    if abs(today) <= 0.4:
+        return "Range"
+    return "Mixed"
+
+
+def _regime_map(hist):
+    """date -> {label, mktPct, adv, dec, priorPct} via an equal-weight proxy."""
+    rets = {}
+    for bars in hist.values():
+        for i in range(1, len(bars)):
+            pc, c = bars[i - 1]["close"], bars[i]["close"]
+            if pc and c:
+                rets.setdefault(bars[i]["d"], []).append((c / pc - 1) * 100)
+    out, prior = {}, None
+    for d in sorted(rets):
+        vals = rets[d]
+        mkt = _median(vals)
+        adv = sum(1 for r in vals if r > 0)
+        dec = sum(1 for r in vals if r < 0)
+        out[d] = {"label": _classify_regime(mkt, adv, dec, prior),
+                  "mktPct": round(mkt, 2) if mkt is not None else None,
+                  "adv": adv, "dec": dec,
+                  "priorPct": round(prior, 2) if prior is not None else None}
+        prior = mkt
+    return out
+
+
+def _regime_leaderboard(trades):
+    """Matrix regime × strategy → expectancy/win%/count; best strategy per regime
+    (by expectancy R, needs >=3 samples). Pure attribution — no look-ahead."""
+    ids = [s["id"] for s in STRATS]
+    agg, regimes = {}, set()
+    for t in trades:
+        if t["status"] == "OPEN":
+            continue
+        rg = t.get("regimeAtEntry") or "?"
+        regimes.add(rg)
+        a = agg.setdefault((rg, t["strategy"]),
+                           {"closed": 0, "wins": 0, "r": 0.0, "pctSum": 0.0})
+        a["closed"] += 1
+        if t["status"] == "TARGET":
+            a["wins"] += 1
+        a["r"] += t.get("rMultiple") or 0.0
+        a["pctSum"] += t.get("pnlPct") or 0.0
+    ordered = ([r for r in _REGIME_ORDER if r in regimes] +
+               sorted(r for r in regimes if r not in _REGIME_ORDER))
+    rows = []
+    for rg in ordered:
+        cells, best_sid, best_val, n_rg = {}, None, None, 0
+        for sid in ids:
+            a = agg.get((rg, sid))
+            if not a or not a["closed"]:
+                cells[sid] = None
+                continue
+            n = a["closed"]
+            n_rg += n
+            exp = a["r"] / n
+            cells[sid] = {"closed": n,
+                          "winRate": round(a["wins"] / n * 100, 1),
+                          "avgPnlPct": round(a["pctSum"] / n, 2),
+                          "expectancyR": round(exp, 2),
+                          "totalR": round(a["r"], 2)}
+            if n >= 3 and (best_val is None or exp > best_val):
+                best_val, best_sid = exp, sid
+        rows.append({"regime": rg, "best": best_sid, "closed": n_rg, "cells": cells})
+    return {"order": ids, "rows": rows}
+
+
+def _regime_fit(sid):
+    return set((strat.STRATEGY_MAP.get(sid) or {}).get("regimeFit") or [])
+
+
+def _gated(by_strat):
+    """A-priori affinity gate: keep only trades whose ENTRY regime is in the
+    strategy's DESIGNED regimeFit (trading logic, NOT fit to this window). Reports
+    per-strategy all-vs-in-fit and the combined gated portfolio."""
+    per, kept = [], []
+    for s in STRATS:
+        sid = s["id"]
+        fit = _regime_fit(sid)
+        ts = by_strat.get(sid, [])
+        in_fit = [t for t in ts if t.get("regimeAtEntry") in fit]
+        kept += in_fit
+        per.append({"id": sid, "name": s["name"], "fit": sorted(fit),
+                    "all": _scorecard(ts), "gated": _scorecard(in_fit)})
+    return {"perStrategy": per, "portfolio": _scorecard(kept)}
+
+
 def _scorecard(trades):
     closed = [t for t in trades if t["status"] in ("TARGET", "STOP", "EXPIRED")]
     wins = [t for t in closed if t["status"] == "TARGET"]
@@ -539,10 +649,12 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
     last_dt = datetime.strptime(last_iso, "%Y-%m-%d")
     cutoff_iso = (last_dt - timedelta(days=days)).strftime("%Y-%m-%d")
 
+    day_regime = _regime_map(hist)
     by_strat = {s["id"]: [] for s in STRATS}
     first_iso = last_iso
     for sym, bars in hist.items():
         for t in _backtest_symbol(bars, ois.get(sym, {}), cutoff_iso, max_hold):
+            t["regimeAtEntry"] = (day_regime.get(t["openedDate"]) or {}).get("label", "?")
             by_strat[t["strategy"]].append(t)
             if t["openedDate"] < first_iso:
                 first_iso = t["openedDate"]
@@ -582,6 +694,13 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
     rows.sort(key=lambda r: (r["expectancyR"] if r["expectancyR"] is not None else -1e9),
               reverse=True)
 
+    regime_lb = _regime_leaderboard(all_trades)
+    gated = _gated(by_strat)
+    regime_dist = {}
+    for d, r in day_regime.items():
+        if d >= cutoff_iso:
+            regime_dist[r["label"]] = regime_dist.get(r["label"], 0) + 1
+
     bars_counts = [len(b) for b in hist.values()]
     return {
         "mode": "daily",
@@ -600,6 +719,9 @@ def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
                   "store": db.eod_stats()},
         "strategies": rows,
         "totals": _scorecard(all_trades),
+        "regimeLeaderboard": regime_lb,
+        "regimeDist": regime_dist,
+        "gated": gated,
         "notCovered": NOT_COVERED,
         "generatedAt": _now(),
     }

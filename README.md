@@ -303,6 +303,18 @@ flowchart LR
     resolved on candles vs fell back. It typically **confirms** the daily numbers
     (stop/target far enough apart that same-day both-touch is rare), so it's a
     fidelity/validation toggle.
+  - **Regime leaderboard + gating**: every trade is tagged with the **market
+    regime of its entry day** (Trend-Up / Recovery / Range / Pullback / Mixed /
+    Trend-Down), derived from an equal-weight proxy over the fetched universe
+    (median 1-day move + advance/decline breadth) classified with the same
+    thresholds as the live detector. A regime × strategy matrix shows each
+    strategy's **expectancy per regime** (⭐ = best in that regime) — the direct
+    answer to "which strategy works on which kind of day". A **regime-gated** view
+    then keeps only each strategy's trades whose entry regime is in its **designed
+    `regimeFit`** (a-priori, *not* fit to this window) and compares the gated
+    portfolio's expectancy to taking every trade — an honest read on whether "only
+    trade your regime" adds edge. (On the recent choppy window it lifts the
+    combined book from ≈−0.02R to ≈+0.05R.)
 - **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
   entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
 

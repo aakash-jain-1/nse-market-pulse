@@ -1963,7 +1963,72 @@
         </tr></thead><tbody>${rows}${totRow}</tbody></table>
         <div class="chart-note" style="margin-top:8px">📊 <b>How to read it:</b> <b>Tgt%</b> = ran to the full target; <b>Profit%</b> = ended positive (many trades time-expire in partial profit, so Profit% ≫ Tgt%). <b>Exp. R</b> is the real edge (avg R/trade); <b>Realized ₹</b> just sums every trade at ₹${fmtNum(bt.riskPerTrade)} risk — it's <i>not</i> a portfolio you'd hold (you'd never run all these at once), so judge by Exp. R, not the rupee total. <b>MFE/MAE</b> = avg best/worst excursion: a big MFE with low Tgt% means winners give it back (exit sooner / trail), while MAE hugging the stop means stops are getting tagged.</div>
         <div class="chart-note" style="margin-top:6px">⚠️ <b>Daily-bar approximation</b>, not the exact intraday logic: entries at the signal day's <b>close</b>, exits resolved on subsequent daily high/low (a bar piercing both stop &amp; target counts as a <b>stop</b>). A small liquid sample over a short window — read it as directional, not statistically final. Not covered here: ${nc}. The live sim (auto, every session) accumulates the pure, intrabar-accurate version over time.</div>
+        ${renderDailyRegime(bt)}
       </div>`;
+    }
+
+    // Regime attribution for the daily backtest: which strategy works on which
+    // kind of day, plus an a-priori "trade only your designed regime" gate.
+    function renderDailyRegime(bt) {
+      const lb = bt.regimeLeaderboard, g = bt.gated;
+      if (!lb || !g || !(lb.rows || []).length) return "";
+      const dist = bt.regimeDist || {};
+      const nameById = {};
+      (bt.strategies || []).forEach(s => nameById[s.id] = s.name);
+      const shortName = id => (nameById[id] || id).split(" ")[0];
+      const ids = lb.order || [];
+
+      const head = `<tr><th class="day">Regime</th>` +
+        ids.map(id => `<th>${shortName(id)}<br><span style="color:var(--muted);font-weight:400;font-size:10px">${id}</span></th>`).join("") + `</tr>`;
+      const body = (lb.rows || []).map(r => {
+        const cls = REGIME_CLS[r.regime] || "neutral";
+        const ico = REGIME_ICON[r.regime] || "";
+        const days = dist[r.regime] != null ? ` <span style="color:var(--muted);font-size:10px">${dist[r.regime]}d</span>` : "";
+        const rgCell = `<td class="day"><span class="rgm-badge ${cls}" style="font-size:11px">${ico} ${r.regime || "?"}</span>${days}</td>`;
+        const cells = ids.map(id => {
+          const c = r.cells[id];
+          if (!c) return `<td><span class="cell" style="${heatColor(null)}">—</span></td>`;
+          const star = r.best === id ? "⭐ " : "";
+          const border = r.best === id ? "box-shadow:0 0 0 1.5px var(--accent) inset;" : "";
+          const label = `${star}${_sgn(c.expectancyR)}${c.expectancyR}R<br><span style="opacity:.7;font-size:10px">${c.winRate}% · ${c.closed}t</span>`;
+          return `<td><span class="cell" style="${heatColor(c.avgPnlPct, 'pnl')}${border}">${label}</span></td>`;
+        }).join("");
+        return `<tr>${rgCell}${cells}</tr>`;
+      }).join("");
+
+      const grows = (g.perStrategy || []).map(p => {
+        const a = p.all, gd = p.gated;
+        const dImp = (gd.expectancyR != null && a.expectancyR != null) ? (gd.expectancyR - a.expectancyR) : null;
+        return `<tr>
+          <td class="sym">${p.name}</td>
+          <td style="color:var(--muted);font-size:11px">${(p.fit || []).join(", ") || "—"}</td>
+          <td>${a.closed}</td>
+          <td class="${(a.expectancyR||0)>=0?'pos':'neg'}">${a.expectancyR==null?"—":_sgn(a.expectancyR)+a.expectancyR+"R"}</td>
+          <td>${gd.closed}</td>
+          <td class="${(gd.expectancyR||0)>=0?'pos':'neg'}">${gd.expectancyR==null?"—":_sgn(gd.expectancyR)+gd.expectancyR+"R"}</td>
+          <td class="${(dImp||0)>=0?'pos':'neg'}">${dImp==null?"—":_sgn(dImp)+dImp.toFixed(2)+"R"}</td></tr>`;
+      }).join("");
+      const pf = g.portfolio || {}, tot = bt.totals || {};
+      const pfImp = (pf.expectancyR != null && tot.expectancyR != null) ? (pf.expectancyR - tot.expectancyR) : null;
+      const growTot = `<tr style="border-top:2px solid var(--border);font-weight:600">
+        <td class="sym">Gated portfolio</td><td style="color:var(--muted);font-size:11px">in-fit only</td>
+        <td>${tot.closed||0}</td>
+        <td class="${(tot.expectancyR||0)>=0?'pos':'neg'}">${tot.expectancyR==null?"—":_sgn(tot.expectancyR)+tot.expectancyR+"R"}</td>
+        <td>${pf.closed||0}</td>
+        <td class="${(pf.expectancyR||0)>=0?'pos':'neg'}">${pf.expectancyR==null?"—":_sgn(pf.expectancyR)+pf.expectancyR+"R"}</td>
+        <td class="${(pfImp||0)>=0?'pos':'neg'}">${pfImp==null?"—":_sgn(pfImp)+pfImp.toFixed(2)+"R"}</td></tr>`;
+
+      return `<h3 class="reco-colhead" style="margin-top:18px">🧭 Regime leaderboard — which strategy works on which kind of day</h3>
+        <table class="tbl heat"><thead>${head}</thead><tbody>${body}</tbody></table>
+        <div class="chart-note">Each cell = that strategy's <b>expectancy (avg R/trade)</b> on days of that regime (win% · #trades). ⭐ = best in the regime (≥3 trades). Regime is an <b>equal-weight F&amp;O proxy</b> — median 1-day move + advance/decline breadth, classified with the live detector's thresholds; the <b>Nd</b> next to each label is how many days in the window were that regime.</div>
+        <h3 class="reco-colhead" style="margin-top:16px">Regime-gated — trade each strategy only on its designed regime</h3>
+        <table class="tbl"><thead><tr>
+          <th>Strategy</th><th title="The strategy's designed regimes (a-priori, from strategies.regimeFit — NOT fit to this window)">Designed for</th>
+          <th title="All trades, any regime">All #</th><th>All Exp.R</th>
+          <th title="Only trades whose entry-day regime is in the strategy's designed set">Fit #</th><th>Fit Exp.R</th>
+          <th title="Fit minus all — does trading only the designed regime help?">Δ</th>
+        </tr></thead><tbody>${grows}${growTot}</tbody></table>
+        <div class="chart-note">The gate is <b>a-priori</b> — each strategy's designed regimes, decided by trading logic (<i>not</i> curve-fit to this window) — so Δ is an honest read on "only trade your regime." The <b>Gated portfolio</b> row compares taking <i>every</i> trade vs only the in-fit ones. The matrix above is pure attribution (no look-ahead): read it to confirm whether, e.g., momentum really does best on Trend-Up days and mean-reversion on Recovery days.</div>`;
     }
 
     // Fire a toast/beep/notification when a strategy takes new ideas or a trade
