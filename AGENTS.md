@@ -309,23 +309,35 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
 ## Done recently
 
 - **Multi-strategy Sim + regime-aware daily comparison** (`strategies.py` +
-  `sim.py`, 🧪 Sim tab): the Sim now forward-tests **4 strategies in parallel**,
+  `sim.py`, 🧪 Sim tab): the Sim now forward-tests **10 strategies in parallel**,
   each with its **own ledger**, so we can see which one fits which market day.
-  - **Strategies** (`strategies.py`, 9): `momentum` (the original multi-signal
+  - **Strategies** (`strategies.py`, 10): `momentum` (the original multi-signal
     engine), `oi_smart` (F&O OI positioning), `meanrev` (contrarian oversold
     bounce / fade), `vol_breakout` (≥5× volume explosions), `high52w`
     (nearness-to-52-week-high momentum, George-Hwang), `vwap` (price vs the
     day's cumulative VWAP), `delivery` (high delivery% = accumulation/
     distribution), `orb` (Opening-Range Breakout: break of the 09:15-09:30 range
     with volume), `ivwap` (Intraday VWAP Reclaim: true session VWAP from minute
-    candles). Each is `{id,name,description,regimeFit,generate(ctx)}` returning
-    ideas in `_build_idea` shape. `build_context()` fetches all live lists ONCE —
+    candles), `adaptive` (**Regime-Adaptive meta-strategy** — see below). Each is
+    `{id,name,description,regimeFit,generate(ctx)}` returning ideas in
+    `_build_idea` shape. `build_context()` fetches all live lists ONCE —
     including a bounded, concurrent per-symbol quote fetch (`ctx["quotes"]`, ~45
     liquid names, feeds VWAP/52wH/delivery) AND 5-min candles for the same set
     (`ctx["candles"]`, feeds orb/ivwap) — and every generator reuses it.
     **`orb`/`ivwap` need `ctx["candles"]`, which is NOT archived in `context_log`
     (`_trim_context`), so they run in the live forward-sim but are inert in the
     offline backtest.**
+  - **Regime-Adaptive** (`gen_adaptive` + `_regime_playbook_pick`): a
+    meta-strategy that generates no signals itself — each session it delegates to
+    the base strategy with the best HISTORICAL edge in today's regime (the
+    strategy-of-the-day), tagging each idea's `reasons` with the playbook choice.
+    The pick uses `backtest_daily.peek_regime_leaderboard()` (a NON-blocking cache
+    read — lazy import to dodge the `strategies`↔`backtest_daily` cycle; never
+    triggers a cold compute in the per-minute hot path), falling back to the first
+    strategy whose `regimeFit` covers the regime. It's a LIVE-sim track only —
+    deliberately absent from `backtest_daily.STRATS` so `cached_regime_leaderboard`
+    → `run()` can't recurse — and forward-tests whether "follow the playbook" beats
+    any single fixed strategy.
   - **Regime detector** (`detect_regime`): tags each day Trend-Up / Trend-Down /
     Recovery / Pullback / Range / Mixed from NIFTY %change + advance-decline
     breadth (`nse.get_index_snapshot()` → `/api/allIndices`, cached 30s) + the

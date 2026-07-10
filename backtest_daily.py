@@ -762,6 +762,15 @@ def cached_regime_leaderboard(days=60, universe_size=60, resolve="daily"):
         return data
 
 
+def peek_regime_leaderboard():
+    """Return the memoised leaderboard only if fresh — never computes. For the
+    hot path (per-minute idea generation) so it can't block on a cold backtest."""
+    c = _sod_cache
+    if c["data"] and (time.time() - c["ts"]) < _SOD_TTL_S:
+        return c["data"]
+    return None
+
+
 def strategy_of_day(days=60, universe_size=60, min_closed=5):
     """Today's live regime + the strategy with the best historical expectancy on
     that regime. Falls back to the a-priori regimeFit design when history is thin."""

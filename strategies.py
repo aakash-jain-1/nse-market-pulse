@@ -548,6 +548,51 @@ def gen_ivwap(ctx):
     return ideas
 
 
+def _regime_playbook_pick(regime_label):
+    """Which base strategy to follow in this regime: the historical best from the
+    daily-backtest leaderboard when it's warm, else the first strategy DESIGNED
+    for the regime (a-priori). Never triggers a (blocking) backtest compute."""
+    if regime_label:
+        try:
+            import backtest_daily as btd
+            data = btd.peek_regime_leaderboard()
+            if data:
+                lb = data.get("regimeLeaderboard") or {}
+                row = next((r for r in lb.get("rows", [])
+                            if r.get("regime") == regime_label), None)
+                if row and row.get("best"):
+                    return row["best"], "history"
+        except Exception:
+            pass
+        for s in STRATEGIES:
+            if s["id"] != "adaptive" and regime_label in s.get("regimeFit", []):
+                return s["id"], "fit"
+    return None, None
+
+
+def gen_adaptive(ctx):
+    """J — Regime-Adaptive: each session delegate to the strategy with the best
+    historical edge in today's regime (the strategy-of-the-day). This is the
+    sim's 'follow the playbook' track — it measures whether regime-switching
+    beats any single fixed strategy over time."""
+    regime_label = (ctx.get("regime") or {}).get("label")
+    sid, basis = _regime_playbook_pick(regime_label)
+    if not sid or sid == "adaptive":
+        return []
+    meta = STRATEGY_MAP.get(sid)
+    if not meta:
+        return []
+    lead = (f"Regime playbook: {regime_label} day → {meta['name']}"
+            + (" (best historical edge)" if basis == "history" else " (designed fit)"))
+    ideas = []
+    for idea in (meta["generate"](ctx) or []):
+        merged = dict(idea)
+        merged["reasons"] = [lead] + list(idea.get("reasons", []))
+        merged["via"] = sid
+        ideas.append(merged)
+    return ideas
+
+
 STRATEGIES = [
     {"id": "momentum", "name": "Multi-Signal Momentum",
      "description": "Go with today's move when confirmed by unusual volume + OI buildup + breadth (1:2 RR).",
@@ -576,6 +621,10 @@ STRATEGIES = [
     {"id": "ivwap", "name": "Intraday VWAP Reclaim",
      "description": "True session VWAP from minute candles: holding above + rising = LONG, rejected below + falling = SHORT.",
      "regimeFit": ["Trend-Up", "Trend-Down"], "generate": gen_ivwap},
+    {"id": "adaptive", "name": "Regime-Adaptive",
+     "description": "Follows the playbook: each session delegates to the strategy with the best historical edge in today's regime (the strategy-of-the-day). Measures whether regime-switching beats any single fixed strategy.",
+     "regimeFit": ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"],
+     "generate": gen_adaptive},
 ]
 
 STRATEGY_MAP = {s["id"]: s for s in STRATEGIES}

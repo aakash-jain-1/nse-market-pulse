@@ -39,7 +39,8 @@ layers analytics on top:
 - a **composite demand score** and a filterable **scanner**,
 - an **Ideas engine** that turns signals into LONG/SHORT setups with entry / stop
   / target,
-- a **library of 9 named strategies**, each forward-tested in its **own parallel
+- a **library of 10 named strategies** (incl. a **regime-adaptive** meta-strategy
+  that follows the strategy-of-the-day), each forward-tested in its **own parallel
   simulation** and compared **day-by-day against the market regime**,
 - an **offline backtester** that replays those strategies over archived data,
 - **paper trading** for equities, futures (margin/leverage) and options (lot-size
@@ -208,7 +209,7 @@ sequenceDiagram
 The **Sim** tab turns the Ideas engine into a **library of strategies**, each
 forward-tested in parallel and compared against the day's **market regime**.
 
-**The 9 strategies** (`strategies.py`):
+**The 10 strategies** (`strategies.py`):
 
 | id | Name | Edge |
 |---|---|---|
@@ -221,10 +222,17 @@ forward-tested in parallel and compared against the day's **market regime**.
 | `delivery` | Delivery% Accumulation | High delivery % = real conviction (accumulation/distribution) |
 | `orb` | Opening-Range Breakout | Break of the first 15-min range (09:15–09:30) with volume (minute candles) |
 | `ivwap` | Intraday VWAP Reclaim | True session VWAP from minute candles: hold above/reject below |
+| `adaptive` | Regime-Adaptive | Meta-strategy: each session **follows the strategy-of-the-day** — delegates to whichever base strategy has the best historical edge in today's regime |
 
 > `orb` and `ivwap` need minute candles (`ctx["candles"]`), so they run in the
 > live forward-sim; they're inert in the offline backtest, which replays the
 > trimmed `context_log` (candles aren't archived).
+>
+> `adaptive` is a **meta-strategy**: it generates no signals of its own but each
+> session delegates to the base strategy with the best historical edge in the
+> current regime (the strategy-of-the-day). It's a live-sim track only — excluded
+> from the daily backtest to avoid recursion — and lets you measure whether
+> "follow the regime playbook" beats any single fixed strategy over time.
 
 **Regime detection** classifies each day from NIFTY %change + advance/decline
 breadth + the prior session's move:
@@ -505,7 +513,7 @@ nse-market-pulse/
 ├── app.py                  # Flask server + JSON API (thin routes) — port 5055
 ├── nse_client.py           # NSE session mgmt + hot lists + scanner + ideas (CORE)
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
-├── strategies.py           # 9 strategy generators + market-regime detector
+├── strategies.py           # 10 strategy generators (incl. regime-adaptive) + regime detector
 ├── sim.py                  # Multi-strategy forward-tester + regime leaderboard
 ├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
 ├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
