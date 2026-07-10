@@ -406,6 +406,16 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     `sim_trades` ledger — expectancy R, total R, win%, realized ₹, profit factor,
     avg hold (mins), #trading-days — plus a portfolio total. Ranked by expectancy
     R. This is the durable cross-session scorecard (survives restarts).
+  - **Daily P&L / "Today"** (`sim.daily_performance()`, folded into
+    `/api/sim/daily` as `perf`): ledger-backed date-wise realized P&L across ALL
+    strategies — per day: trades opened (by `openedDate`), trades CLOSED that day
+    (by `closedDay`/`closedAt`) with realized ₹, summed R and target/stop/expiry
+    split. The `today` card also carries the whole live open book + its unrealised
+    MTM (open MTM is 'now', not a past day). Regime/NIFTY per day merged from the
+    rollup log. Renders as a prominent **📅 Today** card near the top of the Sim tab
+    + a **Daily P&L by date** table above the win-rate heatmap. Deliberately does
+    NOT call `update()` (summary()'s per-poll reprice already refreshes open MTM —
+    repeating it would double a heavy sweep on a big open book).
   - **UI**: regime banner, ⭐ strategy-of-the-day card, strategy cards (click to
     expand that strategy's open/closed tables), the **regime leaderboard** grid
     (+ equity sparklines), and the daily comparison heatmap. **Sim alerts** toast/

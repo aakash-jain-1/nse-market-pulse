@@ -312,6 +312,12 @@ flowchart LR
   **expectancy (R)**, with win%, total R, realized P&L, profit factor, average
   hold and #trading-days, plus a portfolio total. Survives restarts and
   accumulates every session (the ledger lives in `db.sim_trades`, not JSON).
+- **Daily P&L / "Today"** (`/api/sim/daily` → `perf`): a **📅 Today** card at the
+  top of the Sim tab plus a **date-wise P&L table** — for each day, how many trades
+  were opened, how many *closed* that day, the win%, and the realized **R** and **₹**
+  (a trade counts on the day it closes). The Today card also shows the live open
+  book and its unrealised mark-to-market, so you can see *what happened today* at a
+  glance. Ledger-backed, so it survives restarts.
 - **Offline backtest** (`/api/sim/backtest[?resolve=intrabar|ltp]`): replays the
   *same* generators over archived `context_log`, opening trades from the context
   and resolving exits on real minute candles — no need to wait for live days once
@@ -530,7 +536,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
 | `GET /api/optionchain/<sym>[/summary]` | Full option chain / analytics (PCR, Max-Pain, Greeks) |
 | `GET /api/fno/universe` | List of F&O underlyings |
-| `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads |
+| `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads (`/daily` also returns `perf`: date-wise realized P&L + a today card with open-book MTM) |
 | `GET /api/sim/performance` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
 | `GET /api/sim/strategy_of_day[?days=60&universe=60]` | Today's live regime + the historically best strategy for it (memoised daily-backtest leaderboard) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |

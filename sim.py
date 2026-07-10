@@ -469,6 +469,81 @@ def daily_rollup(ctx=None):
         return day
 
 
+def daily_performance(days=30):
+    """
+    Date-wise P&L across ALL strategies, straight from the durable ledger — the
+    'what happened today / this week' view. For each calendar day we attribute:
+      • opened  — trades entered that day (by openedDate)
+      • closed  — trades that RESOLVED that day (by closedDay/closedAt), with the
+                  realized P&L, R-multiple sum and target/stop/expiry split
+    Plus a `today` card that also carries the whole live open book + its unrealised
+    mark-to-market (open MTM belongs to 'now', not to any past day). Regime / NIFTY
+    context per day is merged from the rollup log when available.
+
+    Note: does NOT call update() — open-trade MTM is kept fresh by summary()'s
+    per-poll update (fetched together in the UI) and by the Auto loop; repeating
+    the heavy reprice here would double it on a large open book.
+    """
+    _ensure_migrated()
+    trades = db.sim_all_trades()
+    today = _today()
+    ctxd = _load().get("daily", {})
+
+    agg = {}
+
+    def bucket(d):
+        return agg.setdefault(d, {
+            "date": d, "opened": 0, "closed": 0, "wins": 0, "stops": 0,
+            "expired": 0, "realized": 0.0, "realizedR": 0.0,
+        })
+
+    open_now, unreal = 0, 0.0
+    for t in trades:
+        od = t.get("openedDate")
+        if od:
+            bucket(od)["opened"] += 1
+        if t["status"] == "OPEN":
+            open_now += 1
+            unreal += t.get("pnl") or 0.0
+            continue
+        cd = ((t.get("closedDay") or "")[:10]
+              or (t.get("closedAt") or "")[:10] or od)
+        if not cd:
+            continue
+        b = bucket(cd)
+        b["closed"] += 1
+        b["realized"] += t.get("pnl") or 0.0
+        b["realizedR"] += t.get("rMultiple") or 0.0
+        st = t["status"]
+        if st == "TARGET":
+            b["wins"] += 1
+        elif st == "STOP":
+            b["stops"] += 1
+        else:
+            b["expired"] += 1
+
+    def finish(b):
+        c = ctxd.get(b["date"], {}) or {}
+        return {
+            **b,
+            "realized": round(b["realized"], 2),
+            "realizedR": round(b["realizedR"], 2),
+            "winRate": round(b["wins"] / b["closed"] * 100, 1) if b["closed"] else None,
+            "regime": c.get("regime"),
+            "niftyPct": c.get("niftyPct"),
+        }
+
+    rows = [finish(agg[d]) for d in sorted(agg, reverse=True)[:days]]
+
+    tb = agg.get(today) or bucket(today)
+    today_card = {
+        **finish(tb),
+        "openNow": open_now,
+        "unrealized": round(unreal, 2),
+    }
+    return {"today": today_card, "rows": rows, "riskPerTrade": RISK_PER_TRADE}
+
+
 def daily_matrix():
     """Day × strategy comparison grid for the heatmap."""
     state = _load()

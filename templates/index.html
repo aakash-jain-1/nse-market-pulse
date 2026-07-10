@@ -711,10 +711,12 @@
     // "2026-07-09 11:05:00" -> "09 Jul, 11:05" (sim uses IST strings from server)
     function simDT(s) {
       if (!s) return "—";
-      const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(s);
-      if (!m) return s;
-      const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m[2]-1];
-      return `${m[3]} ${mon}, ${m[4]}:${m[5]}`;
+      const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      let m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(s);
+      if (m) return `${m[3]} ${MON[+m[2]-1]}, ${m[4]}:${m[5]}`;
+      m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+      if (m) return `${m[3]} ${MON[+m[2]-1]}`;
+      return s;
     }
     const fmtNum = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");
     const fmtPrice = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
@@ -1721,10 +1723,63 @@
                     : "background:rgba(255,92,104,.15);color:#ffc2c7";
     }
 
+    // A prominent "what happened today" card: realized ₹/R from trades that closed
+    // today, entries taken today, and the live open book + its mark-to-market.
+    function renderTodayCard(perf) {
+      if (!perf || !perf.today) return "";
+      const t = perf.today;
+      const head = `<div class="pick-lab">📅 Today <span style="color:var(--muted);font-weight:400">· ${simDT(t.date).split(",")[0]}${t.regime ? " · " + (REGIME_ICON[t.regime] || "") + " " + t.regime : ""}</span></div>`;
+      if (!t.opened && !t.closed && !t.openNow)
+        return `<div class="pick">${head}<div class="pick-body"><div class="pick-reason" style="color:var(--muted)">No sim activity yet today — Auto snapshots ideas every minute during market hours (09:15–15:30 IST).</div></div></div>`;
+      const realized = t.realized || 0, rR = t.realizedR || 0, mtm = t.unrealized || 0;
+      const closedBits = t.closed
+        ? `${t.closed} closed <span style="color:var(--muted)">(${t.wins}✓ / ${t.stops}✗ / ${t.expired}⏱${t.winRate != null ? ` · ${t.winRate}% tgt` : ""})</span>`
+        : `<span style="color:var(--muted)">none closed yet</span>`;
+      return `<div class="pick">${head}<div class="pick-body">
+        <div class="pick-name" style="font-size:15px">Realized <span class="${realized >= 0 ? 'pos' : 'neg'}">${_sgn(realized)}₹${fmtNum(Math.round(realized))}</span>
+          <span class="${rR >= 0 ? 'pos' : 'neg'}" style="font-size:12px">(${_sgn(rR)}${rR.toFixed(2)}R)</span>
+          <span style="color:var(--muted);font-size:12px;font-weight:400"> · today, all strategies</span></div>
+        <div class="pick-reason"><b>${t.opened}</b> opened · ${closedBits}</div>
+        <div class="pick-reason">Open book: <b>${t.openNow}</b> position${t.openNow === 1 ? "" : "s"} · live MTM <span class="${mtm >= 0 ? 'pos' : 'neg'}">${_sgn(mtm)}₹${fmtNum(Math.round(mtm))}</span></div>
+      </div></div>`;
+    }
+
+    // Date-wise realized P&L across all strategies (ledger-backed, survives restarts).
+    function renderDailyPnl(perf) {
+      const rows = (perf && perf.rows) || [];
+      if (!rows.length) return "";
+      const todayDate = perf.today && perf.today.date;
+      const body = rows.map(r => {
+        const cls = REGIME_CLS[r.regime] || "neutral";
+        const ico = REGIME_ICON[r.regime] || "";
+        const isToday = r.date === todayDate;
+        return `<tr${isToday ? ' style="background:var(--panel-2)"' : ''}>
+          <td class="day"><b>${simDT(r.date).split(",")[0]}</b>${isToday ? ' <span class="badge" style="font-size:9px;padding:1px 6px">today</span>' : ''}</td>
+          <td style="text-align:left"><span class="rgm-badge ${cls}" style="font-size:10px;padding:1px 6px">${ico} ${r.regime || "?"}</span> <span style="color:var(--muted);font-size:10px">${r.niftyPct == null ? "" : _sgn(r.niftyPct) + r.niftyPct + "%"}</span></td>
+          <td>${r.opened}</td>
+          <td>${r.closed}</td>
+          <td>${r.winRate == null ? "—" : r.winRate + "%"}</td>
+          <td class="${r.realizedR >= 0 ? 'pos' : 'neg'}">${_sgn(r.realizedR)}${r.realizedR.toFixed(2)}R</td>
+          <td class="${r.realized >= 0 ? 'pos' : 'neg'}">${_sgn(r.realized)}₹${fmtNum(Math.round(r.realized))}</td>
+        </tr>`;
+      }).join("");
+      return `<h3 class="reco-colhead" style="margin-top:18px">Daily P&amp;L — realized by date (all strategies)</h3>
+        <table class="tbl"><thead><tr>
+          <th class="day">Day</th><th style="text-align:left">Regime</th>
+          <th title="Trades entered that day">Opened</th>
+          <th title="Trades that resolved that day">Closed</th>
+          <th title="% of that day's closed trades that hit full target">Win%</th>
+          <th title="Sum of R-multiples realized that day (risk-normalized)">Realized R</th>
+          <th title="Sum of rupee P&amp;L realized that day">Realized ₹</th>
+        </tr></thead><tbody>${body}</tbody></table>
+        <div class="chart-note">Realized = P&amp;L from trades that <b>closed</b> that day (a trade entered earlier counts on its close day). R is risk-normalized (each trade risks ~₹${fmtNum(perf.riskPerTrade || 2000)}) — judge the edge by R, not the rupee sum.</div>`;
+    }
+
     function renderSimDaily(daily) {
+      const pnl = renderDailyPnl(daily.perf);
       const rows = daily.rows || [], strats = daily.strategies || [];
       if (!rows.length)
-        return `<h3 class="reco-colhead" style="margin-top:18px">Daily comparison</h3>
+        return pnl + `<h3 class="reco-colhead" style="margin-top:18px">Daily comparison</h3>
           <div class="chart-note">No days logged yet. As Auto runs across sessions, each day's regime and per-strategy win-rate build up here.</div>`;
       const head = `<tr><th class="day">Day / Regime</th>` +
         strats.map(s => `<th>${s.name.split(" ")[0]}<br><span style="color:var(--muted);font-weight:400;font-size:10px">${s.id}</span></th>`).join("") + `</tr>`;
@@ -1745,7 +1800,7 @@
         }).join("");
         return `<tr>${dayCell}${cells}</tr>`;
       }).join("");
-      return `<h3 class="reco-colhead" style="margin-top:18px">Daily comparison — which strategy worked, by regime</h3>
+      return pnl + `<h3 class="reco-colhead" style="margin-top:18px">Daily comparison — which strategy worked, by regime</h3>
         <table class="tbl heat"><thead>${head}</thead><tbody>${body}</tbody></table>
         <div class="chart-note">Cells show the day's win-rate (wins/closed) per strategy; open-only days show trades taken + unrealised P&amp;L. Colour: green = winning, red = losing.</div>`;
     }
@@ -2001,7 +2056,7 @@
       const detail = sum.detail ? renderSimTrades(sum.detail)
         : `<div class="chart-note" style="margin:2px 0 6px">Click a strategy card above to see its open &amp; closed trades.</div>`;
       const sod = `<div id="sodCard">${window._sodHtml || '<div class="chart-note" style="margin:2px 0">🎯 Analyzing the last 60 sessions for today\'s best strategy…</div>'}</div>`;
-      return banner + sod + renderAdaptiveScore(sum) + pick + cards + hint + detail + renderSimPerformance(perf) +
+      return banner + renderTodayCard(daily.perf) + sod + renderAdaptiveScore(sum) + pick + cards + hint + detail + renderSimPerformance(perf) +
         renderSimLeaderboard(lb) + renderSimDaily(daily) +
         `<div id="btResult">${window._btHtml || ""}</div>` +
         `<div id="btDailyResult">${window._btDailyHtml || ""}</div>`;
