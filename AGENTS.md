@@ -390,8 +390,14 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     expand that strategy's open/closed tables), the **regime leaderboard** grid
     (+ equity sparklines), and the daily comparison heatmap. **Sim alerts** toast/
     beep/notify when a strategy takes new ideas or a trade hits target/stop
-    (diffs per-strategy counts across polls). Controls: Take all, entry-mode
-    dropdown, Auto, Reset.
+    (diffs per-strategy counts across polls). Two adaptive-specific alerts ride on
+    the `summary().adaptive` block (`{regime, via, viaName, basis, sizeMult}` from
+    `_regime_playbook_pick`/`_conviction_mult`): a **🎯 playbook flip** when the
+    adaptive track switches which strategy it follows (regime rotated the pick),
+    and a **🔥 high-conviction** variant when adaptive fires while today's size is
+    ≥1.5×. The scoreboard shows a live "Following X · <regime> · conviction ×N"
+    line as the visible counterpart (`simAlerts` fires only while the Sim tab is
+    open). Controls: Take all, entry-mode dropdown, Auto, Reset.
   - **Offline backtest** (`backtest_strategies.py`, `/api/sim/backtest`): two
     passes. Pass 1 replays the SAME generators over the archived `context_log`
     and OPENS trades only (one per symbol+direction per day; `open` vs

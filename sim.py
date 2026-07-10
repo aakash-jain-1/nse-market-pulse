@@ -691,6 +691,18 @@ def summary(strategy_id=None):
         "generatedAt": _now(),
     }
 
+    # What the Regime-Adaptive track is delegating to right now + today's
+    # conviction multiplier. Drives the "playbook flip" / high-conviction alerts
+    # and the live delegation line on the scoreboard.
+    a_via, a_basis, a_cell = strat._regime_playbook_pick(regime.get("label"))
+    out["adaptive"] = {
+        "regime": regime.get("label"),
+        "via": a_via,
+        "viaName": strat.STRATEGY_MAP.get(a_via, {}).get("name") if a_via else None,
+        "basis": a_basis,
+        "sizeMult": strat._conviction_mult(a_basis, a_cell) if a_via else None,
+    }
+
     if strategy_id and strategy_id in strat.STRATEGY_MAP:
         trades = by_strat.get(strategy_id, [])
         meta = strat.STRATEGY_MAP.get(strategy_id, {})

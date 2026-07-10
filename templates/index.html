@@ -1782,8 +1782,16 @@
       const ad = cards.find(s => s.id === "adaptive");
       if (!ad) return "";
       const head = `<div class="pick-lab">📊 Playbook scoreboard <span style="color:var(--muted);font-weight:400">· Regime-Adaptive vs the field (live forward-test)</span></div>`;
+      // Live delegation: what the adaptive track is following right now + today's
+      // conviction size. This is the visible counterpart to the flip/conviction alerts.
+      const adx = sum.adaptive || {};
+      const convCls = adx.sizeMult >= 1.5 ? "pos" : adx.sizeMult <= 0.5 ? "neg" : "";
+      const nowLine = adx.via
+        ? `<div class="pick-reason" style="margin-bottom:6px">Following <b>${adx.viaName || adx.via}</b> now · ${adx.regime || "?"} regime · conviction <b class="${convCls}">×${adx.sizeMult}</b> <span style="color:var(--muted)">${adx.basis === "history" ? "(historical edge)" : "(design fit)"}</span></div>`
+        : "";
       if (!ad.closed) {
         return `<div class="pick">${head}<div class="pick-body">
+          ${nowLine}
           <div class="pick-reason">Following today's playbook — <b>${ad.open || 0} open</b> / 0 closed so far. The head-to-head vs the field fills in as these resolve.</div>
         </div></div>`;
       }
@@ -1815,6 +1823,7 @@
         sizeLine = `<div class="pick-reason" style="margin-top:4px">🎚️ Conviction sizing: equal-size <b>${_sgn(eR)}${eR}R</b> → capital-weighted <b class="${wR>=0?'pos':'neg'}">${_sgn(wR)}${wR.toFixed(2)}R</b> — ${tag}${avgMult!=null?` · avg bet ×${avgMult.toFixed(2)} of ₹${fmtNum(rpt)} risk`:""}.</div>`;
       }
       return `<div class="pick">${head}<div class="pick-body">
+        ${nowLine}
         <div class="pick-name">Regime-Adaptive <span class="${(adR||0)>=0?'pos':'neg'}" style="font-size:13px">${_sgn(adR)}${adR}R/trade</span>
           <span style="color:var(--muted);font-size:12px;font-weight:400"> · ${ad.winRate==null?"—":ad.winRate+"%"} win · ${ad.closed} closed · ${_sgn(ad.totalPnl)}₹${fmtNum(ad.totalPnl)}</span></div>
         <div class="pick-reason">vs field: avg fixed <b class="${(avgR||0)>=0?'pos':'neg'}">${avgR==null?"—":_sgn(avgR)+avgR.toFixed(2)+"R"}</b>${best?` · best fixed <b>${best.name}</b> ${_sgn(best.expectancyR)}${best.expectancyR}R <span style="color:var(--muted)">(hindsight)</span>`:""}. ${verdict}${beatBest}</div>
@@ -2119,17 +2128,34 @@
       (sum.strategies || []).forEach(s => {
         cur[s.id] = { name: s.name, open: s.open, target: s.target, stop: s.stop };
       });
+      const ad = sum.adaptive || null;
       if (prev) {
         (sum.strategies || []).forEach(s => {
           const p = prev[s.id]; if (!p) return;
           const dTgt = s.target - p.target, dStop = s.stop - p.stop, dOpen = s.open - p.open;
           if (dTgt > 0) fireSimAlert(`✓ ${s.name}`, `${dTgt} trade${dTgt>1?'s':''} hit TARGET`, true);
           if (dStop > 0) fireSimAlert(`✗ ${s.name}`, `${dStop} trade${dStop>1?'s':''} hit STOP`, false);
-          if (dOpen > 0 && dTgt <= 0 && dStop <= 0)
-            fireSimAlert(`▶ ${s.name}`, `${dOpen} new idea${dOpen>1?'s':''} taken`, null);
+          if (dOpen > 0 && dTgt <= 0 && dStop <= 0) {
+            // The adaptive track fires at a regime-driven conviction size — call
+            // out a high-conviction (>=1.5x risk) burst distinctly from routine entries.
+            if (s.id === "adaptive" && ad && ad.sizeMult >= 1.5)
+              fireSimAlert(`🔥 ${s.name}`,
+                `${dOpen} high-conviction bet${dOpen>1?'s':''} at ×${ad.sizeMult} risk${ad.viaName?` — following ${ad.viaName}`:""}`, null);
+            else
+              fireSimAlert(`▶ ${s.name}`, `${dOpen} new idea${dOpen>1?'s':''} taken`, null);
+          }
         });
+        // Playbook flip: the adaptive track switched which strategy it follows
+        // (a new regime rotated the strategy-of-the-day).
+        const pa = window._simAdaptivePrev;
+        if (pa && ad && ad.via && pa.via && ad.via !== pa.via) {
+          const mult = ad.sizeMult != null ? ` · ×${ad.sizeMult} risk` : "";
+          fireSimAlert(`🎯 Playbook flip`,
+            `${ad.regime || "?"} regime → now following ${ad.viaName || ad.via}${mult}`, null);
+        }
       }
       window._simPrev = cur;
+      if (ad) window._simAdaptivePrev = { via: ad.via, sizeMult: ad.sizeMult, regime: ad.regime };
     }
     function fireSimAlert(title, msg, good) {
       const box = document.getElementById("toasts");

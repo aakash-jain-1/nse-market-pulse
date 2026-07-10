@@ -245,6 +245,12 @@ forward-tested in parallel and compared against the day's **market regime**.
 > normalized per trade, the payoff appears as **capital-weighted expectancy**
 > (ΣPnL ÷ Σrisk) vs the equal-weight expectancy — shown right on the scoreboard, so
 > you can tell whether the bigger bets actually landed on the better trades.
+>
+> **Sim alerts** — beyond the target/stop/new-idea toasts, the Sim tab raises a
+> **🎯 playbook flip** alert when the adaptive track rotates to a different strategy
+> (a new regime changed the strategy-of-the-day) and a **🔥 high-conviction** alert
+> when it fires at ≥1.5× risk. The scoreboard shows a live "Following _X_ · _regime_
+> · conviction ×N" line so you can see the current delegation at a glance.
 
 **Regime detection** classifies each day from NIFTY %change + advance/decline
 breadth + the prior session's move:
