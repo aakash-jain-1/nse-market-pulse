@@ -570,8 +570,11 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
 - Option chain module: full CE/PE grid + PCR / max pain / ATM analytics.
 - Options analytics: support/resistance walls, OI-change + IV-skew charts,
   all-expiry PCR/max-pain summary.
-- Sparkline history + alert state persisted to localStorage (intraday-only, so
-  a browser refresh no longer wipes the client-side sparklines).
+- Sparkline history + alert state persisted to localStorage (`nseHistory.v1`):
+  a browser refresh no longer wipes the client-side sparklines. Intraday-only —
+  reset on the **IST** day boundary (`todayStr`), debounced writes + a
+  `beforeunload` flush, ≤120 points/symbol and ≤500 symbols (`pruneHistory`,
+  most-recently-ticking kept) to stay well under the quota.
 - Unified Scanner tab (`get_scanner()`): ranked in-demand board with filters
   (direction / min %chg / min vol×avg / min value Cr / OI buildup / F&O only)
   and explanatory tags. Now the default landing tab.

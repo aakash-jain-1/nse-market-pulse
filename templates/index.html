@@ -671,7 +671,9 @@
     // Persisted to localStorage so a browser refresh doesn't wipe sparklines.
     // Intraday-only: anything from a previous day is discarded on load.
     const HIST_KEY = "nseHistory.v1";
-    const todayStr = () => new Date().toISOString().slice(0, 10);
+    // IST (UTC+5:30) calendar date — the intraday-reset boundary. Using IST (not
+    // UTC) keeps "same trading day?" correct even in the 00:00–05:30 IST window.
+    const todayStr = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
     function loadHistory() {
       try {
         const raw = JSON.parse(localStorage.getItem(HIST_KEY) || "null");
@@ -689,24 +691,28 @@
     const history = loadHistory();
     const alerted = loadAlerted();
     let _saveTimer = null;
-    function saveHistory() {
-      if (_saveTimer) return;  // debounce bursts of recordPrice calls
-      _saveTimer = setTimeout(() => {
-        _saveTimer = null;
-        try {
-          localStorage.setItem(HIST_KEY, JSON.stringify({
-            date: todayStr(), data: history, alerted: [...alerted],
-          }));
-        } catch (e) { /* quota exceeded — ignore, memory copy still works */ }
-      }, 1500);
+    const MAX_SYMBOLS = 500;   // bound localStorage: keep the most-recently-ticking names
+    function pruneHistory() {
+      const syms = Object.keys(history);
+      if (syms.length <= MAX_SYMBOLS) return;
+      syms.map(s => [s, (history[s][history[s].length - 1] || {}).t || 0])
+        .sort((a, b) => a[1] - b[1])
+        .slice(0, syms.length - MAX_SYMBOLS)
+        .forEach(([s]) => delete history[s]);
     }
-    window.addEventListener("beforeunload", () => {
+    function _writeHistory() {
       try {
+        pruneHistory();
         localStorage.setItem(HIST_KEY, JSON.stringify({
           date: todayStr(), data: history, alerted: [...alerted],
         }));
-      } catch (e) {}
-    });
+      } catch (e) { /* quota exceeded — ignore, in-memory copy still works */ }
+    }
+    function saveHistory() {
+      if (_saveTimer) return;  // debounce bursts of recordPrice calls
+      _saveTimer = setTimeout(() => { _saveTimer = null; _writeHistory(); }, 1500);
+    }
+    window.addEventListener("beforeunload", _writeHistory);
 
     // "2026-07-09 11:05:00" -> "09 Jul, 11:05" (sim uses IST strings from server)
     function simDT(s) {
@@ -752,7 +758,7 @@
       "Signal": "OI + price read: Long buildup (price↑+OI↑, bullish), Short buildup (price↓+OI↑, bearish), Short covering (price↑+OI↓, bullish), Long unwinding (price↓+OI↓, bearish).",
       "Signals": "How many independent hot-lists this stock appears in. More = broader interest.",
       "Score": "Composite demand score across all signals. Higher = more 'in demand' right now.",
-      "Trend": "Live intraday sparkline built from price ticks since you opened the page.",
+      "Trend": "Live intraday sparkline built from price ticks — persists across page reloads for the trading day (client-side; resets next session).",
       "Delivery %": "% of traded volume actually taken to demat (not squared off intraday). High delivery = investment-style buying (more durable); low = speculative churn.",
       "VWAP": "Volume-Weighted Average Price today. Price above VWAP = intraday strength; below = weakness.",
       "Day Range": "Today's low–high band.",
