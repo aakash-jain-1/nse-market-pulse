@@ -369,12 +369,31 @@ def handle_error(e):
 
 
 DEBUG = True
+PORT = int(os.environ.get("PORT", "5055"))
+# Bind to all interfaces so phones/tablets on the same Wi-Fi can reach the
+# dashboard. Override with HOST=127.0.0.1 to keep it local-only.
+HOST = os.environ.get("HOST", "0.0.0.0")
+
+
+def _lan_ip():
+    """Best-effort primary LAN IP (no traffic actually sent — just picks the
+    egress interface). Returns None if it can't be determined."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return None
+
 
 if __name__ == "__main__":
     # In debug mode Flask spawns a reloader parent + a worker child. Only the
     # worker (which actually serves) sets WERKZEUG_RUN_MAIN, so start the
     # background logger there to avoid two loggers writing the same file.
-    import os
     if not DEBUG or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         # Sims run automatically from startup — force auto ON regardless of any
         # persisted state, so it never waits for the user to flip the toggle.
@@ -388,6 +407,17 @@ if __name__ == "__main__":
         import backtest_daily as _btd
         threading.Thread(target=_btd.cached_regime_leaderboard,
                          daemon=True).start()
+
+        # Show the phone-friendly URLs once (in the serving worker).
+        ip = _lan_ip() if HOST == "0.0.0.0" else HOST
+        print("\n" + "=" * 60)
+        print(" NSE Market Pulse — dashboard is live")
+        print(f"   Local:    http://127.0.0.1:{PORT}")
+        if HOST == "0.0.0.0" and ip:
+            print(f"   Network:  http://{ip}:{PORT}   <-- open this on your phone")
+            print("   (phone must be on the same Wi-Fi; allow Python through")
+            print("    the Windows firewall if prompted)")
+        print("=" * 60 + "\n")
     # threaded so a long request (e.g. a full-universe daily backtest, ~2-3 min)
     # doesn't block the dashboard's auto-refresh polling.
-    app.run(debug=DEBUG, port=5055, threaded=True)
+    app.run(debug=DEBUG, host=HOST, port=PORT, threaded=True)

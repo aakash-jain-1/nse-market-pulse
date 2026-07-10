@@ -472,6 +472,20 @@ python app.py
 
 Then open **http://127.0.0.1:5055**.
 
+### 📱 Open it on your phone (same Wi-Fi)
+
+The server binds all interfaces by default, so on startup it prints a **Network**
+URL like `http://192.168.1.4:5055` — open that on any phone/tablet on the same
+Wi-Fi. The UI is mobile-responsive (tables scroll sideways, the tab bar becomes a
+horizontal scroller, chrome compacts on small screens). Notes:
+
+- Keep it **local-only** with `HOST=127.0.0.1 python app.py`; change the port with
+  `PORT=8080 python app.py`.
+- Windows may ask to allow Python through the firewall the first time — **allow it
+  for private networks**.
+- Changing `HOST`/`PORT` needs a **full restart** (the dev-server reloader pins the
+  socket at launch), not just a hot reload.
+
 > **Why port 5055?** A previously-installed service worker from another local app
 > can hijack `127.0.0.1:5000`. If you ever see the wrong app there, hard-refresh
 > (Ctrl+Shift+R) or unregister the service worker.

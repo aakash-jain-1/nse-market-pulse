@@ -80,6 +80,18 @@ python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/vol
 The Flask app runs in debug mode, so it auto-reloads on `.py` changes and
 re-reads `templates/index.html` on every request (no restart needed for UI edits).
 
+### Phone / LAN access
+The server binds `0.0.0.0` by default, so any device on the same Wi-Fi can open
+`http://<your-PC-LAN-IP>:5055` (the LAN URL is printed in a banner on startup;
+`_lan_ip()` auto-detects it). Override with env vars: `HOST=127.0.0.1` for
+local-only, `PORT=xxxx` for a different port. **Gotcha:** Werkzeug's reloader
+pins the listening socket at the *parent* launch, so changing `HOST`/`PORT` needs
+a **full restart** (Ctrl+C + `python app.py`), not a hot reload. Windows may
+prompt to allow Python through the firewall the first time (allow it for private
+networks). The UI is mobile-responsive — wide tables scroll horizontally
+(`#tableWrap`), the tab bar becomes a horizontal scroller, and chrome/padding
+compact under `@media (max-width: 640px)`.
+
 ## Environment gotchas (IMPORTANT)
 
 - On this Windows machine the bare `python` command sometimes resolves to the
