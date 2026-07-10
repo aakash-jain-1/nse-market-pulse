@@ -197,6 +197,12 @@ def api_sim_daily():
     return jsonify({**sim.daily_matrix(), "perf": sim.daily_performance()})
 
 
+@app.route("/api/sim/day")
+def api_sim_day():
+    import sim
+    return jsonify(sim.day_trades(request.args.get("date", "")))
+
+
 @app.route("/api/sim/leaderboard")
 def api_sim_leaderboard():
     import sim

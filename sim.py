@@ -544,6 +544,47 @@ def daily_performance(days=30):
     return {"today": today_card, "rows": rows, "riskPerTrade": RISK_PER_TRADE}
 
 
+def day_trades(date, limit=400):
+    """Individual trades for one calendar date — the drill-down behind a daily row:
+    trades that CLOSED that day (the realized P&L) + trades OPENED that day that are
+    still running. Trimmed to display fields, newest first, each tagged with its
+    strategy's display name."""
+    _ensure_migrated()
+    date = (date or "")[:10]
+    names = {s["id"]: s["name"] for s in strat.STRATEGIES}
+    closed, opened_open = [], []
+    for t in db.sim_all_trades():
+        if t["status"] == "OPEN":
+            if t.get("openedDate") == date:
+                opened_open.append(t)
+            continue
+        cd = (t.get("closedDay") or "")[:10] or (t.get("closedAt") or "")[:10]
+        if cd == date:
+            closed.append(t)
+    closed.sort(key=lambda t: t.get("closedAt") or "", reverse=True)
+    opened_open.sort(key=lambda t: t.get("openedAt") or "", reverse=True)
+
+    def trim(t):
+        return {
+            "strategy": t["strategy"],
+            "strategyName": names.get(t["strategy"], t["strategy"]),
+            "symbol": t["symbol"], "direction": t["direction"],
+            "fno": t.get("fno", False),
+            "entry": t.get("entry"), "exitPrice": t.get("exitPrice"),
+            "ltp": t.get("ltp"), "stop": t.get("stop"), "target": t.get("target"),
+            "pnl": t.get("pnl"), "pnlPct": t.get("pnlPct"),
+            "rMultiple": t.get("rMultiple"), "status": t["status"],
+            "openedAt": t.get("openedAt"), "closedAt": t.get("closedAt"),
+        }
+
+    return {
+        "date": date,
+        "closed": [trim(t) for t in closed[:limit]],
+        "open": [trim(t) for t in opened_open[:limit]],
+        "closedTotal": len(closed), "openTotal": len(opened_open),
+    }
+
+
 def daily_matrix():
     """Day × strategy comparison grid for the heatmap."""
     state = _load()

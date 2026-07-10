@@ -416,6 +416,15 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
     + a **Daily P&L by date** table above the win-rate heatmap. Deliberately does
     NOT call `update()` (summary()'s per-poll reprice already refreshes open MTM —
     repeating it would double a heavy sweep on a big open book).
+    Each Daily-P&L row is **clickable** → expands into that day's individual trades
+    via `sim.day_trades(date)` / `/api/sim/day?date=YYYY-MM-DD` (trades CLOSED that
+    day + trades OPENED that day still running, newest first, ≤400 each, tagged with
+    strategy display name). Front-end keeps expanded dates in `window._dayOpen` (Set)
+    and fetched trades in `window._dayCache` so the drill-down survives the tab's
+    per-poll re-render; `toggleDay()` re-fetches on each expand so "today" reflects
+    the latest closes. Each drilled-down trade row carries `data-sym` (row click →
+    quick-detail modal, via the shared wiring) plus a `🔬` `drillBtn` (→ full
+    deep-dive), same as every other table/card.
   - **UI**: regime banner, ⭐ strategy-of-the-day card, strategy cards (click to
     expand that strategy's open/closed tables), the **regime leaderboard** grid
     (+ equity sparklines), and the daily comparison heatmap. **Sim alerts** toast/

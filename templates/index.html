@@ -89,6 +89,9 @@
     th:first-child, td:first-child { text-align: left; }
     tbody tr { cursor: pointer; }
     tbody tr:hover { background: var(--panel-2); }
+    tr.day-exp, tr.day-exp:hover { cursor: default; background: transparent; }
+    tr.day-exp > td { padding: 4px 14px 12px; }
+    tr.day-exp .tbl th, tr.day-exp .tbl td { padding: 6px 10px; font-size: 12px; }
     td.sym { font-weight: 700; letter-spacing: 0.3px; }
     .pos { color: var(--green); }
     .neg { color: var(--red); }
@@ -1750,17 +1753,80 @@
       </div></div>`;
     }
 
+    // Drill-down: the individual trades behind a daily-P&L row (fetched on expand).
+    function renderDayTrades(payload) {
+      if (!payload) return `<div class="chart-note" style="margin:4px 0">Loading trades…</div>`;
+      if (payload.error) return `<div class="chart-note" style="margin:4px 0">Couldn't load trades: ${payload.error}</div>`;
+      const closed = payload.closed || [], open = payload.open || [];
+      const RESULT = {
+        TARGET: '<span class="pos">✓ target</span>', STOP: '<span class="neg">✗ stop</span>',
+        EXPIRED: '<span style="color:var(--muted)">⏱ expired</span>', OPEN: '<span style="color:var(--accent)">● open</span>' };
+      const row = t => {
+        const arrow = t.direction === "LONG" ? "▲" : "▼";
+        const dcls = t.direction === "LONG" ? "pos" : "neg";
+        const live = t.exitPrice == null;
+        const exit = live
+          ? (t.ltp == null ? "—" : `${fmtPrice(t.ltp)} <span style="color:var(--muted)">(live)</span>`)
+          : fmtPrice(t.exitPrice);
+        const r = t.rMultiple == null ? 0 : t.rMultiple, p = t.pnl == null ? 0 : t.pnl;
+        return `<tr data-sym="${t.symbol}" title="Click for quick detail · 🔬 for deep-dive">
+          <td style="text-align:left">${t.strategyName || t.strategy}</td>
+          <td class="sym" style="text-align:left">${t.symbol}${t.fno ? ' <span class="badge" style="font-size:9px;padding:0 5px">F&amp;O</span>' : ''}${drillBtn(t.symbol)}</td>
+          <td class="${dcls}" style="text-align:left">${arrow} ${t.direction}</td>
+          <td>${fmtPrice(t.entry)} → ${exit}</td>
+          <td class="${r >= 0 ? 'pos' : 'neg'}">${_sgn(r)}${r.toFixed(2)}R</td>
+          <td class="${p >= 0 ? 'pos' : 'neg'}">${_sgn(p)}₹${fmtNum(Math.round(p))}</td>
+          <td style="text-align:left">${RESULT[t.status] || t.status}</td>
+          <td style="text-align:left;color:var(--muted)">${simDT(t.openedAt)} → ${t.closedAt ? simDT(t.closedAt) : "—"}</td>
+        </tr>`;
+      };
+      const head = `<tr><th style="text-align:left">Strategy</th><th style="text-align:left">Symbol</th>
+        <th style="text-align:left">Dir</th><th>Entry → Exit</th><th>R</th><th>₹</th>
+        <th style="text-align:left">Result</th><th style="text-align:left">Held</th></tr>`;
+      const tbl = (list, tot, label) => {
+        const more = tot > list.length ? ` <span style="color:var(--muted)">(showing latest ${list.length})</span>` : "";
+        return `<div style="font-size:11px;color:var(--muted);margin:2px 0 4px">${label}${more}</div>
+          <table class="tbl"><thead>${head}</thead><tbody>${list.map(row).join("")}</tbody></table>`;
+      };
+      if (!closed.length && !open.length)
+        return `<div class="chart-note" style="margin:4px 0">No individual trades recorded for this day.</div>`;
+      let html = "";
+      if (closed.length) html += tbl(closed, payload.closedTotal, `${payload.closedTotal} trade${payload.closedTotal === 1 ? "" : "s"} closed this day`);
+      if (open.length) html += `<div style="margin-top:8px">${tbl(open, payload.openTotal, `${payload.openTotal} still open (entered this day)`)}</div>`;
+      return html;
+    }
+
+    // Expand/collapse a day's trade drill-down. State + fetched trades live in
+    // globals so they survive the Sim tab's per-poll re-render; each expand
+    // re-fetches so "today" always reflects the latest closes.
+    async function toggleDay(d) {
+      if (!d) return;
+      const open = window._dayOpen || (window._dayOpen = new Set());
+      const cache = window._dayCache || (window._dayCache = {});
+      if (open.has(d)) { open.delete(d); if (current === "sim") load(); return; }
+      open.add(d);
+      if (current === "sim") load();               // instant: caret flips + "Loading…" placeholder
+      try { cache[d] = await fetch("/api/sim/day?date=" + encodeURIComponent(d)).then(r => r.json()); }
+      catch (e) { cache[d] = { error: String(e) }; }
+      if (current === "sim" && open.has(d)) load(); // re-render with the trades
+    }
+
     // Date-wise realized P&L across all strategies (ledger-backed, survives restarts).
+    // Rows are clickable — expand a date to see that day's individual trades.
     function renderDailyPnl(perf) {
       const rows = (perf && perf.rows) || [];
       if (!rows.length) return "";
       const todayDate = perf.today && perf.today.date;
+      const open = window._dayOpen || (window._dayOpen = new Set());
+      const cache = window._dayCache || (window._dayCache = {});
       const body = rows.map(r => {
         const cls = REGIME_CLS[r.regime] || "neutral";
         const ico = REGIME_ICON[r.regime] || "";
         const isToday = r.date === todayDate;
-        return `<tr${isToday ? ' style="background:var(--panel-2)"' : ''}>
-          <td class="day"><b>${simDT(r.date).split(",")[0]}</b>${isToday ? ' <span class="badge" style="font-size:9px;padding:1px 6px">today</span>' : ''}</td>
+        const isOpen = open.has(r.date);
+        const caret = `<span style="color:var(--muted);display:inline-block;width:12px">${isOpen ? "▾" : "▸"}</span>`;
+        let tr = `<tr class="day-row" data-day="${r.date}"${isToday ? ' style="background:var(--panel-2)"' : ''}>
+          <td class="day">${caret}<b>${simDT(r.date).split(",")[0]}</b>${isToday ? ' <span class="badge" style="font-size:9px;padding:1px 6px">today</span>' : ''}</td>
           <td style="text-align:left"><span class="rgm-badge ${cls}" style="font-size:10px;padding:1px 6px">${ico} ${r.regime || "?"}</span> <span style="color:var(--muted);font-size:10px">${r.niftyPct == null ? "" : _sgn(r.niftyPct) + r.niftyPct + "%"}</span></td>
           <td>${r.opened}</td>
           <td>${r.closed}</td>
@@ -1768,6 +1834,9 @@
           <td class="${r.realizedR >= 0 ? 'pos' : 'neg'}">${_sgn(r.realizedR)}${r.realizedR.toFixed(2)}R</td>
           <td class="${r.realized >= 0 ? 'pos' : 'neg'}">${_sgn(r.realized)}₹${fmtNum(Math.round(r.realized))}</td>
         </tr>`;
+        if (isOpen)
+          tr += `<tr class="day-exp"><td colspan="7">${renderDayTrades(cache[r.date])}</td></tr>`;
+        return tr;
       }).join("");
       return `<h3 class="reco-colhead" style="margin-top:18px">Daily P&amp;L — realized by date (all strategies)</h3>
         <table class="tbl"><thead><tr>
@@ -1778,7 +1847,7 @@
           <th title="Sum of R-multiples realized that day (risk-normalized)">Realized R</th>
           <th title="Sum of rupee P&amp;L realized that day">Realized ₹</th>
         </tr></thead><tbody>${body}</tbody></table>
-        <div class="chart-note">Realized = P&amp;L from trades that <b>closed</b> that day (a trade entered earlier counts on its close day). R is risk-normalized (each trade risks ~₹${fmtNum(perf.riskPerTrade || 2000)}) — judge the edge by R, not the rupee sum.</div>`;
+        <div class="chart-note">Realized = P&amp;L from trades that <b>closed</b> that day (a trade entered earlier counts on its close day). R is risk-normalized (each trade risks ~₹${fmtNum(perf.riskPerTrade || 2000)}) — judge the edge by R, not the rupee sum. <b>Click any row</b> to see that day's individual trades.</div>`;
     }
 
     function renderSimDaily(daily) {
@@ -2296,6 +2365,9 @@
             });
           wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
             tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
+          // Daily-P&L rows drill down into that day's individual trades.
+          wrap.querySelectorAll("tr.day-row").forEach(tr =>
+            tr.onclick = () => toggleDay(tr.getAttribute("data-day")));
           // Strategy-of-the-day is fetched separately so a cold (first-of-session)
           // 60-day computation never stalls the tab; its HTML is cached in a global
           // and re-injected on every poll, then re-bound for click-through.

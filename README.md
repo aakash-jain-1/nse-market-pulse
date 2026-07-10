@@ -317,7 +317,10 @@ flowchart LR
   were opened, how many *closed* that day, the win%, and the realized **R** and **₹**
   (a trade counts on the day it closes). The Today card also shows the live open
   book and its unrealised mark-to-market, so you can see *what happened today* at a
-  glance. Ledger-backed, so it survives restarts.
+  glance. Ledger-backed, so it survives restarts. **Click any date row** to expand
+  that day's individual trades (`/api/sim/day?date=`) — strategy, symbol, direction,
+  entry→exit, R and ₹, and the hold window — split into trades that *closed* that day
+  vs those *opened* that day still running.
 - **Offline backtest** (`/api/sim/backtest[?resolve=intrabar|ltp]`): replays the
   *same* generators over archived `context_log`, opening trades from the context
   and resolving exits on real minute candles — no need to wait for live days once
@@ -537,6 +540,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/optionchain/<sym>[/summary]` | Full option chain / analytics (PCR, Max-Pain, Greeks) |
 | `GET /api/fno/universe` | List of F&O underlyings |
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads (`/daily` also returns `perf`: date-wise realized P&L + a today card with open-book MTM) |
+| `GET /api/sim/day?date=YYYY-MM-DD` | One day's individual trades (closed that day + opened-that-day still open) — the Daily-P&L row drill-down |
 | `GET /api/sim/performance` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
 | `GET /api/sim/strategy_of_day[?days=60&universe=60]` | Today's live regime + the historically best strategy for it (memoised daily-backtest leaderboard) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
