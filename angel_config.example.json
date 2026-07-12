@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy this file to angel_config.json (gitignored) and fill in your Angel One SmartAPI credentials. api_key: create an app at smartapi.angelone.in. client_code: your Angel One login ID. mpin: your Angel One PIN. totp_secret: the base32 secret shown when you enable TOTP at smartapi.angelone.in/enable-totp (we compute the 6-digit code automatically with pyotp). Alternatively set ANGEL_API_KEY / ANGEL_CLIENT_CODE / ANGEL_MPIN / ANGEL_TOTP_SECRET env vars instead of this file. Angel One's live feed + historical data are FREE (only ₹20/order brokerage on real trades).",
+  "api_key": "YOUR_SMARTAPI_KEY",
+  "client_code": "YOUR_ANGEL_CLIENT_CODE",
+  "mpin": "YOUR_ANGEL_MPIN",
+  "totp_secret": "YOUR_BASE32_TOTP_SECRET"
+}

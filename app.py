@@ -14,16 +14,34 @@ origin and hijacks requests. A fresh port sidesteps that stale cache.
 """
 
 import os
+import time
 
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 
+import angel_feed
+import dhan_feed
 import nse_client as nse
 import nse_quote
 import paper
 import snapshot_logger as snaplog
 
 app = Flask(__name__)
+
+
+# Live realtime feed provider (see angel_feed.py / dhan_feed.py). Angel One's
+# SmartAPI feed is FREE; Dhan's is a paid ₹499/mo data plan — so prefer whichever
+# is configured, Angel first. If neither is set up we still point at Angel so the
+# Live tab shows the recommended (free) provider's setup card.
+def _select_live_feed():
+    if angel_feed.is_configured():
+        return angel_feed
+    if dhan_feed.is_configured():
+        return dhan_feed
+    return angel_feed
+
+
+live_feed = _select_live_feed()
 
 
 @app.route("/")
@@ -129,6 +147,72 @@ def api_ohlc(symbol):
         days=int(days) if days else None,
         from_ts=int(frm) if frm else None,
         to_ts=int(to) if to else None))
+
+
+# ---------------------------------------------------------------------------
+# Live realtime feed — Angel One / Dhan, chosen at startup as `live_feed`.
+# ---------------------------------------------------------------------------
+@app.route("/api/live/config")
+def api_live_config():
+    """Is the live feed configured/connected? (safe: never returns secrets)."""
+    return jsonify(live_feed.public_status())
+
+
+@app.route("/api/live/watch", methods=["POST"])
+def api_live_watch():
+    """Replace the watched symbol set; the feed subscribes/unsubscribes the delta."""
+    body = request.get_json(silent=True) or {}
+    symbols = body.get("symbols") or []
+    focus = body.get("focus")
+    return jsonify(live_feed.set_watch(symbols, focus))
+
+
+@app.route("/api/live/seed/<symbol>")
+def api_live_seed(symbol):
+    """Historical candles to seed the live chart (reuses NSE's OHLCV feed)."""
+    interval = request.args.get("interval", "1")
+    if interval == "D":
+        return jsonify(nse_quote.get_ohlc(
+            symbol, chart_type="D", days=int(request.args.get("days", 120))))
+    return jsonify(nse_quote.get_ohlc(symbol, interval=int(interval)))
+
+
+@app.route("/api/live/snapshot")
+def api_live_snapshot():
+    """One-shot latest tick data (poll fallback when SSE isn't available)."""
+    ids = request.args.get("ids", "")
+    syms = [s for s in ids.split(",") if s] or None
+    return jsonify({"quotes": live_feed.snapshot(syms),
+                    "status": live_feed.public_status()})
+
+
+@app.route("/api/live/stream")
+def api_live_stream():
+    """Server-Sent Events: push the watched set's latest ticks ~1x/second.
+
+    The broker socket updates an in-memory store in realtime; this just samples
+    it for the browser so the page never talks to a socket directly. One
+    EventSource per open Live tab; the client changes what's streamed via
+    POST /api/live/watch.
+    """
+    def gen():
+        import json as _json
+        yield "retry: 3000\n\n"
+        try:
+            while True:
+                payload = {"quotes": live_feed.snapshot(),
+                           "status": live_feed.public_status(),
+                           "ts": int(time.time() * 1000)}
+                yield "data: " + _json.dumps(payload) + "\n\n"
+                time.sleep(1.0)
+        except GeneratorExit:  # client disconnected
+            return
+
+    return app.response_class(gen(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    })
 
 
 @app.route("/api/optionchain/<symbol>")
@@ -417,6 +501,9 @@ if __name__ == "__main__":
         import sim
         sim.set_auto(True)
         snaplog.start()
+        # Live realtime feed (Angel One or Dhan). No-op unless credentials + SDK
+        # are present, so the app runs unchanged for users who haven't set it up.
+        live_feed.start()
         # Pre-warm the strategy-of-the-day leaderboard (a cheap, EOD-cached
         # backtest) in a daemon thread so the Sim tab's card is ready without
         # stalling the first poll with a cold ~30s computation.

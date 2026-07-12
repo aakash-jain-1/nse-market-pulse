@@ -39,3 +39,12 @@ paper_state.json
 
 # Recommendation simulator state (forward-test ledger)
 sim_state.json
+
+# Live-feed broker credentials — NEVER commit
+# Angel One SmartAPI (api key + client code + mpin + totp secret)
+angel_config.json
+# Dhan (client id + access token)
+dhan_config.json
+
+# Angel One SmartAPI SDK writes per-day tick logs here
+logs/

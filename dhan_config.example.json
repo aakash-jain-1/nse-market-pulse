@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy this file to dhan_config.json (gitignored) and fill in your Dhan API credentials. Generate the access token at web.dhan.co -> My Profile -> Access DhanHQ APIs. Alternatively set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN environment variables instead of using this file.",
+  "client_id": "YOUR_DHAN_CLIENT_ID",
+  "access_token": "YOUR_DHAN_ACCESS_TOKEN"
+}

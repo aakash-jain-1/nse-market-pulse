@@ -345,7 +345,58 @@
       .modal-body { padding: 16px; }
       .alert-toast { right: 10px; left: 10px; bottom: 12px; max-width: none; }
     }
+
+    /* ---- Live realtime tab (Dhan feed + TradingView Lightweight Charts) ---- */
+    .live-wrap { display: grid; grid-template-columns: 210px 1fr 250px; gap: 14px; padding: 16px; }
+    .live-col { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+    .live-main { min-width: 0; }
+    .live-topbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+    .lq-sym { font-size: 20px; font-weight: 700; letter-spacing: 0.3px; }
+    .lq-vals { font-size: 13px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+    .lq-vals b { font-size: 18px; font-weight: 700; color: var(--text); }
+    .live-ivs { margin-left: auto; display: flex; gap: 4px; }
+    .ivbtn { padding: 5px 11px; font-size: 12px; }
+    .live-chip { font-size: 11px; padding: 3px 9px; border-radius: 20px; white-space: nowrap; }
+    .live-chip.on { color: var(--green); border: 1px solid var(--green); background: rgba(38,208,124,0.1); }
+    .live-chip.off { color: var(--muted); border: 1px solid var(--border); }
+    .live-chart { width: 100%; height: 470px; }
+    .live-note { font-size: 11px; color: var(--muted); margin-top: 8px; }
+    .live-add { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+                border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-bottom: 8px; }
+    .live-col h4 { margin: 2px 0 8px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .lw-row { display: flex; justify-content: space-between; align-items: center; gap: 6px;
+              padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    .lw-row:hover { background: var(--panel); }
+    .lw-row.sel { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
+    .lw-sym { font-weight: 700; }
+    .lw-x { color: var(--muted); font-size: 15px; padding: 0 2px; opacity: 0.5; }
+    .lw-x:hover { color: var(--red); opacity: 1; }
+    .lw-ltp { text-align: right; }
+    .depth-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .depth-tbl td { padding: 4px 6px; border: 0; white-space: nowrap; position: relative; }
+    .depth-tbl .dq { color: var(--muted); }
+    .depth-bidbar, .depth-askbar { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; z-index: 0; }
+    .depth-bidbar { right: 0; background: rgba(38,208,124,0.14); }
+    .depth-askbar { left: 0; background: rgba(255,92,104,0.14); }
+    .depth-tbl .bidp { color: var(--green); text-align: right; }
+    .depth-tbl .askp { color: var(--red); }
+    .depth-tbl span { position: relative; z-index: 1; }
+    .depth-spread { text-align: center; color: var(--muted); font-size: 11px; padding: 6px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin: 4px 0; }
+    .live-setup { max-width: 640px; margin: 30px auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 26px 30px; }
+    .live-setup h3 { margin: 0 0 6px; font-size: 18px; }
+    .live-setup ol { line-height: 1.9; color: var(--text); padding-left: 20px; }
+    .live-setup code { background: var(--bg); padding: 2px 7px; border-radius: 5px; border: 1px solid var(--border); font-size: 12.5px; }
+    .live-setup .muted { color: var(--muted); font-size: 12.5px; }
+    @media (max-width: 920px) {
+      .live-wrap { grid-template-columns: 1fr; }
+      .live-chart { height: 340px; }
+    }
   </style>
+  <!-- TradingView Lightweight Charts (Apache-2.0, free) — genuine candlesticks +
+       volume with a persistent chart instance for live streaming updates. Loaded
+       from CDN; drop the file in static/vendor/ to self-host offline if desired. -->
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"
+          onerror="this.onerror=null;var s=document.createElement('script');s.src='/static/vendor/lightweight-charts.standalone.production.js';document.head.appendChild(s);"></script>
 </head>
 <body>
   <header>
@@ -643,6 +694,8 @@
     const TABS = [
       { key: "futures",    label: "⚡ Futures", title: "Stock Futures — Basis & OI",
         desc: "Futures with premium/discount to spot and OI buildup. The Momentum panel ranks the strongest bullish/bearish movers (price move × OI activity). Toggle 'All F&O' to cover the whole ~215-name universe." },
+      { key: "live",       label: "📈 Live", title: "Live Realtime — Dhan feed",
+        desc: "Genuine tick-by-tick charts (TradingView-style candles + volume), a live 5-level depth ladder and a streaming watchlist — powered by your Dhan WebSocket feed. Real ticks during market hours; otherwise shows the last session. Educational — NOT advice." },
       { key: "recos",      label: "💡 Ideas", title: "Trade Ideas — Long / Short",
         desc: "Ranked LONG & SHORT setups derived from live signals (momentum, OI buildup, unusual volume, money flow), each with a conviction score, reasons and an entry/stop/target plan. Signal summary — NOT investment advice." },
       { key: "sim",        label: "🧪 Sim", title: "Recommendation Simulator — did the ideas work?",
@@ -2353,9 +2406,378 @@
         <div style="position:absolute;top:0;bottom:0;border-radius:4px;${side}"></div></div>`;
     }
 
+    // =====================================================================
+    // Live realtime tab — Dhan WebSocket feed + TradingView Lightweight Charts
+    // =====================================================================
+    // The dashboard polls NSE JSON; this tab instead holds ONE persistent chart
+    // and an EventSource to /api/live/stream, which samples the server's in-memory
+    // Dhan tick store ~1x/s. Candle timestamps use the same IST-baked-as-UTC epoch
+    // as /api/ohlc, so live forming bars line up with the seeded history.
+    const LIVE_WATCH_KEY = "nseLiveWatch.v1";
+    function liveWatchLoad() {
+      try {
+        const a = JSON.parse(localStorage.getItem(LIVE_WATCH_KEY) || "null");
+        if (Array.isArray(a) && a.length) return a.slice(0, 40);
+      } catch (e) {}
+      return ["RELIANCE", "HDFCBANK", "TCS", "INFY", "SBIN", "TATAMOTORS"];
+    }
+    function liveWatchSave() {
+      try { localStorage.setItem(LIVE_WATCH_KEY, JSON.stringify(window._liveWatch || [])); } catch (e) {}
+    }
+
+    function ensureLive() {
+      if (window._liveOn && document.getElementById("liveChart") && window._lwc) return;
+      startLive();
+    }
+
+    async function startLive() {
+      const wrap = document.getElementById("tableWrap");
+      let cfg;
+      try { cfg = await fetch("/api/live/config").then(r => r.json()); }
+      catch (e) { cfg = { configured: false }; }
+      window._liveCfg = cfg;
+      if (!cfg.configured) { wrap.innerHTML = liveSetupCard(cfg); window._liveOn = false; return; }
+      if (!window.LightweightCharts) { wrap.innerHTML = liveLibError(); window._liveOn = false; return; }
+
+      window._liveIv = window._liveIv || "1";
+      window._liveWatch = liveWatchLoad();
+      window._liveFocus = (window._liveFocus && window._liveWatch.includes(window._liveFocus))
+        ? window._liveFocus : (window._liveWatch[0] || null);
+
+      wrap.innerHTML = liveShellHtml();
+      wireLiveShell();
+      liveCreateChart();
+      liveRenderWatch();
+      window._liveOn = true;
+
+      await liveSyncWatch();
+      if (window._liveFocus) await liveSeed(window._liveFocus);
+      liveOpenStream();
+    }
+
+    function stopLive() {
+      window._liveOn = false;
+      if (window._liveES) { try { window._liveES.close(); } catch (e) {} window._liveES = null; }
+      if (window._lwc && window._lwc.chart) { try { window._lwc.chart.remove(); } catch (e) {} }
+      window._lwc = null;
+    }
+
+    function liveShellHtml() {
+      return `<div class="live-wrap">
+        <div class="live-col">
+          <h4>Watchlist</h4>
+          <input id="liveAdd" class="live-add" placeholder="Add symbol (e.g. INFY) ↵" autocomplete="off">
+          <div id="liveWatchList"></div>
+        </div>
+        <div class="live-main">
+          <div class="live-topbar">
+            <span class="lq-sym" id="liveSym">—</span>
+            <span class="lq-vals" id="liveVals"></span>
+            <span class="live-ivs" id="liveIvs">
+              <button class="ivbtn" data-iv="1">1m</button>
+              <button class="ivbtn" data-iv="5">5m</button>
+              <button class="ivbtn" data-iv="15">15m</button>
+              <button class="ivbtn" data-iv="D">1D</button>
+            </span>
+            <span class="live-chip off" id="liveStatus">● connecting…</span>
+          </div>
+          <div id="liveChart" class="live-chart"></div>
+          <div class="live-note" id="liveNote">Loading…</div>
+        </div>
+        <div class="live-col">
+          <h4>Market Depth</h4>
+          <div id="liveDepth"><div class="live-note">—</div></div>
+        </div>
+      </div>`;
+    }
+
+    function wireLiveShell() {
+      const add = document.getElementById("liveAdd");
+      if (add) add.onkeydown = (e) => { if (e.key === "Enter") liveAddSymbol(); };
+      document.querySelectorAll("#liveIvs .ivbtn").forEach(b => {
+        b.classList.toggle("on", b.dataset.iv === (window._liveIv || "1"));
+        b.onclick = () => liveSetIv(b.dataset.iv);
+      });
+      const wl = document.getElementById("liveWatchList");
+      if (wl) wl.onclick = (e) => {
+        const row = e.target.closest(".lw-row");
+        if (!row) return;
+        const sym = row.getAttribute("data-sym");
+        if (e.target.closest(".lw-x")) { e.stopPropagation(); liveRemoveSymbol(sym); }
+        else liveSetFocus(sym);
+      };
+    }
+
+    function liveCreateChart() {
+      const el = document.getElementById("liveChart");
+      if (!el) return;
+      el.innerHTML = "";
+      const chart = LightweightCharts.createChart(el, {
+        autoSize: true,
+        layout: { background: { type: "solid", color: "transparent" }, textColor: "#8b98a9", fontSize: 11 },
+        grid: { vertLines: { color: "rgba(35,44,59,0.6)" }, horzLines: { color: "rgba(35,44,59,0.6)" } },
+        rightPriceScale: { borderColor: "#232c3b" },
+        timeScale: { borderColor: "#232c3b", timeVisible: true, secondsVisible: false },
+        crosshair: { mode: (LightweightCharts.CrosshairMode ? LightweightCharts.CrosshairMode.Normal : 0) },
+      });
+      const candle = chart.addCandlestickSeries({
+        upColor: "#26d07c", downColor: "#ff5c68", borderVisible: false,
+        wickUpColor: "#26d07c", wickDownColor: "#ff5c68",
+      });
+      const vol = chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "vol", color: "#3a4658" });
+      chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+      window._lwc = { chart, candle, vol, lastBar: null, seedIv: window._liveIv };
+    }
+
+    function liveSetIv(iv) {
+      window._liveIv = iv;
+      document.querySelectorAll("#liveIvs .ivbtn").forEach(b => b.classList.toggle("on", b.dataset.iv === iv));
+      if (window._liveFocus) liveSeed(window._liveFocus);
+    }
+
+    // Seed the chart with historical candles from NSE's OHLCV feed. Baked epoch
+    // ms -> UNIX seconds; Lightweight Charts renders UTC components, which (given
+    // the IST-baked epoch) shows the correct IST time — same trick as istTime().
+    async function liveSeed(sym) {
+      const note = document.getElementById("liveNote");
+      const iv = window._liveIv || "1";
+      const daily = iv === "D";
+      const qs = daily ? "interval=D&days=120" : ("interval=" + iv);
+      if (note) note.textContent = "Loading " + sym + " candles…";
+      try {
+        const d = await fetch("/api/live/seed/" + encodeURIComponent(sym) + "?" + qs).then(r => r.json());
+        if (window._liveFocus !== sym || !window._lwc) return;  // user moved on
+        const pts = d.points || [];
+        if (d.error || pts.length < 2) {
+          window._lwc.candle.setData([]); window._lwc.vol.setData([]); window._lwc.lastBar = null;
+          if (note) note.textContent = "No candles for " + sym + " (market may be closed or no charting token).";
+          return;
+        }
+        const seen = new Set(), cd = [], vd = [];
+        for (const p of pts) {
+          const t = Math.floor(p.t / 1000);
+          if (seen.has(t)) continue;
+          seen.add(t);
+          cd.push({ time: t, open: p.o, high: p.h, low: p.l, close: p.c });
+          vd.push({ time: t, value: p.v || 0, color: (p.c >= p.o) ? "rgba(38,208,124,0.5)" : "rgba(255,92,104,0.5)" });
+        }
+        window._lwc.candle.setData(cd);
+        window._lwc.vol.setData(vd);
+        window._lwc.chart.timeScale().fitContent();
+        window._lwc.lastBar = cd[cd.length - 1];
+        window._lwc.seedIv = iv;
+        if (note) note.textContent = `Seeded ${cd.length} ${daily ? "daily" : iv + "m"} candles · streaming live via Dhan`;
+      } catch (e) { if (note) note.textContent = "Seed failed: " + e.message; }
+    }
+
+    async function liveSyncWatch() {
+      try {
+        const r = await fetch("/api/live/watch", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ symbols: window._liveWatch || [], focus: window._liveFocus }),
+        }).then(r => r.json());
+        window._liveUnresolved = r.unresolved || [];
+      } catch (e) {}
+    }
+
+    function liveOpenStream() {
+      if (window._liveES) { try { window._liveES.close(); } catch (e) {} }
+      const es = new EventSource("/api/live/stream");
+      es.onmessage = (e) => { try { liveApply(JSON.parse(e.data)); } catch (err) {} };
+      es.onerror = () => {
+        const chip = document.getElementById("liveStatus");
+        if (chip) { chip.textContent = "● reconnecting…"; chip.className = "live-chip off"; }
+      };
+      window._liveES = es;
+    }
+
+    function liveApply(payload) {
+      if (current !== "live" || !window._lwc) return;
+      window._liveQuotes = payload.quotes || {};
+      const st = payload.status || {};
+      const chip = document.getElementById("liveStatus");
+      if (chip) {
+        if (st.connected && st.marketOpen) { chip.textContent = "● LIVE"; chip.className = "live-chip on"; }
+        else if (st.connected) { chip.textContent = "● connected · market closed"; chip.className = "live-chip off"; }
+        else if (!st.marketOpen) { chip.textContent = "● market closed"; chip.className = "live-chip off"; }
+        else if (st.error || st.restarts) { chip.textContent = "● disconnected — check token"; chip.className = "live-chip off"; }
+        else { chip.textContent = "● connecting…"; chip.className = "live-chip off"; }
+      }
+      document.getElementById("liveDot").style.background = st.connected ? "var(--green)" : "var(--muted)";
+      document.getElementById("updated").textContent = "Live " + new Date().toLocaleTimeString("en-IN");
+      liveRenderWatch();
+      const rec = window._liveQuotes[window._liveFocus];
+      liveHeader(rec);
+      if (rec) { liveRenderDepth(rec.depth); liveUpdateForming(rec); }
+    }
+
+    function liveRenderWatch() {
+      const el = document.getElementById("liveWatchList");
+      if (!el) return;
+      const q = window._liveQuotes || {};
+      const wl = window._liveWatch || [];
+      if (!wl.length) { el.innerHTML = `<div class="live-note">No symbols yet. Add one above.</div>`; return; }
+      el.innerHTML = wl.map(sym => {
+        const rec = q[sym] || {};
+        const base = (rec.prevClose != null) ? rec.prevClose : rec.close;
+        const chgPct = (rec.ltp != null && base) ? ((rec.ltp - base) / base * 100) : null;
+        const cls = chgPct == null ? "" : (chgPct >= 0 ? "pos" : "neg");
+        const sel = sym === window._liveFocus ? " sel" : "";
+        return `<div class="lw-row${sel}" data-sym="${sym}">
+          <span class="lw-sym">${sym}</span>
+          <span class="lw-ltp"><span class="${cls}">${rec.ltp != null ? fmtPrice(rec.ltp) : "—"}</span>${
+            chgPct == null ? "" : `<span class="${cls}" style="font-size:11px"> ${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%</span>`}</span>
+          <span class="lw-x" title="Remove">×</span>
+        </div>`;
+      }).join("");
+    }
+
+    function liveHeader(rec) {
+      const symEl = document.getElementById("liveSym");
+      const vals = document.getElementById("liveVals");
+      if (symEl) symEl.textContent = window._liveFocus || "—";
+      if (!vals) return;
+      if (!rec || rec.ltp == null) { vals.innerHTML = `<span>waiting for ticks…</span>`; return; }
+      const base = (rec.prevClose != null) ? rec.prevClose : rec.close;
+      const chg = base ? (rec.ltp - base) : null;
+      const chgPct = (chg != null && base) ? (chg / base * 100) : null;
+      const cls = chgPct == null ? "" : (chgPct >= 0 ? "pos" : "neg");
+      vals.innerHTML =
+        `<b class="${cls}">₹${fmtPrice(rec.ltp)}</b>` +
+        (chgPct == null ? "" : `<span class="${cls}">${chg >= 0 ? "+" : ""}${fmtPrice(chg)} (${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%)</span>`) +
+        `<span>O ${fmtPrice(rec.open)}</span><span>H ${fmtPrice(rec.high)}</span><span>L ${fmtPrice(rec.low)}</span>` +
+        `<span>Vol ${fmtNum(rec.volume)}</span>` +
+        (rec.oi ? `<span>OI ${fmtNum(rec.oi)}</span>` : "") +
+        (rec.atp ? `<span>VWAP ${fmtPrice(rec.atp)}</span>` : "");
+    }
+
+    function liveRenderDepth(depth) {
+      const el = document.getElementById("liveDepth");
+      if (!el) return;
+      if (!depth || !depth.bids) { el.innerHTML = `<div class="live-note">No depth (market may be closed).</div>`; return; }
+      const bids = depth.bids, asks = depth.asks;
+      const maxq = Math.max(1, ...bids.map(b => b.qty || 0), ...asks.map(a => a.qty || 0));
+      let rows = "";
+      for (let i = 0; i < 5; i++) {
+        const b = bids[i] || {}, a = asks[i] || {};
+        const bw = (b.qty || 0) / maxq * 100, aw = (a.qty || 0) / maxq * 100;
+        rows += `<tr>
+          <td class="dq" style="text-align:right"><div class="depth-bidbar" style="width:${bw.toFixed(0)}%"></div><span>${b.qty ? fmtNum(b.qty) : ""}</span></td>
+          <td class="bidp"><span>${b.price ? fmtPrice(b.price) : ""}</span></td>
+          <td class="askp"><div class="depth-askbar" style="width:${aw.toFixed(0)}%"></div><span>${a.price ? fmtPrice(a.price) : ""}</span></td>
+          <td class="dq"><span>${a.qty ? fmtNum(a.qty) : ""}</span></td>
+        </tr>`;
+      }
+      const bestBid = (bids[0] || {}).price, bestAsk = (asks[0] || {}).price;
+      const spread = (bestBid && bestAsk) ? (bestAsk - bestBid) : null;
+      const totB = bids.reduce((s, x) => s + (x.qty || 0), 0);
+      const totA = asks.reduce((s, x) => s + (x.qty || 0), 0);
+      el.innerHTML = `<table class="depth-tbl">
+        <tr><td class="dq" style="text-align:right">Bid Qty</td><td class="bidp">Bid</td><td class="askp">Ask</td><td class="dq">Ask Qty</td></tr>
+        ${rows}</table>
+        <div class="depth-spread">Spread ${spread != null ? fmtPrice(spread) : "—"} · ΣBid ${fmtNum(totB)} · ΣAsk ${fmtNum(totA)}</div>`;
+    }
+
+    // Fold the latest tick into the last candle. For 1m we use the server's
+    // forming-minute bar (true intraday path); for coarser intervals we track the
+    // LTP into the last seeded candle (a live approximation).
+    function liveUpdateForming(rec) {
+      if (!window._lwc || !rec || rec.ltp == null) return;
+      const iv = window._lwc.seedIv || "1";
+      if (iv === "1" && rec.bar) {
+        const t = Math.floor(rec.bar.t / 1000);
+        if (window._lwc.lastBar && t < window._lwc.lastBar.time) return;
+        const bar = { time: t, open: rec.bar.o, high: rec.bar.h, low: rec.bar.l, close: rec.bar.c };
+        window._lwc.candle.update(bar);
+        window._lwc.vol.update({ time: t, value: rec.bar.v || 0, color: (rec.bar.c >= rec.bar.o) ? "rgba(38,208,124,0.5)" : "rgba(255,92,104,0.5)" });
+        window._lwc.lastBar = bar;
+      } else if (window._lwc.lastBar) {
+        const b = window._lwc.lastBar;
+        b.close = rec.ltp; b.high = Math.max(b.high, rec.ltp); b.low = Math.min(b.low, rec.ltp);
+        window._lwc.candle.update(b);
+      }
+    }
+
+    async function liveSetFocus(sym) {
+      if (!sym) return;
+      window._liveFocus = sym;
+      liveRenderWatch();
+      await liveSyncWatch();
+      await liveSeed(sym);
+    }
+
+    async function liveAddSymbol() {
+      const inp = document.getElementById("liveAdd");
+      const sym = (inp.value || "").toUpperCase().trim();
+      if (!sym) return;
+      inp.value = "";
+      window._liveWatch = window._liveWatch || [];
+      if (!window._liveWatch.includes(sym)) window._liveWatch.push(sym);
+      liveWatchSave();
+      window._liveFocus = sym;
+      liveRenderWatch();
+      await liveSyncWatch();
+      const note = document.getElementById("liveNote");
+      if (note && (window._liveUnresolved || []).includes(sym)) {
+        note.textContent = sym + " isn't a recognized NSE equity symbol.";
+        return;
+      }
+      await liveSeed(sym);
+    }
+
+    async function liveRemoveSymbol(sym) {
+      window._liveWatch = (window._liveWatch || []).filter(s => s !== sym);
+      liveWatchSave();
+      if (window._liveFocus === sym) window._liveFocus = window._liveWatch[0] || null;
+      liveRenderWatch();
+      await liveSyncWatch();
+      if (window._liveFocus) await liveSeed(window._liveFocus);
+    }
+
+    function liveSetupCard(cfg) {
+      const provider = (cfg && cfg.provider) || "angel";
+      const sdkMissing = cfg && cfg.sdk === false;
+      if (provider === "dhan") {
+        return `<div class="live-setup">
+          <h3>📈 Connect your Dhan API for live realtime data</h3>
+          <p class="muted">Streams genuine tick-by-tick prices, candles and 5-level depth over Dhan's WebSocket. <b>Heads up:</b> Dhan's Data API is a paid <b>₹499 + GST/mo</b> subscription. It isn't configured yet.</p>
+          ${sdkMissing ? `<p class="neg">The <code>dhanhq</code> package isn't installed — run <code>pip install -r requirements.txt</code> and restart.</p>` : ""}
+          <ol>
+            <li>Subscribe to <b>DhanHQ Data APIs</b> at <code>web.dhan.co</code> → <b>My Profile</b> → <b>DhanHQ Trading APIs</b>, then generate an <b>access token</b>.</li>
+            <li>Copy <code>dhan_config.example.json</code> → <code>dhan_config.json</code> and paste your <code>client_id</code> + <code>access_token</code> <span class="muted">(or set <code>DHAN_CLIENT_ID</code> / <code>DHAN_ACCESS_TOKEN</code> env vars)</span>.</li>
+            <li><b>Restart</b> the app (<code>python app.py</code>) — this tab goes live automatically.</li>
+          </ol>
+          <p class="muted">Want it free? Set up <b>Angel One SmartAPI</b> instead (free live feed + depth) — delete <code>dhan_config.json</code> and use <code>angel_config.example.json</code>.</p>
+        </div>`;
+      }
+      return `<div class="live-setup">
+        <h3>📈 Connect Angel One SmartAPI for live realtime data</h3>
+        <p class="muted">This tab streams genuine tick-by-tick prices, candles and 5-level market depth over Angel One's <b>free</b> SmartAPI WebSocket. It isn't configured yet.</p>
+        ${sdkMissing ? `<p class="neg">The <code>smartapi-python</code> / <code>pyotp</code> packages aren't installed — run <code>pip install -r requirements.txt</code> and restart.</p>` : ""}
+        <ol>
+          <li>Open a free <b>Angel One</b> account at <code>angelone.in</code> if you don't have one.</li>
+          <li>Go to <code>smartapi.angelone.in</code> → <b>Create an App</b> and copy the <b>API key</b>.</li>
+          <li>Enable <b>TOTP</b> at <code>smartapi.angelone.in/enable-totp</code> and save the <b>base32 secret</b>.</li>
+          <li>Copy <code>angel_config.example.json</code> → <code>angel_config.json</code> and fill <code>api_key</code>, <code>client_code</code>, <code>mpin</code>, <code>totp_secret</code> <span class="muted">(or set <code>ANGEL_*</code> env vars)</span>.</li>
+          <li><b>Restart</b> the app (<code>python app.py</code>) — this tab goes live automatically.</li>
+        </ol>
+        <p class="muted">Credentials stay on your machine: <code>angel_config.json</code> is gitignored. Free — Angel charges only ₹20/order brokerage on real trades, not for data.</p>
+      </div>`;
+    }
+
+    function liveLibError() {
+      return `<div class="live-setup"><h3>Chart library didn't load</h3>
+        <p class="muted">TradingView Lightweight Charts couldn't be fetched. Check your internet connection, or vendor it into <code>static/vendor/lightweight-charts.standalone.production.js</code> to self-host, then reload.</p></div>`;
+    }
+
     async function load() {
       const wrap = document.getElementById("tableWrap");
       const dot = document.getElementById("liveDot");
+      // The Live tab owns its own realtime loop (SSE + a persistent chart), so it
+      // must NOT be rebuilt on every poll. Build it once on entry; tear it down
+      // (close the stream, dispose the chart) when the user switches away.
+      if (window._liveOn && current !== "live") stopLive();
+      if (current === "live") { dot.style.background = "var(--accent)"; ensureLive(); return; }
       dot.style.background = "var(--accent)";
       try {
         if (current === "sim" || current === "fnosim") {

@@ -1,3 +1,13 @@
 Flask==3.1.3
 requests==2.34.2
 tabulate==0.10.0
+
+# --- Live realtime feed (optional; pick ONE broker) ---
+# Angel One SmartAPI — FREE live WebSocket feed + historical data (recommended).
+# smartapi-python doesn't declare logzero/websocket-client, so pin them too.
+smartapi-python==1.5.5
+pyotp==2.10.0
+logzero==1.7.0
+websocket-client==1.9.0
+# Dhan — genuine ticks too, but its Data API is a paid ₹499/mo subscription.
+dhanhq==2.2.0

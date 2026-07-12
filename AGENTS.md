@@ -17,10 +17,17 @@ intraday momentum and unusual activity. It pulls data from NSE India's public
 ## Tech stack
 
 - Python **3.13** (Windows). See "Environment gotchas" for the interpreter path.
-- **Flask 3.1.3** — web server + JSON API
+- **Flask 3.1.3** — web server + JSON API (+ SSE for the live feed)
 - **requests 2.34.2** — NSE HTTP calls (with cookie warm-up)
 - **tabulate 0.10.0** — CLI table formatting
-- Vanilla HTML/CSS/JS frontend (no build step, no framework)
+- **smartapi-python 1.5.5 + pyotp 2.10.0** — Angel One SmartAPI SDK (+TOTP) for the
+  optional live WebSocket feed. **FREE** (Angel charges only ₹20/order brokerage, not
+  for data). Undeclared SDK deps `logzero`/`websocket-client` are pinned too.
+- **dhanhq 2.2.0** — alternative live-feed SDK. Works, but Dhan's *Data API* is a paid
+  ₹499+GST/mo subscription, so **Angel One is the default** provider.
+- Vanilla HTML/CSS/JS frontend (no build step, no framework). **First external JS
+  dependency:** TradingView **Lightweight Charts** (Apache-2.0), loaded from CDN
+  for the Live tab (vendorable into `static/vendor/` for offline use).
 
 ## File structure
 
@@ -29,6 +36,8 @@ NSE/
 ├── app.py             # Flask server + JSON API endpoints (runs on port 5055)
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
 ├── nse_quote.py       # Per-stock quote/chart/depth (NextApi) + OHLCV candles (charting)
+├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
+├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
 ├── strategies.py      # Strategy library (9 generators) + market-regime detector
 ├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
@@ -41,12 +50,17 @@ NSE/
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
 │   └── index.html     # Entire dashboard UI (HTML + CSS + JS inline)
+├── static/vendor/     # (optional) self-hosted Lightweight Charts for offline use
+├── angel_config.example.json # Template → copy to angel_config.json (gitignored)
+├── dhan_config.example.json  # Template → copy to dhan_config.json (gitignored)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── requirements.txt
 ├── README.md
 ├── AGENTS.md          # <- this file
 ├── .gitignore
-└── paper_state.json   # (gitignored) local virtual-portfolio state
+├── paper_state.json   # (gitignored) local virtual-portfolio state
+├── angel_config.json  # (gitignored) Angel One creds (api_key/client_code/mpin/totp_secret)
+└── dhan_config.json   # (gitignored) Dhan client_id + access_token (alternative feed)
 ```
 
 ## Data storage (IMPORTANT)
@@ -179,6 +193,66 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
 **Note on symbol renames:** some underlyings changed tickers (e.g. TATAMOTORS →
 `TMPV`); use the current F&O symbol. Non-F&O symbols return "no expiries".
 
+### Live realtime feed (`angel_feed.py` / `dhan_feed.py`) — the only true stream (OPTIONAL)
+Everything above is HTTP **polling**. The **📈 Live** tab adds a genuine
+tick-by-tick source over WebSocket, pushed to the browser via **Server-Sent
+Events (SSE)** and drawn with **TradingView Lightweight Charts**. Fully optional —
+with no creds the app is unchanged.
+
+- **Provider-agnostic:** `app.py` picks a feed at startup into `live_feed`
+  (`_select_live_feed()`): **Angel One first, then Dhan**, defaulting to Angel when
+  neither is configured (so the setup card shows the free provider). Every
+  `/api/live/*` route + the SSE loop call `live_feed.*`; both adapters expose the
+  SAME interface — `PROVIDER`, `is_configured`, `sdk_available`, `start`, `stop`,
+  `set_watch`, `snapshot`, `public_status` (which now includes `provider`). Adding a
+  third broker = one new module, zero route changes.
+- **Angel One (default, FREE):** `smartapi-python` + `pyotp`. Config (never
+  committed): `ANGEL_API_KEY/CLIENT_CODE/MPIN/TOTP_SECRET` env or `angel_config.json`.
+  Login is a TOTP session — `SmartConnect.generateSession(client, mpin, pyotp.TOTP(secret).now())`
+  → jwt + feed token; the daily refresh is automatic (we hold the TOTP *secret*, not
+  a fixed token). `SmartWebSocketV2` streams **SNAP_QUOTE** (mode 3, exchangeType
+  1=NSE cash): LTP + day OHLC/volume + OI + **best-5 depth**. Prices arrive in
+  **paise (×100)** — divide by 100. Scrip master `OpenAPIScripMaster.json` filtered
+  to NSE `-EQ` → `resolve → token` (RELIANCE → `2885`, same NSE ids as Dhan). The
+  SDK spews per-tick INFO to `./logs/<date>/app.log`; `_quiet_logs()` mutes logzero
+  to WARNING. (NSE's Apr-2026 static-IP rule is for *order* APIs; **market data has
+  no such requirement** and we only stream data.)
+- **Dhan (alternative, PAID data plan):** `dhanhq==2.2.0`. Config `DHAN_CLIENT_ID/
+  ACCESS_TOKEN` or `dhan_config.json`. `MarketFeed` v2 **Full** packet (mode 21,
+  segment 1) = LTP + day OHLC/volume + OI + 5-level depth. Works, but Dhan's Data
+  API is **₹499+GST/mo** — unpaid, the socket connects then drops with code **806**
+  ("Subscribe to Data APIs"). Uses the SDK's pull API (`run_forever`+`get_data`) so
+  reconnects use our backoff, not its tight ~1s loop.
+- **Both** (identical lifecycle): a supervisor thread holds the socket ONLY during a
+  **market window** (~09:08–15:40 IST) and reconnects with **exponential backoff
+  (5→60s)** — this kills the outside-hours reconnect storm that trips connection
+  rate limits (we hit Dhan **HTTP 429** before adding it). `start()` is a **no-op**
+  without creds/SDK (called in the `WERKZEUG_RUN_MAIN` guard beside `snaplog.start()`).
+  `set_watch` drives the live subscription delta from Flask request threads.
+- **In-memory store (identical shape both adapters):** `_latest[token]` (symbol, ltp,
+  open/high/low, prevClose, volume, oi, atp, depth=`{bids,asks}`) + a **forming
+  1-min candle** (`_bars`) whose `t` uses the **same IST-baked-as-UTC epoch ms** as
+  `get_ohlc`, so live bars align with seeded ones. Finished minutes are written to
+  `db.min_bars` — the Live feed thus **warms the backtester's minute cache** for free.
+- **Endpoints (all under `/api/live/`):**
+  - `GET config` — `public_status()`: configured/connected/marketOpen + watchlist
+    (never returns secrets).
+  - `POST watch` — `{symbols:[…], focus}` → subscribe/unsubscribe the delta.
+  - `GET seed/<sym>?interval=1|5|15|D` — historical candles to seed the chart
+    (reuses `nse_quote.get_ohlc`).
+  - `GET stream` — **SSE**, yields `{quotes, status, ts}` ~1×/s (headers:
+    `text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`; server
+    is already `threaded=True`). Breaks cleanly on `GeneratorExit` (client close).
+  - `GET snapshot?ids=<csv>` — one-shot poll fallback.
+- **Frontend:** the Live tab owns a **persistent** chart + one `EventSource`; it's
+  built once on entry and torn down on leave (NOT rebuilt by the poll timer). Baked
+  epoch ms → `Math.floor(t/1000)` for Lightweight Charts (UTC render == IST, same
+  trick as `istTime()`). The status chip reads **● LIVE** only when connected AND
+  market-open; the setup card (`liveSetupCard`) is provider-aware. Watchlist persists
+  in `localStorage` (`nseLiveWatch.v1`).
+  The lib loads from CDN; `static/vendor/lightweight-charts.standalone.production.js`
+  is an offline fallback (browser `onerror`).
+
 ### BLOCKED / unreliable endpoints (do not rely on)
 - `/api/quote-equity?symbol=X` → **403 Forbidden** (superseded by NextApi above).
 - `/api/chart-databyindex?index=<SYMBOL>EQN` → **empty** (superseded by
@@ -306,20 +380,44 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
 - OI price-direction coverage is partial pre-market; improves during 09:15–15:30 IST.
 - All endpoints are unofficial and can change without notice.
 - Data only meaningful during NSE market hours (Mon–Fri, 09:15–15:30 IST).
+- The Live tab is optional and needs the user's own broker credentials. **Angel One
+  SmartAPI is the free default** (auto TOTP login, no manual token step); **Dhan** is
+  an alternative but its Data API is a paid ₹499+GST/mo subscription. Either way it
+  currently streams **NSE cash equities only**.
 
 ## Roadmap / ideas (not yet built)
 
-- **Real-time broker feed** (the big one): integrate a free broker API for live
-  ticks, working charts, and market depth. User is leaning toward starting with
-  **Angel One SmartAPI** or **Upstox v2** (both free) but has no account yet.
-  Plan: keep the paper-trading interface, swap `get_price`/fills for the broker
-  feed. Needs the user's API credentials.
+- **Real-time broker feed** — ✅ **done for charts/quotes/depth** via a
+  provider-agnostic adapter: **Angel One SmartAPI (free, default)** or **Dhan (paid
+  data plan)** — `angel_feed.py` / `dhan_feed.py`, 📈 Live tab; see the live-feed
+  architecture note. Still open: route paper-trading fills/`get_price` through the
+  broker feed too, and extend the Live tab to index/F&O instruments (currently NSE
+  cash equities only).
 - Phone/LAN access + optional deploy.
 - Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
   bits (quotes, historical). See README/analysis for the API landscape.
 
 ## Done recently
 
+- **📈 Live feed → Angel One SmartAPI (FREE), provider-agnostic** — discovered
+  Dhan's live *Data API* is a paid ₹499+GST/mo plan (socket connects then drops with
+  code 806 unpaid), so added `angel_feed.py` using Angel One's **free** SmartAPI
+  WebSocket (SNAP_QUOTE = LTP + day OHLC/vol + OI + best-5 depth; auto TOTP login via
+  `pyotp`, prices in paise). `app.py` now selects `live_feed` at startup (Angel first,
+  Dhan fallback) behind the unchanged `/api/live/*` routes; `public_status()` carries
+  `provider`; the setup card is provider-aware. Also **hardened both feeds**: only
+  connect during a market window + exponential backoff (fixes an outside-hours
+  reconnect storm that tripped Dhan's HTTP 429), and the chip shows ● LIVE only when
+  connected AND market-open.
+- **📈 Live realtime tab (Dhan WebSocket + TradingView Lightweight Charts)** —
+  the project's first *true stream* and first external JS dependency. New
+  `dhan_feed.py` holds a Dhan `MarketFeed` (Full packets) on a supervisor thread,
+  resolves symbols via the cached scrip master, keeps an in-memory tick store +
+  forming 1-min candle (baked-IST epoch, persisted to `db.min_bars`), and is
+  exposed via `/api/live/{config,watch,seed,stream(SSE),snapshot}`. Frontend adds a
+  full-width workspace (persistent candlestick+volume chart, streaming watchlist,
+  5-level depth ladder, quote header, 1m/5m/15m/1D). Fully optional + gitignored
+  creds (`dhan_config.json`); no-op without a token. See the live-feed note above.
 - **Two parallel books — 🧪 Sim (cash) + 🎯 F&O Sim** (`book` tag on every
   `sim_trades` row; `cash` | `fno`): both books run the SAME 10 strategies off the
   SAME live context each cycle, but the `fno` book only takes F&O-eligible ideas
@@ -620,9 +718,13 @@ and cached (`get_token()`), then fetched on demand and cached ~30s.
 
 ## Conventions
 
-- Keep data-fetching logic in `nse_client.py`; keep `app.py` thin (routes only).
+- Keep data-fetching logic in `nse_client.py` / `nse_quote.py` / the live-feed
+  adapters (`angel_feed.py` / `dhan_feed.py`); keep `app.py` thin (routes only).
 - Normalize NSE fields into stable keys (`symbol`, `ltp`, `pChange`, `volume`,
   ...) so the frontend/CLI don't depend on NSE's raw field names.
-- No secrets in the repo (`.gitignore` covers `.env`). NSE needs no API key.
+- No secrets in the repo. NSE needs no API key; the optional live feed reads creds
+  from env or a **gitignored** config — `angel_config.json` (Angel One) or
+  `dhan_config.json` (Dhan). `.gitignore` covers `.env`, `*.db`, state JSON, both
+  config files, and `logs/`. Never commit a token/secret.
 - Only commit/push when the user explicitly asks.
 ```

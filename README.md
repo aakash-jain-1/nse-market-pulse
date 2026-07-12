@@ -3,8 +3,9 @@
 A live dashboard **+ CLI + strategy lab** that surfaces which NSE (National Stock
 Exchange of India) stocks are **in demand right now**, generates ranked trade
 ideas, forward-tests several trading strategies against detected **market
-regimes**, and lets you **paper-trade** equities, futures and options — all from
-NSE India's public JSON API, in an auto-refreshing web UI with no build step.
+regimes**, streams **genuine tick-by-tick realtime charts** (optional free Angel One feed),
+and lets you **paper-trade** equities, futures and options — mostly from NSE
+India's public JSON API, in an auto-refreshing web UI with no build step.
 
 > **Disclaimer:** For **educational and research purposes only**. It uses NSE
 > India's unofficial/public endpoints and is **not affiliated with NSE**.
@@ -17,6 +18,7 @@ NSE India's public JSON API, in an auto-refreshing web UI with no build step.
 
 - [What it does](#what-it-does)
 - [Feature tour](#feature-tour)
+- [Live realtime data (free broker feed)](#live-realtime-data-free-broker-feed)
 - [High-level architecture](#high-level-architecture)
 - [Detailed architecture](#detailed-architecture)
 - [Data flow](#data-flow)
@@ -56,6 +58,7 @@ layers analytics on top:
 | Tab | What it shows |
 |---|---|
 | ⚡ **Futures** *(default)* | Stock futures with basis (premium/discount to spot), annualized carry, OI buildup, and a **Momentum panel** ranking the strongest bullish/bearish movers. Toggle **All F&O** to sweep the full ~215-name universe. |
+| 📈 **Live** | **Genuine realtime workspace** — TradingView-style candlesticks + volume (persistent chart), a streaming **watchlist**, an LTP/OHLC/VWAP quote header and a live **5-level depth ladder**, all pushed tick-by-tick from a broker WebSocket via SSE. Powered by **Angel One SmartAPI (free)** by default, or Dhan. Optional: shows a one-time setup card until you add credentials. See [Live realtime data](#live-realtime-data-free-broker-feed). |
 | 💡 **Ideas** | Ranked LONG & SHORT setups from live signals (momentum, OI buildup, unusual volume, money flow) — each with a conviction score, plain-English reasons, and an entry/stop/target plan. |
 | 🧪 **Sim** | The multi-strategy forward-test + regime leaderboard + offline backtest (see [below](#strategy-sim-regimes--backtest)). |
 | 🎯 **F&O Sim** | The **same** forward-test as Sim, but a dedicated **parallel book that only trades F&O-eligible names** (ones you can actually take with futures/leverage). Same strategies, same live signals, same ₹2k/trade sizing — so you can compare F&O-only performance against the all-market book side by side. |
@@ -87,36 +90,122 @@ layers analytics on top:
 
 ---
 
+## Live realtime data (free broker feed)
+
+Everything else in this project is **HTTP polling** of NSE's public endpoints
+(finest granularity ≈1-min candles + ≈10-12 s quote snapshots). The **📈 Live**
+tab adds a *genuine* realtime source: a broker's **Live Market Feed** over a
+persistent **WebSocket**, pushed to the browser via **Server-Sent Events (SSE)**
+and drawn with **TradingView Lightweight Charts** (Apache-2.0, the project's first
+external JS dependency).
+
+**Two providers, one interface.** The feed is provider-agnostic — `app.py` selects
+`live_feed` at startup (`_select_live_feed()`):
+
+| Provider | Cost | Ticks | 5-level depth | Auth |
+|---|---|---|---|---|
+| **Angel One SmartAPI** *(default)* | **Free** | ✅ | ✅ | API key + client code + MPIN + TOTP secret (auto login) |
+| **Dhan** | Data API ₹499+GST/mo | ✅ | ✅ | client id + access token |
+
+Angel One is preferred when configured (it's free — Angel charges only ₹20/order
+brokerage on real trades, not for data); Dhan is used if only it is set up. It's
+**entirely optional** — with no credentials the tab shows a setup card and the rest
+of the app is unchanged.
+
+```mermaid
+flowchart LR
+    BWS["🌐 Broker WebSocket<br/>Angel One SmartAPI (free) · or Dhan<br/>tick LTP · day OHLC · OI · 5-level depth"] --> FEED
+    subgraph Server["🐍 Flask process (WERKZEUG_RUN_MAIN worker)"]
+        FEED["live_feed = angel_feed.py / dhan_feed.py<br/>daemon thread + market-window + backoff<br/>in-memory store + 1-min aggregation"]
+        SSE["/api/live/stream (SSE, ~1/s)"]
+        SEED["/api/live/seed (historical candles)"]
+        FEED --> SSE
+        FEED -.finished 1-min bars.-> MB[("db.min_bars<br/>(warms backtest cache)")]
+    end
+    SEED --> UI
+    SSE --> UI
+    UI["📈 Live tab<br/>Lightweight Charts + depth ladder + watchlist"]
+```
+
+**How it works**
+- The selected adapter (`angel_feed.py` or `dhan_feed.py`) holds one WebSocket on a
+  supervisor thread. Both share a hardened lifecycle: they connect **only during a
+  market window** (~09:08–15:40 IST) and reconnect with **exponential backoff**, so
+  an idle out-of-hours socket never storms the broker's connection limit. The
+  broker's **scrip master** is cached to resolve `symbol → token` (~2400 NSE names;
+  the tokens are NSE's standard ids, so RELIANCE → `2885` either way).
+- Every packet updates an in-memory `LATEST[token]` record (LTP, day OHLC, volume,
+  OI, best-5 depth) and folds the LTP into a **forming 1-minute candle** whose
+  timestamp uses the **same IST-baked-as-UTC epoch** as `/api/ohlc`, so the live bar
+  lines up exactly with the seeded history. Finished minutes are persisted to
+  `db.min_bars`, so the Live feed also **warms the backtester's minute cache** for free.
+- The chart is **seeded** from `/api/live/seed/<sym>` (reuses NSE's OHLCV feed),
+  then an `EventSource` on `/api/live/stream` drives `candleSeries.update()`, the
+  depth ladder and the quote header in realtime. The chart instance **persists**
+  across the dashboard's poll timer (it isn't rebuilt every refresh).
+- The **watchlist** (localStorage-persisted) sets what's subscribed via
+  `POST /api/live/watch`; click a row to focus its chart; add/remove symbols.
+
+**Setup (one-time)** — the tab shows provider-aware steps until configured.
+
+*Angel One (recommended, free):*
+1. Open a free **Angel One** account at `angelone.in`.
+2. `smartapi.angelone.in` → **Create an App** → copy the **API key**.
+3. Enable **TOTP** at `smartapi.angelone.in/enable-totp` and save the **base32 secret**.
+4. Copy `angel_config.example.json` → `angel_config.json` and fill `api_key`,
+   `client_code`, `mpin`, `totp_secret` *(or set `ANGEL_*` env vars)*. We compute the
+   6-digit code from the secret with `pyotp`, so the daily session refresh is automatic.
+5. **Restart** `python app.py` — the tab goes live automatically.
+
+*Dhan (alternative — note the paid data plan):* subscribe to **DhanHQ Data APIs**
+(₹499+GST/mo) at `web.dhan.co`, generate an access token, copy
+`dhan_config.example.json` → `dhan_config.json` with your `client_id` +
+`access_token`, and restart. If both are configured, Angel One wins.
+
+> Credentials stay on your machine: `angel_config.json` / `dhan_config.json` are
+> **gitignored** and never leave the app. Ticks only flow during market hours
+> (09:15–15:30 IST); outside that the tab shows the last session and a "market
+> closed" state. Lightweight Charts loads from CDN by default — drop the file in
+> `static/vendor/lightweight-charts.standalone.production.js` to self-host offline.
+
+---
+
 ## High-level architecture
 
 ```mermaid
 flowchart LR
     subgraph Browser["🖥️ Browser (single-page dashboard)"]
         UI["index.html<br/>tabs · tables · charts · modals<br/>polls /api/* on a timer"]
+        LIVEUI["📈 Live tab<br/>Lightweight Charts + depth<br/>EventSource (SSE)"]
     end
 
     subgraph Server["🐍 Flask app (port 5055)"]
-        APP["app.py<br/>thin JSON routes"]
+        APP["app.py<br/>thin JSON routes + SSE"]
         CORE["nse_client.py<br/>session + hot lists + scanner + ideas"]
         QUOTE["nse_quote.py<br/>quotes · charts · option chain · Greeks"]
-        STRAT["strategies.py<br/>9 generators + regime detector"]
+        STRAT["strategies.py<br/>10 generators + regime detector"]
         SIM["sim.py<br/>per-strategy forward-test"]
         BT["backtest_strategies.py<br/>offline replay"]
         PAPER["paper.py<br/>virtual portfolio"]
         LOG["snapshot_logger.py<br/>background thread"]
+        FEED["live_feed (angel_feed / dhan_feed)<br/>broker WebSocket → in-memory ticks"]
         DB[("db.py → SQLite<br/>market.db")]
     end
 
     NSE["🌐 NSE India<br/>public JSON API"]
+    BROKER["🌐 Angel One (free) / Dhan<br/>Live Market Feed (WebSocket)"]
 
     UI -->|HTTP JSON| APP
-    APP --> CORE & QUOTE & STRAT & SIM & BT & PAPER & LOG
+    LIVEUI -->|SSE + seed| APP
+    APP --> CORE & QUOTE & STRAT & SIM & BT & PAPER & LOG & FEED
     CORE --> NSE
     QUOTE --> NSE
     STRAT --> CORE & QUOTE
     SIM --> STRAT
     BT --> DB
     LOG --> SIM & DB
+    FEED -->|tick-by-tick| BROKER
+    FEED -->|finished 1-min bars| DB
     SIM -->|trade ledger| DB
     SIM -->|settings + daily rollup| SIMJSON[("sim_state.json")]
     PAPER -->|state| PJSON[("paper_state.json")]
@@ -513,6 +602,15 @@ Best results during market hours (Mon–Fri, 09:15–15:30 IST): the background
 logger captures snapshots + strategy context automatically, feeding the sim and
 the backtest.
 
+### (Optional) enable the Live realtime tab
+
+The **📈 Live** tab needs a broker WebSocket feed — it's optional and the rest of
+the app works without it. **Angel One SmartAPI is free** and the default: create an
+app at `smartapi.angelone.in`, enable TOTP, copy `angel_config.example.json` →
+`angel_config.json` and fill `api_key` / `client_code` / `mpin` / `totp_secret`,
+then restart. (Dhan also works but its Data API is a paid ₹499+GST/mo plan.)
+See [Live realtime data](#live-realtime-data-free-broker-feed) for the full steps.
+
 ### Command-line scanner
 
 ```bash
@@ -539,6 +637,11 @@ python nse_demand.py losers     # top losers
 | `GET /api/deepdive/<sym>` | 30/60/90-day price + delivery + OI deep-dive |
 | `GET /api/quote/<sym>` · `/api/chart/<sym>` | Live quote + market depth · intraday price line |
 | `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
+| `GET /api/live/config` | Live feed status: provider (angel/dhan)? configured? connected? market-open? watchlist (never returns secrets) |
+| `POST /api/live/watch` | Set the subscribed symbol set + focus (`{symbols:[…], focus}`) |
+| `GET /api/live/seed/<sym>?interval=<1\|5\|15\|D>` | Historical candles to seed the live chart (reuses the OHLCV feed) |
+| `GET /api/live/stream` | **SSE**: pushes the watched set's latest ticks + forming candle + depth ~1×/s |
+| `GET /api/live/snapshot?ids=<csv>` | One-shot latest ticks (poll fallback for the SSE stream) |
 | `GET /api/optionchain/<sym>[/summary]` | Full option chain / analytics (PCR, Max-Pain, Greeks) |
 | `GET /api/fno/universe` | List of F&O underlyings |
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads (`/daily` also returns `perf`: date-wise realized P&L + a today card with open-book MTM). All accept `?book=cash\|fno` (default `cash`) to pick the all-market vs dedicated F&O book. |
@@ -561,6 +664,8 @@ nse-market-pulse/
 ├── app.py                  # Flask server + JSON API (thin routes) — port 5055
 ├── nse_client.py           # NSE session mgmt + hot lists + scanner + ideas (CORE)
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
+├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
+├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
 ├── strategies.py           # 10 strategy generators (incl. regime-adaptive) + regime detector
 ├── sim.py                  # Multi-strategy forward-tester + regime leaderboard
 ├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
@@ -573,11 +678,14 @@ nse-market-pulse/
 ├── nse_demand.py           # Standalone CLI scanner
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
+├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
+├── angel_config.example.json # Template for Angel One creds → copy to angel_config.json
+├── dhan_config.example.json  # Template for Dhan creds → copy to dhan_config.json
 ├── data/                   # (gitignored) market.db + any legacy CSVs
 ├── requirements.txt
 ├── README.md
 ├── AGENTS.md               # Context/spec for AI agents & future sessions
-└── *.json                  # (gitignored) sim_state.json, paper_state.json
+└── *.json                  # (gitignored) sim_state.json, paper_state.json, angel_config.json, dhan_config.json
 ```
 
 ---
@@ -619,8 +727,14 @@ raw field names.
   ~30s); NSE itself retains the history (~30–40 days of 1-min, years of daily), so
   we don't archive candles — we just query the window we need. Symbols without a
   charting token fall back to the price-only NextApi line, then to a sparkline.
-- No API key needed; **no secrets in the repo** (`.gitignore` covers `.env`,
-  `*.db`, state JSON, CSVs).
+- The **Live tab** is **optional** and needs your own broker credentials. **Angel
+  One SmartAPI is free** and the default (auto TOTP login — no manual token step);
+  **Dhan** works too but its Data API is a paid ₹499+GST/mo subscription. Ticks only
+  flow during market hours. It streams **NSE cash equities** (the scrip-master slice
+  we resolve); index/F&O instruments aren't wired into the tab yet.
+- The core app needs **no API key**; **no secrets in the repo** (`.gitignore`
+  covers `.env`, `*.db`, state JSON, CSVs, `logs/`, and the broker configs
+  `angel_config.json` / `dhan_config.json`).
 
 ---
 
