@@ -699,18 +699,32 @@ def get_recommendations(fno_only=False, limit=10):
     entry/stop/target plan. Educational signal summary — NOT investment advice.
     """
     rows = get_scanner(limit=250)
-    ideas = []
-    for e in rows:
-        if fno_only and not e.get("fno"):
-            continue
-        idea = _build_idea(e)
-        if idea:
-            ideas.append(idea)
-
+    # Journal ALL qualifying ideas (not just the fno subset) so entries stay
+    # consistent regardless of the F&O toggle; the toggle only filters the view.
+    ideas = [i for i in (_build_idea(e) for e in rows) if i]
     longs = sorted([i for i in ideas if i["direction"] == "LONG"],
-                   key=lambda x: x["conviction"], reverse=True)[:limit]
+                   key=lambda x: x["conviction"], reverse=True)
     shorts = sorted([i for i in ideas if i["direction"] == "SHORT"],
-                    key=lambda x: x["conviction"], reverse=True)[:limit]
+                    key=lambda x: x["conviction"], reverse=True)
+
+    # Fix each idea's entry + timestamp on first sight today and re-price the
+    # whole day's set, so the UI can show "given HH:MM" + move-since-entry even
+    # after an idea drops out of the fresh top set. Re-pricing uses ONLY the
+    # cached hot-list map (a dict lookup) — never a per-symbol network fetch.
+    try:
+        pmap = get_price_map()
+    except Exception:
+        pmap = {}
+    try:
+        import ideas_journal
+        longs, shorts = ideas_journal.enrich(longs, shorts,
+                                             price_fn=lambda s: pmap.get(s))
+    except Exception:
+        longs, shorts = longs[:limit], shorts[:limit]
+
+    if fno_only:
+        longs = [i for i in longs if i.get("fno")]
+        shorts = [i for i in shorts if i.get("fno")]
     return {
         "longs": longs,
         "shorts": shorts,

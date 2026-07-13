@@ -66,6 +66,14 @@ EOD_OI_COLS = [
     "volume", "lot",
 ]
 _EOD_OI_TEXT = {"symbol", "expiry", "d", "date"}
+IDEA_COLS = [
+    "day", "symbol", "direction", "entry", "stop", "target", "stopPct", "targetPct",
+    "rr", "conviction", "rating", "reasons", "fno", "pChange", "firstSeenAt",
+    "lastSeenAt", "ltp", "movePct", "maxMovePct", "minMovePct",
+    "outcome", "outcomeAt", "outcomePct",
+]
+_IDEA_TEXT = {"day", "symbol", "direction", "rating", "reasons", "firstSeenAt",
+              "lastSeenAt", "outcome", "outcomeAt"}
 
 
 def _conn():
@@ -156,6 +164,18 @@ def init():
                     PRIMARY KEY (symbol, t)
                 )""")
             c.execute("CREATE INDEX IF NOT EXISTS ix_min_bars_sym ON min_bars(symbol)")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS ideas (
+                    day TEXT, symbol TEXT, direction TEXT,
+                    entry REAL, stop REAL, target REAL,
+                    stopPct REAL, targetPct REAL, rr REAL,
+                    conviction REAL, rating TEXT, reasons TEXT, fno INTEGER,
+                    pChange REAL, firstSeenAt TEXT, lastSeenAt TEXT,
+                    ltp REAL, movePct REAL, maxMovePct REAL, minMovePct REAL,
+                    outcome TEXT, outcomeAt TEXT, outcomePct REAL,
+                    PRIMARY KEY (day, symbol, direction)
+                )""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_ideas_day ON ideas(day)")
         _import_legacy_csv()
         _initialized = True
 
@@ -271,6 +291,20 @@ def context_stats():
             "SUM(LENGTH(payload)) bytes FROM context_log").fetchone()
     return {"cycles": r["n"] or 0, "days": r["d"] or 0,
             "first": r["a"], "last": r["b"], "bytes": r["bytes"] or 0}
+
+
+def regime_by_day():
+    """{day: {label, niftyPct}} using the LAST regime detected each day.
+    Last-write-wins matches the sim's per-day rollup, so views agree."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT c.day day, c.regime regime, c.niftyPct niftyPct "
+            "FROM context_log c JOIN ("
+            "  SELECT day, MAX(ts) mts FROM context_log "
+            "  WHERE regime IS NOT NULL AND regime != '' GROUP BY day"
+            ") m ON c.day = m.day AND c.ts = m.mts")
+        return {r["day"]: {"label": r["regime"], "niftyPct": r["niftyPct"]}
+                for r in rows}
 
 
 # ----------------------------------------------------------------------------
@@ -515,6 +549,71 @@ def min_bars_span(symbol):
         r = c.execute("SELECT MIN(t) a, MAX(t) z, COUNT(*) n FROM min_bars "
                       "WHERE symbol=?", (symbol.upper(),)).fetchone()
     return (r["a"], r["z"], r["n"] or 0)
+
+
+# ----------------------------------------------------------------------------
+# Ideas journal (durable daily record of every idea shown on the Ideas tab)
+# ----------------------------------------------------------------------------
+def _idea_to_row(d):
+    row = []
+    for col in IDEA_COLS:
+        if col == "reasons":
+            row.append(json.dumps(d.get("reasons") or []))
+        elif col == "fno":
+            row.append(1 if d.get("fno") else 0)
+        elif col in _IDEA_TEXT:
+            row.append(d.get(col))
+        else:
+            row.append(_num_or_none(d.get(col)))
+    return tuple(row)
+
+
+def _row_to_idea(r):
+    d = {col: r[col] for col in IDEA_COLS}
+    try:
+        d["reasons"] = json.loads(r["reasons"]) if r["reasons"] else []
+    except Exception:
+        d["reasons"] = []
+    d["fno"] = bool(r["fno"])
+    return d
+
+
+def ideas_upsert(rows):
+    """Insert/replace today's idea records (keyed by day+symbol+direction)."""
+    if not rows:
+        return 0
+    with _write_lock, _conn() as c:
+        c.executemany(
+            f"INSERT OR REPLACE INTO ideas ({','.join(IDEA_COLS)}) "
+            f"VALUES ({','.join('?' * len(IDEA_COLS))})",
+            [_idea_to_row(d) for d in rows])
+    return len(rows)
+
+
+def ideas_for_day(day):
+    with _conn() as c:
+        return [_row_to_idea(r) for r in c.execute(
+            "SELECT * FROM ideas WHERE day=? ORDER BY firstSeenAt", (day,))]
+
+
+def ideas_days(limit=60):
+    """Per-day summary (newest first) for the Ideas history table."""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT day, COUNT(*) n, "
+            "SUM(CASE WHEN direction='LONG' THEN 1 ELSE 0 END) longs, "
+            "SUM(CASE WHEN direction='SHORT' THEN 1 ELSE 0 END) shorts, "
+            "SUM(CASE WHEN outcome='TARGET' THEN 1 ELSE 0 END) targets, "
+            "SUM(CASE WHEN outcome='STOP' THEN 1 ELSE 0 END) stops, "
+            "AVG(maxMovePct) avgBest, AVG(minMovePct) avgWorst, AVG(movePct) avgMove "
+            "FROM ideas GROUP BY day ORDER BY day DESC LIMIT ?", (int(limit),))]
+
+
+def ideas_stats():
+    with _conn() as c:
+        r = c.execute("SELECT COUNT(*) n, COUNT(DISTINCT day) d, "
+                      "MIN(day) a, MAX(day) z FROM ideas").fetchone()
+    return {"ideas": r["n"] or 0, "days": r["d"] or 0, "first": r["a"], "last": r["z"]}
 
 
 # ----------------------------------------------------------------------------

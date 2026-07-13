@@ -120,6 +120,24 @@ def api_recommendations():
     ))
 
 
+@app.route("/api/ideas/history")
+def api_ideas_history():
+    """Per-day summary of journaled ideas (durable, multi-session)."""
+    import ideas_journal
+    try:
+        limit = int(request.args.get("limit", 60))
+    except (TypeError, ValueError):
+        limit = 60
+    return jsonify(ideas_journal.history(limit=limit))
+
+
+@app.route("/api/ideas/day")
+def api_ideas_day():
+    """Every idea journaled on ?date=YYYY-MM-DD, with its intraday outcome."""
+    import ideas_journal
+    return jsonify(ideas_journal.day_ideas(request.args.get("date", "")))
+
+
 @app.route("/api/deepdive/<symbol>")
 def api_deepdive(symbol):
     return jsonify(nse.get_stock_deepdive(symbol))

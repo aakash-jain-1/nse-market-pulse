@@ -225,6 +225,18 @@
     .reco-card.short { border-left: 3px solid var(--red); }
     .reco-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
     .reco-sym { font-size: 16px; font-weight: 700; }
+    .reco-ltp { font-size: 13px; font-weight: 700; margin-left: 2px; }
+    .reco-meta { font-size: 11px; color: var(--muted); margin: -2px 0 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .reco-move { font-size: 12px; margin: 0 0 8px; }
+    .reco-move b { font-size: 13px; }
+    .idea-live { color: var(--green); font-weight: 700; font-size: 10px; }
+    .idea-track { color: var(--muted); font-size: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 0 5px; }
+    .idea-oc { font-size: 10px; font-weight: 700; border-radius: 8px; padding: 0 5px; border: 1px solid currentColor; }
+    .reco-card.stale { opacity: 0.82; }
+    .iday-row { cursor: pointer; }
+    .iday-row:hover { background: rgba(255,255,255,0.03); }
+    .iday-sub > td { padding: 0 !important; }
+    .iday-sub .tbl { margin: 0; border-radius: 0; }
     .reco-sym .fno-badge { font-size: 9px; font-weight: 700; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; margin-left: 6px; vertical-align: middle; }
     .reco-conv { text-align: right; font-size: 11px; color: var(--muted); }
     .reco-conv b { display: block; font-size: 15px; }
@@ -1551,18 +1563,52 @@
         el.onclick = () => openDetail(el.getAttribute("data-sym")));
     }
 
+    function agoStr(m) {
+      if (m == null) return "";
+      if (m < 1) return "just now";
+      if (m < 60) return m + "m ago";
+      const h = Math.floor(m / 60), mm = m % 60;
+      return mm ? `${h}h ${mm}m ago` : `${h}h ago`;
+    }
+
     function recoCard(idea) {
       const dir = idea.direction === "LONG" ? "long" : "short";
       const fno = idea.fno ? `<span class="fno-badge">F&O</span>` : "";
       const pc = idea.pChange;
       const pcHtml = pc == null ? "" :
         `<span class="${pc>=0?'pos':'neg'}" style="font-size:12px;font-weight:600">${pc>=0?'+':''}${pc.toFixed(2)}%</span>`;
+      const ltpHtml = idea.ltp == null ? "" :
+        `<span class="reco-ltp" title="Last traded price">₹${fmtPrice(idea.ltp)}</span>`;
+      // When the idea was first flagged today + how long ago; fresh vs tracking.
+      const t = idea.firstSeenAt ? idea.firstSeenAt.slice(11, 16) : null;
+      const age = agoStr(idea.ageMin);
+      const stateTag = idea.fresh === false
+        ? `<span class="idea-track" title="Flagged earlier today; no longer a fresh signal — still tracking its move">tracking</span>`
+        : (idea.fresh === true ? `<span class="idea-live" title="Still a fresh signal this refresh">● live</span>` : "");
+      // Sticky intraday verdict once the move first touches target/stop.
+      const ocT = idea.outcomeAt ? idea.outcomeAt.slice(11, 16) : "";
+      const ocHtml = idea.outcome === "TARGET"
+        ? `<span class="idea-oc pos" title="Reached its target intraday${ocT ? " at " + ocT : ""} (first touch)">✓ target${ocT ? " " + ocT : ""}</span>`
+        : idea.outcome === "STOP"
+        ? `<span class="idea-oc neg" title="Hit its stop intraday${ocT ? " at " + ocT : ""} (first touch)">✗ stop${ocT ? " " + ocT : ""}</span>`
+        : "";
+      const metaHtml = t ? `<div class="reco-meta">🕘 given <b>${t}</b>${age ? ` · ${age}` : ""}${stateTag ? " " + stateTag : ""}${ocHtml ? " " + ocHtml : ""}</div>` : "";
+      // Move since the FIXED entry, in the idea's direction (green=working).
+      const mv = idea.movePct;
+      const mvHtml = mv == null ? "" :
+        `<div class="reco-move" title="Move since entry, in the idea's direction (green = working, red = against)">
+          Since entry <b class="${mv >= 0 ? 'pos' : 'neg'}">${_sgn(mv)}${mv}%</b>${
+          (idea.maxMovePct != null && idea.minMovePct != null)
+            ? `<span style="color:var(--muted);font-weight:400"> · best ${_sgn(idea.maxMovePct)}${idea.maxMovePct}% / worst ${_sgn(idea.minMovePct)}${idea.minMovePct}%</span>` : ""}
+        </div>`;
       const reasons = (idea.reasons || []).map(r => `<li>${r}</li>`).join("");
-      return `<div class="reco-card ${dir}" data-sym="${idea.symbol}">
+      return `<div class="reco-card ${dir}${idea.fresh === false ? ' stale' : ''}" data-sym="${idea.symbol}">
         <div class="reco-top">
-          <div><span class="reco-sym">${idea.symbol}</span>${fno} ${pcHtml} ${drillBtn(idea.symbol)}</div>
+          <div><span class="reco-sym">${idea.symbol}</span>${fno} ${ltpHtml} ${pcHtml} ${drillBtn(idea.symbol)}</div>
           <div class="reco-conv ${idea.rating}">Conviction<b>${idea.conviction}</b>${idea.rating}</div>
         </div>
+        ${metaHtml}
+        ${mvHtml}
         <div class="reco-plan">
           <div class="cell"><div class="k">Entry</div><div class="v">₹${fmtPrice(idea.entry)}</div></div>
           <div class="cell"><div class="k">Stop</div><div class="v neg">₹${fmtPrice(idea.stop)}</div></div>
@@ -1585,6 +1631,118 @@
         ${colHtml(longs, "long", "🟢 Long ideas (buy)")}
         ${colHtml(shorts, "short", "🔴 Short ideas (sell)")}
       </div>`;
+    }
+
+    // ---- Ideas history (durable, multi-session) --------------------------
+    // Each idea is journaled with a FIXED entry + timestamp and re-priced all
+    // day; the first touch of its target/stop is recorded as a sticky verdict.
+    // This browses past days and how those ideas played out.
+    function renderIdeaHistory(hist) {
+      const days = (hist && hist.days) || [];
+      const open = window._ideaDayOpen || (window._ideaDayOpen = new Set());
+      const cache = window._ideaDayCache || (window._ideaDayCache = {});
+      const st = (hist && hist.stats) || {};
+      const sub = st.days
+        ? `<span style="color:var(--muted);font-weight:400">· ${st.ideas} ideas over ${st.days} day${st.days === 1 ? "" : "s"}</span>`
+        : "";
+      if (!days.length)
+        return `<h3 class="reco-colhead" style="margin-top:20px">📅 Ideas history ${sub}</h3>
+          <div class="chart-note">History builds up here as ideas are journaled each session — durable in SQLite, so it survives restarts and accumulates day by day.</div>`;
+      const rows = days.map(d => {
+        const isOpen = open.has(d.day);
+        const caret = `<span style="color:var(--muted);display:inline-block;width:12px">${isOpen ? "▾" : "▸"}</span>`;
+        const hit = d.hitRate == null ? "—" : d.hitRate + "%";
+        const best = d.avgBest == null ? "—" : _sgn(d.avgBest) + d.avgBest + "%";
+        const worst = d.avgWorst == null ? "—" : _sgn(d.avgWorst) + d.avgWorst + "%";
+        const rg = d.regime;
+        const np = d.niftyPct == null ? "" : ` (index proxy ${_sgn(d.niftyPct)}${d.niftyPct}%)`;
+        const rgCell = rg
+          ? `<span class="rgm-badge ${REGIME_CLS[rg] || "neutral"}" style="font-size:10px;padding:1px 6px" title="Market regime that day${np}">${REGIME_ICON[rg] || ""} ${rg}</span>`
+          : `<span style="color:var(--muted)">—</span>`;
+        const tr = `<tr class="iday-row" data-iday="${d.day}">
+          <td class="day">${caret}<b>${simDT(d.day)}</b></td>
+          <td style="text-align:left">${rgCell}</td>
+          <td>${d.n}</td>
+          <td style="color:var(--muted)">${d.longs || 0}L / ${d.shorts || 0}S</td>
+          <td class="pos">${d.targets || 0}</td>
+          <td class="neg">${d.stops || 0}</td>
+          <td class="${(d.hitRate || 0) >= 50 ? "pos" : (d.hitRate == null ? "" : "neg")}">${hit}</td>
+          <td class="${(d.avgBest || 0) >= 0 ? "pos" : ""}">${best}</td>
+          <td class="${(d.avgWorst || 0) < 0 ? "neg" : ""}">${worst}</td>
+        </tr>`;
+        const subRow = isOpen
+          ? `<tr class="iday-sub"><td colspan="9">${renderIdeaDay(cache[d.day])}</td></tr>`
+          : "";
+        return tr + subRow;
+      }).join("");
+      return `<h3 class="reco-colhead" style="margin-top:20px">📅 Ideas history ${sub}</h3>
+        <table class="tbl"><thead><tr>
+          <th class="day">Date</th>
+          <th style="text-align:left" title="Market regime that day (last detection) — see how ideas fared by market type">Regime</th>
+          <th title="Ideas journaled that day">Ideas</th>
+          <th title="Long / Short split">L/S</th>
+          <th title="Reached the full target intraday (first touch)">✓Tgt</th>
+          <th title="Hit the stop intraday (first touch)">✗Stop</th>
+          <th title="Target ÷ (target + stop) — of the ideas that resolved, how many won">Hit%</th>
+          <th title="Average best favourable move (MFE)">Avg best</th>
+          <th title="Average worst adverse move (MAE)">Avg worst</th>
+        </tr></thead><tbody>${rows}</tbody></table>
+        <div class="chart-note">Click a day to see its individual ideas. ✓Tgt / ✗Stop = first-touch verdict recorded live (no look-ahead); the rest time-tracked. Educational — NOT advice.</div>`;
+    }
+
+    function renderIdeaDay(payload) {
+      if (!payload) return `<div class="chart-note" style="margin:6px 10px">Loading…</div>`;
+      if (payload.error) return `<div class="chart-note err" style="margin:6px 10px">Couldn't load: ${payload.error}</div>`;
+      const ideas = payload.ideas || [];
+      if (!ideas.length) return `<div class="chart-note" style="margin:6px 10px">No ideas recorded this day.</div>`;
+      const OC = { TARGET: '<span class="pos">✓ target</span>', STOP: '<span class="neg">✗ stop</span>' };
+      const row = i => {
+        const arrow = i.direction === "LONG" ? "▲" : "▼";
+        const dcls = i.direction === "LONG" ? "pos" : "neg";
+        const oc = OC[i.outcome] || '<span style="color:var(--muted)">— open</span>';
+        const tm = i.firstSeenAt ? i.firstSeenAt.slice(11, 16) : "";
+        const mv = i.movePct;
+        const fno = i.fno ? ' <span class="fno-badge">F&O</span>' : "";
+        return `<tr data-sym="${i.symbol}" title="Open detail">
+          <td style="text-align:left;color:var(--muted)">${tm}</td>
+          <td style="text-align:left"><b>${i.symbol}</b>${fno} ${drillBtn(i.symbol)}</td>
+          <td class="${dcls}" style="text-align:left">${arrow} ${i.direction}</td>
+          <td>₹${fmtPrice(i.entry)}</td>
+          <td class="pos">${i.maxMovePct == null ? "—" : _sgn(i.maxMovePct) + i.maxMovePct + "%"}</td>
+          <td class="neg">${i.minMovePct == null ? "—" : _sgn(i.minMovePct) + i.minMovePct + "%"}</td>
+          <td class="${(mv || 0) >= 0 ? "pos" : "neg"}">${mv == null ? "—" : _sgn(mv) + mv + "%"}</td>
+          <td style="text-align:left">${oc}</td>
+        </tr>`;
+      };
+      return `<table class="tbl"><thead><tr>
+        <th style="text-align:left">Given</th>
+        <th style="text-align:left">Symbol</th>
+        <th style="text-align:left">Dir</th>
+        <th>Entry</th>
+        <th title="Best favourable move (MFE)">Best</th>
+        <th title="Worst adverse move (MAE)">Worst</th>
+        <th title="Move by the last update that day">Final</th>
+        <th style="text-align:left">Outcome</th>
+      </tr></thead><tbody>${ideas.map(row).join("")}</tbody></table>`;
+    }
+
+    async function toggleIdeaDay(day) {
+      if (!day) return;
+      const open = window._ideaDayOpen || (window._ideaDayOpen = new Set());
+      const cache = window._ideaDayCache || (window._ideaDayCache = {});
+      if (open.has(day)) {
+        open.delete(day);
+        if (current === "recos") load();
+        return;
+      }
+      open.add(day);
+      if (current === "recos") load();                 // show caret + "Loading…"
+      try {
+        cache[day] = await fetch("/api/ideas/day?date=" + encodeURIComponent(day)).then(r => r.json());
+      } catch (e) {
+        cache[day] = { error: String(e) };
+      }
+      if (current === "recos" && open.has(day)) load();  // re-render with the data
     }
 
     const _sgn = (v) => (v >= 0 ? "+" : "");
@@ -2998,10 +3156,15 @@
         if (data.error) throw new Error(data.error);
         if (current === "recos") {
           window._lastRows = (data.longs || []).concat(data.shorts || []);
-          wrap.innerHTML = renderRecos(data);
+          let hist = { days: [] };
+          try { hist = await fetch("/api/ideas/history").then(r => r.json()); } catch (e) {}
+          wrap.innerHTML = renderRecos(data) + renderIdeaHistory(hist);
           annotateInfo(wrap);
           wrap.querySelectorAll("[data-sym]").forEach(el =>
             el.onclick = () => openDetail(el.getAttribute("data-sym")));
+          // History day-rows expand into that day's individual ideas + outcomes.
+          wrap.querySelectorAll("tr.iday-row").forEach(tr =>
+            tr.onclick = () => toggleIdeaDay(tr.getAttribute("data-iday")));
           document.getElementById("futMomentum").style.display = "none";
           document.getElementById("updated").textContent =
             "Updated " + new Date().toLocaleTimeString("en-IN");

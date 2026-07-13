@@ -89,7 +89,13 @@ NSE/
 ```bash
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
+python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
 ```
+
+`db_inspect.py` opens the DB **read-only** (safe while the app is live):
+`python db_inspect.py` (overview: tables, row counts, spans),
+`python db_inspect.py <table> [N]` (last N rows + schema),
+`python db_inspect.py sql "SELECT ..."` (arbitrary read-only query).
 
 The Flask app runs in debug mode, so it auto-reloads on `.py` changes and
 re-reads `templates/index.html` on every request (no restart needed for UI edits).
@@ -399,6 +405,22 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **💡 Ideas journal → durable + historical view** (`ideas_journal.py`, now
+  SQLite-backed via the new `ideas` table in `db.py`). The Ideas tab was
+  stateless (entry == current price every poll, no memory). The journal now
+  freezes each idea's **entry + `firstSeenAt`** on first sight, re-prices the
+  whole day's set every poll (`movePct` + best/worst MFE/MAE), and records a
+  **sticky first-touch verdict** (`outcome` = TARGET / STOP + `outcomeAt`, no
+  look-ahead). Records persist across restarts and accumulate day by day, so
+  `/api/ideas/history` (per-day summary: **market regime** [last detection,
+  via `db.regime_by_day()` off `context_log`], n, L/S, ✓Tgt/✗Stop, Hit%, avg
+  best/worst) and `/api/ideas/day?date=` (that day's ideas + outcomes) drive a
+  new **📅 Ideas history** table under the live cards (click a day to expand its
+  trades; rows deep-dive-able). Live cards show a `✓ target HH:MM` / `✗ stop`
+  badge. A one-time import folds any pre-existing `ideas_journal.json` (today)
+  into the DB so the migration loses nothing. `nse_client.get_recommendations`
+  calls `ideas_journal.enrich(...)` with a cached `price_fn` (no per-symbol
+  network fetch). Educational — NOT advice.
 - **📈 Live feed → Angel One SmartAPI (FREE), provider-agnostic** — discovered
   Dhan's live *Data API* is a paid ₹499+GST/mo plan (socket connects then drops with
   code 806 unpaid), so added `angel_feed.py` using Angel One's **free** SmartAPI
