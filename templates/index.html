@@ -346,7 +346,7 @@
       .alert-toast { right: 10px; left: 10px; bottom: 12px; max-width: none; }
     }
 
-    /* ---- Live realtime tab (Dhan feed + TradingView Lightweight Charts) ---- */
+    /* ---- Live realtime tab (broker feed: Angel One / Dhan + TV Lightweight Charts) ---- */
     .live-wrap { display: grid; grid-template-columns: 210px 1fr 250px; gap: 14px; padding: 16px; }
     .live-col { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
     .live-main { min-width: 0; }
@@ -359,6 +359,7 @@
     .live-chip { font-size: 11px; padding: 3px 9px; border-radius: 20px; white-space: nowrap; }
     .live-chip.on { color: var(--green); border: 1px solid var(--green); background: rgba(38,208,124,0.1); }
     .live-chip.off { color: var(--muted); border: 1px solid var(--border); }
+    .live-provider { font-size: 11px; padding: 3px 8px; border-radius: 20px; white-space: nowrap; color: var(--accent); border: 1px solid var(--border); }
     .live-chart { width: 100%; height: 470px; }
     .live-note { font-size: 11px; color: var(--muted); margin-top: 8px; }
     .live-add { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border);
@@ -694,8 +695,8 @@
     const TABS = [
       { key: "futures",    label: "⚡ Futures", title: "Stock Futures — Basis & OI",
         desc: "Futures with premium/discount to spot and OI buildup. The Momentum panel ranks the strongest bullish/bearish movers (price move × OI activity). Toggle 'All F&O' to cover the whole ~215-name universe." },
-      { key: "live",       label: "📈 Live", title: "Live Realtime — Dhan feed",
-        desc: "Genuine tick-by-tick charts (TradingView-style candles + volume), a live 5-level depth ladder and a streaming watchlist — powered by your Dhan WebSocket feed. Real ticks during market hours; otherwise shows the last session. Educational — NOT advice." },
+      { key: "live",       label: "📈 Live", title: "Live Realtime — broker feed",
+        desc: "Genuine tick-by-tick charts (TradingView-style candles + volume), a live 5-level depth ladder and a streaming watchlist — powered by your broker WebSocket feed (Angel One, free, or Dhan). Real ticks during market hours; otherwise shows the last session. Educational — NOT advice." },
       { key: "recos",      label: "💡 Ideas", title: "Trade Ideas — Long / Short",
         desc: "Ranked LONG & SHORT setups derived from live signals (momentum, OI buildup, unusual volume, money flow), each with a conviction score, reasons and an entry/stop/target plan. Signal summary — NOT investment advice." },
       { key: "sim",        label: "🧪 Sim", title: "Recommendation Simulator — did the ideas work?",
@@ -2544,12 +2545,13 @@
     }
 
     // =====================================================================
-    // Live realtime tab — Dhan WebSocket feed + TradingView Lightweight Charts
+    // Live realtime tab — broker WebSocket feed (Angel One / Dhan) + TradingView
+    // Lightweight Charts
     // =====================================================================
     // The dashboard polls NSE JSON; this tab instead holds ONE persistent chart
     // and an EventSource to /api/live/stream, which samples the server's in-memory
-    // Dhan tick store ~1x/s. Candle timestamps use the same IST-baked-as-UTC epoch
-    // as /api/ohlc, so live forming bars line up with the seeded history.
+    // broker tick store ~1x/s. Candle timestamps use the same IST-baked-as-UTC
+    // epoch as /api/ohlc, so live forming bars line up with the seeded history.
     const LIVE_WATCH_KEY = "nseLiveWatch.v1";
     function liveWatchLoad() {
       try {
@@ -2616,6 +2618,7 @@
               <button class="ivbtn" data-iv="15">15m</button>
               <button class="ivbtn" data-iv="D">1D</button>
             </span>
+            <span class="live-provider" id="liveProvider" title="Which realtime feed is connected" style="display:none"></span>
             <span class="live-chip off" id="liveStatus">● connecting…</span>
           </div>
           <div id="liveChart" class="live-chart"></div>
@@ -2703,7 +2706,7 @@
         window._lwc.chart.timeScale().fitContent();
         window._lwc.lastBar = cd[cd.length - 1];
         window._lwc.seedIv = iv;
-        if (note) note.textContent = `Seeded ${cd.length} ${daily ? "daily" : iv + "m"} candles · streaming live via Dhan`;
+        if (note) note.textContent = `Seeded ${cd.length} ${daily ? "daily" : iv + "m"} candles · streaming live via ${window._liveProviderName || "your broker feed"}`;
       } catch (e) { if (note) note.textContent = "Seed failed: " + e.message; }
     }
 
@@ -2739,6 +2742,18 @@
         else if (!st.marketOpen) { chip.textContent = "● market closed"; chip.className = "live-chip off"; }
         else if (st.error || st.restarts) { chip.textContent = "● disconnected — check token"; chip.className = "live-chip off"; }
         else { chip.textContent = "● connecting…"; chip.className = "live-chip off"; }
+      }
+      // Show which broker feed is actually connected (Angel One = free, Dhan = paid).
+      // This is always a BROKER WebSocket — never NSE (NSE powers the other tabs).
+      window._liveProviderName = st.provider === "dhan" ? "Dhan"
+        : st.provider === "angel" ? "Angel One" : (st.provider || "your broker feed");
+      const prov = document.getElementById("liveProvider");
+      if (prov) {
+        const P = { angel: ["⚡ Angel One · free", "Live feed source: Angel One SmartAPI WebSocket (free)"],
+                    dhan: ["⚡ Dhan · paid", "Live feed source: Dhan WebSocket (paid data API)"] };
+        const p = P[st.provider] || (st.provider ? ["⚡ " + st.provider, "Live feed source: " + st.provider] : null);
+        if (p) { prov.textContent = p[0]; prov.title = p[1]; prov.style.display = ""; }
+        else { prov.style.display = "none"; }
       }
       document.getElementById("liveDot").style.background = st.connected ? "var(--green)" : "var(--muted)";
       document.getElementById("updated").textContent = "Live " + new Date().toLocaleTimeString("en-IN");
