@@ -305,6 +305,13 @@ def api_sim_performance():
     return jsonify(sim.performance(book=_book()))
 
 
+@app.route("/api/sim/analytics")
+def api_sim_analytics():
+    """Per-strategy & portfolio equity curve / drawdown / R-distribution (charts)."""
+    import sim
+    return jsonify(sim.analytics(book=_book()))
+
+
 @app.route("/api/sim/backtest")
 def api_sim_backtest():
     import backtest_strategies as bt

@@ -1958,6 +1958,142 @@
       </svg>`;
     }
 
+    // ---- Sim analytics charts (equity curve · drawdown · R-distribution) ------
+    // Deliberately plain inline SVG, NOT the Lightweight-Charts lib: the Sim panel
+    // rebuilds its whole innerHTML every poll, which would thrash live chart
+    // instances (leaks/flicker). SVG strings re-render cleanly, work offline, and
+    // match miniSpark's look. Native <title> gives per-point hover with no JS to
+    // re-bind after each poll.
+    function svgCurve(points, key, opts) {
+      opts = opts || {};
+      const h = opts.h || 150, w = 680;
+      const pts = points || [];
+      if (pts.length < 2)
+        return `<div class="chart-note" style="margin:6px 0 12px">Need ≥2 closed trades — this fills in as trades resolve.</div>`;
+      const vals = pts.map(p => p[key]);
+      const min = Math.min(0, ...vals), max = Math.max(0, ...vals);
+      const rng = (max - min) || 1;
+      const padL = 46, padR = 10, padT = 10, padB = 12;
+      const iw = w - padL - padR, ih = h - padT - padB;
+      const n = pts.length;
+      const X = i => padL + (n === 1 ? iw / 2 : (i / (n - 1)) * iw);
+      const Y = v => padT + ih - ((v - min) / rng) * ih;
+      const isR = key !== "cumInr";
+      const fmtV = v => isR ? (_sgn(v) + (Math.round(v * 10) / 10) + "R")
+                            : (_sgn(v) + "₹" + fmtNum(Math.round(v)));
+      const line = pts.map((p, i) => `${X(i).toFixed(1)},${Y(p[key]).toFixed(1)}`).join(" ");
+      const col = opts.color || (vals[vals.length - 1] >= 0 ? "#26d07c" : "#ff5c68");
+      const zero = Y(0);
+      const area = `${X(0).toFixed(1)},${zero.toFixed(1)} ${line} ${X(n - 1).toFixed(1)},${zero.toFixed(1)}`;
+      const grid = v => `<line x1="${padL}" y1="${Y(v).toFixed(1)}" x2="${w - padR}" y2="${Y(v).toFixed(1)}" stroke="#2a3340" stroke-width="1"/><text x="${padL - 5}" y="${(Y(v) + 3).toFixed(1)}" fill="#5b6675" font-size="9" text-anchor="end">${fmtV(v)}</text>`;
+      const bands = n <= 400 ? pts.map((p, i) => {
+        const bw = iw / n, bx = X(i) - bw / 2;
+        const tip = `#${p.i} ${p.symbol || ""} ${p.dir || ""} · ${p.status} · ${_sgn(p.r)}${p.r}R (${_sgn(p.pnl)}₹${fmtNum(Math.round(p.pnl))}) · cum ${_sgn(p.cumR)}${p.cumR}R / ${_sgn(p.cumInr)}₹${fmtNum(Math.round(p.cumInr))} · ${p.day || ""}`;
+        return `<rect x="${Math.max(padL, bx).toFixed(1)}" y="${padT}" width="${bw.toFixed(1)}" height="${ih}" fill="transparent"><title>${tip}</title></rect>`;
+      }).join("") : "";
+      return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="max-width:100%;height:auto;display:block">
+        ${max > 0 ? grid(max) : ""}${min < 0 ? grid(min) : ""}
+        <polygon points="${area}" fill="${col}" opacity="0.12"/>
+        <line x1="${padL}" y1="${zero.toFixed(1)}" x2="${w - padR}" y2="${zero.toFixed(1)}" stroke="#3a4657" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="${padL - 5}" y="${(zero + 3).toFixed(1)}" fill="#5b6675" font-size="9" text-anchor="end">0</text>
+        <polyline points="${line}" fill="none" stroke="${col}" stroke-width="1.8" stroke-linejoin="round"/>
+        ${bands}
+      </svg>`;
+    }
+
+    function svgHist(bins, opts) {
+      opts = opts || {};
+      const h = opts.h || 140, w = 680;
+      const bs = bins || [];
+      const total = bs.reduce((a, b) => a + (b.count || 0), 0);
+      if (!total) return `<div class="chart-note" style="margin:6px 0 12px">No closed trades yet.</div>`;
+      const maxc = Math.max(...bs.map(b => b.count), 1);
+      const padL = 10, padR = 10, padT = 12, padB = 22;
+      const iw = w - padL - padR, ih = h - padT - padB, baseY = padT + ih;
+      const bw = iw / bs.length;
+      let zeroX = null;
+      const cells = bs.map((b, i) => {
+        const bh = (b.count / maxc) * ih;
+        const bx = padL + i * bw, by = baseY - bh;
+        const center = b.lo == null ? (b.hi - 0.25) : b.hi == null ? (b.lo + 0.25) : (b.lo + b.hi) / 2;
+        const col = center > 0 ? "#26d07c" : center < 0 ? "#ff5c68" : "#7d8795";
+        if (zeroX == null && b.lo != null && b.lo >= 0) zeroX = bx;
+        const lab = b.lo == null ? `< ${b.hi}R` : b.hi == null ? `≥ ${b.lo}R` : `${b.lo} to ${b.hi}R`;
+        const cnt = b.count ? `<text x="${(bx + bw / 2).toFixed(1)}" y="${(by - 3).toFixed(1)}" fill="#8b94a3" font-size="9" text-anchor="middle">${b.count}</text>` : "";
+        return `<rect x="${(bx + 2).toFixed(1)}" y="${by.toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${Math.max(0, bh).toFixed(1)}" fill="${col}" opacity="0.8" rx="2"><title>${lab}: ${b.count} trade(s)</title></rect>${cnt}`;
+      }).join("");
+      const axis = `<line x1="${padL}" y1="${baseY}" x2="${w - padR}" y2="${baseY}" stroke="#2a3340" stroke-width="1"/>`;
+      const zeroLine = zeroX != null ? `<line x1="${zeroX.toFixed(1)}" y1="${padT}" x2="${zeroX.toFixed(1)}" y2="${baseY}" stroke="#3a4657" stroke-width="1.2" stroke-dasharray="3,3"/><text x="${zeroX.toFixed(1)}" y="${(baseY + 12).toFixed(1)}" fill="#5b6675" font-size="9" text-anchor="middle">0R</text>` : "";
+      const lossLab = `<text x="${padL}" y="${(baseY + 12).toFixed(1)}" fill="#ff9aa2" font-size="9" text-anchor="start">◀ losing</text>`;
+      const winLab = `<text x="${(w - padR).toFixed(1)}" y="${(baseY + 12).toFixed(1)}" fill="#7fe3b0" font-size="9" text-anchor="end">winning ▶</text>`;
+      return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="max-width:100%;height:auto;display:block">${axis}${cells}${zeroLine}${lossLab}${winLab}</svg>`;
+    }
+
+    function _statTile(label, val, cls, sub) {
+      return `<div style="flex:1 1 92px;min-width:92px;background:var(--panel-2,#141b26);border:1px solid var(--border);border-radius:8px;padding:6px 9px">
+        <div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label}</div>
+        <div class="${cls || ''}" style="font-size:15px;font-weight:700;line-height:1.25">${val}</div>
+        ${sub ? `<div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub}</div>` : ""}</div>`;
+    }
+
+    // Turns the number-only scorecards into visuals: pick a strategy (or the
+    // blended portfolio) and see its equity curve, drawdown and R-distribution.
+    function renderSimAnalytics(an, book) {
+      if (!an) return "";
+      const sel = (window._simAnalytic && window._simAnalytic[book]) || "_all";
+      const all = [an.portfolio].concat(an.strategies || []);
+      const cur = all.find(x => x.id === sel) || an.portfolio;
+      const rpt = an.riskPerTrade || 2000;
+
+      const chips = all.map(x => {
+        const on = x.id === cur.id, dead = !x.closed, er = x.expectancyR;
+        const erTxt = (x.id === "_all" || !x.closed) ? "" :
+          ` <b class="${(er || 0) >= 0 ? 'pos' : 'neg'}" style="font-size:10px">${_sgn(er)}${er}R</b>`;
+        const nm = x.id === "_all" ? "All (blended)" : x.name.split(" ")[0];
+        const style = `display:inline-block;padding:3px 10px;border-radius:14px;margin:0 6px 6px 0;cursor:pointer;font-size:12px;border:1px solid ${on ? 'var(--accent)' : 'var(--border)'};background:${on ? 'rgba(64,196,255,.12)' : 'var(--chip,#1c2333)'};${dead ? 'opacity:.45' : ''}`;
+        return `<span data-analytic="${x.id}" style="${style}" title="${x.name} · ${x.closed || 0} closed">${nm}${erTxt} <span style="color:var(--muted);font-size:10px">${x.closed || 0}t</span></span>`;
+      }).join("");
+
+      const head = `<h3 class="reco-colhead" style="margin-top:18px">📈 Strategy analytics — equity, drawdown &amp; R-distribution</h3>
+        <div style="margin:6px 0">${chips}</div>`;
+      const st = cur.stats || {};
+      if (!st.closed)
+        return head + `<div class="chart-note">No closed trades yet for <b>${cur.name}</b>. Charts appear as the sim resolves trades (Auto runs every session).</div>`;
+
+      const pf = st.profitFactor == null ? "—" : st.profitFactor;
+      const tiles =
+        _statTile("Expectancy", _sgn(st.expectancyR) + st.expectancyR + "R", st.expectancyR >= 0 ? "pos" : "neg", "avg / trade") +
+        _statTile("Win rate", st.winRate == null ? "—" : st.winRate + "%", st.winRate >= 50 ? "pos" : "neg", `${st.target}✓ / ${st.stop}✗ / ${st.expired}⏱`) +
+        _statTile("Profit factor", pf, (pf !== "—" && pf >= 1) ? "pos" : "neg", "gains ÷ losses") +
+        _statTile("Max drawdown", st.maxDrawdownR + "R", "neg", st.maxDrawdownInr ? ("₹" + fmtNum(Math.round(st.maxDrawdownInr))) : "") +
+        _statTile("Net", _sgn(st.finalR) + st.finalR + "R", st.finalR >= 0 ? "pos" : "neg", _sgn(st.finalInr) + "₹" + fmtNum(Math.round(st.finalInr))) +
+        _statTile("Avg win/loss", `${st.avgWinR == null ? "—" : "+" + st.avgWinR} / ${st.avgLossR == null ? "—" : st.avgLossR}R`, "", `best ${st.bestR == null ? "—" : _sgn(st.bestR) + st.bestR} · worst ${st.worstR == null ? "—" : st.worstR}`) +
+        _statTile("R quality", st.sharpeR == null ? "—" : st.sharpeR, st.sharpeR >= 0 ? "pos" : "neg", "exp ÷ σ(R)") +
+        _statTile("Closed", st.closed, "", st.avgHoldMins != null ? ("~" + st.avgHoldMins + "m hold") : "");
+
+      const rg = (cur.byRegime || []).filter(r => r.closed);
+      const rgBody = rg.length
+        ? rg.map(r => {
+            const cls = REGIME_CLS[r.regime] || "neutral", ico = REGIME_ICON[r.regime] || "";
+            return `<div class="rgm-badge ${cls}" style="font-size:11px;margin:0 0 5px;display:block">${ico} ${r.regime}: <b class="${(r.expectancyR || 0) >= 0 ? 'pos' : 'neg'}">${_sgn(r.expectancyR)}${r.expectancyR}R</b> <span style="color:var(--muted)">· ${r.winRate}% win · ${r.closed}t</span></div>`;
+          }).join("")
+        : `<div class="chart-note">No regime tags on these trades yet.</div>`;
+
+      const blendNote = cur.id === "_all"
+        ? ` <span style="color:var(--muted)">Blended = every closed trade from every strategy in sequence (each a fixed ₹${fmtNum(rpt)}-risk unit); dominated by the busiest strategy, so read it as an aggregate, not a book you'd actually hold.</span>`
+        : "";
+
+      return head +
+        `<div style="display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 12px">${tiles}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px 16px;margin-bottom:6px">
+          <div><div style="font-size:12px;font-weight:600;margin:0 0 2px">Equity curve <span style="color:var(--muted);font-weight:400">· cumulative R (hover for the trade)</span></div>${svgCurve(cur.points, "cumR", { h: 156 })}</div>
+          <div><div style="font-size:12px;font-weight:600;margin:0 0 2px">Drawdown <span style="color:var(--muted);font-weight:400">· underwater from peak (R)</span></div>${svgCurve(cur.points, "ddR", { h: 156, color: "#ff5c68" })}</div>
+          <div><div style="font-size:12px;font-weight:600;margin:0 0 2px">R-multiple distribution <span style="color:var(--muted);font-weight:400">· shape of the edge</span></div>${svgHist(cur.hist, { h: 150 })}</div>
+          <div><div style="font-size:12px;font-weight:600;margin:0 0 4px">Regime breakdown <span style="color:var(--muted);font-weight:400">· expectancy by market day</span></div>${rgBody}</div>
+        </div>
+        <div class="chart-note">Realised curve over <b>${cur.name}</b>'s ${st.closed} closed trade(s) — open trades don't move it.${blendNote}</div>`;
+    }
+
     // Historical strategy-of-the-day: today's LIVE regime + the strategy with the
     // best expectancy on that kind of day across the last ~60 sessions of real
     // NSE history (the daily-backtest leaderboard). Richer evidence than the live
@@ -2181,7 +2317,7 @@
         <div class="chart-note">Durable ledger${since}: ${perf.tradeCount||0} trades across all sessions (stored in SQLite, survives restarts). Ranked by <b>expectancy (R)</b> — the average edge per trade in units of risk. This is the honest, cross-session scorecard.</div>`;
     }
 
-    function renderSim(sum, daily, lb, perf) {
+    function renderSim(sum, daily, lb, perf, analytics) {
       const anyTrades = (sum.strategies || []).some(s => s.open || s.closed);
       const bookBadge = (sum.book === "fno")
         ? `<div class="chart-note" style="margin:0 0 8px"><span class="badge" style="background:var(--accent);color:#04121f;font-weight:700;padding:2px 8px">🎯 F&amp;O BOOK</span> Dedicated parallel book — F&amp;O-eligible names only, same strategies &amp; ₹${fmtNum(sum.riskPerTrade || 2000)}/trade sizing as the all-market Sim, so the two are directly comparable.</div>`
@@ -2195,6 +2331,7 @@
         : `<div class="chart-note" style="margin:2px 0 6px">Click a strategy card above to see its open &amp; closed trades.</div>`;
       const sod = `<div id="sodCard">${window._sodHtml || '<div class="chart-note" style="margin:2px 0">🎯 Analyzing the last 60 sessions for today\'s best strategy…</div>'}</div>`;
       return banner + renderTodayCard(daily.perf) + sod + renderAdaptiveScore(sum) + pick + cards + hint + detail + renderSimPerformance(perf) +
+        renderSimAnalytics(analytics, sum.book || "cash") +
         renderSimLeaderboard(lb) + renderSimDaily(daily) +
         `<div id="btResult">${window._btHtml || ""}</div>` +
         `<div id="btDailyResult">${window._btDailyHtml || ""}</div>`;
@@ -2791,19 +2928,24 @@
             window._simSel[book] = (window._simSel[book] === id) ? "" : id;
             load();
           };
-          const [sum, daily, lb, perf] = await Promise.all([
+          const [sum, daily, lb, perf, analytics] = await Promise.all([
             fetch("/api/sim/summary?" + bq + (sel ? "&strategy=" + sel : "")).then(r => r.json()),
             fetch("/api/sim/daily?" + bq).then(r => r.json()),
             fetch("/api/sim/leaderboard?" + bq).then(r => r.json()),
             fetch("/api/sim/performance?" + bq).then(r => r.json()),
+            fetch("/api/sim/analytics?" + bq).then(r => r.json()),
           ]);
           document.getElementById("simAuto").checked = !!sum.auto;
           document.getElementById("simMode").value = sum.entryMode || "continuous";
           simAlerts(sum, book);
-          wrap.innerHTML = renderSim(sum, daily, lb, perf);
+          wrap.innerHTML = renderSim(sum, daily, lb, perf, analytics);
           // Strategy card click → select/deselect that strategy's detail.
           wrap.querySelectorAll("[data-strat]").forEach(el =>
             el.onclick = () => setSel(el.getAttribute("data-strat")));
+          // Analytics chips → pick which strategy/portfolio the charts show.
+          window._simAnalytic = window._simAnalytic || { cash: "", fno: "" };
+          wrap.querySelectorAll("[data-analytic]").forEach(el =>
+            el.onclick = () => { window._simAnalytic[book] = el.getAttribute("data-analytic"); load(); });
           wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
             tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
           // Daily-P&L rows drill down into that day's individual trades.

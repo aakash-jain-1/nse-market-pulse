@@ -755,6 +755,144 @@ def equity_curves(trades=None):
     return out
 
 
+def _analytics_for(closed):
+    """
+    Equity points (cumulative R & ₹), running drawdown, an R-multiple histogram
+    and summary stats for a set of already-CLOSED trades, ordered by close time.
+    This is the visual companion to the number-only scorecards: the equity curve
+    shows the *path* (not just the endpoint), the drawdown shows the worst dip you
+    would have sat through, and the histogram shows the shape of the edge.
+    """
+    closed = sorted(closed, key=lambda t: t.get("closedAt") or "")
+    pts = []
+    cumR = cumInr = 0.0
+    peakR = peakInr = 0.0
+    maxddR = maxddInr = 0.0
+    rs = []
+    for i, t in enumerate(closed, 1):
+        r = t.get("rMultiple") or 0.0
+        pnl = t.get("pnl") or 0.0
+        rs.append(r)
+        cumR += r
+        cumInr += pnl
+        peakR = max(peakR, cumR)
+        peakInr = max(peakInr, cumInr)
+        ddR = cumR - peakR            # <= 0 (underwater from the running peak)
+        maxddR = min(maxddR, ddR)
+        maxddInr = min(maxddInr, cumInr - peakInr)
+        pts.append({
+            "i": i,
+            "cumR": round(cumR, 2), "cumInr": round(cumInr, 0),
+            "ddR": round(ddR, 2),
+            "r": round(r, 2), "pnl": round(pnl, 0),
+            "day": (t.get("closedDay") or "")[:10] or (t.get("closedAt") or "")[:10],
+            "symbol": t.get("symbol"), "dir": t.get("direction"),
+            "status": t.get("status"),
+        })
+
+    # R-multiple histogram: open-ended tails + 0.5R bins between -2R and +2R.
+    edges = [-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0]
+    bins = ([{"lo": None, "hi": edges[0]}]
+            + [{"lo": edges[k], "hi": edges[k + 1]} for k in range(len(edges) - 1)]
+            + [{"lo": edges[-1], "hi": None}])
+    for b in bins:
+        b["count"] = 0
+    for r in rs:
+        for b in bins:
+            lo, hi = b["lo"], b["hi"]
+            if (lo is None or r >= lo) and (hi is None or r < hi):
+                b["count"] += 1
+                break
+
+    n = len(closed)
+    wins = [t for t in closed if (t.get("rMultiple") or 0) > 0]
+    losses = [t for t in closed if (t.get("rMultiple") or 0) < 0]
+    grossW = sum(t["pnl"] for t in closed if (t.get("pnl") or 0) > 0)
+    grossL = -sum(t["pnl"] for t in closed if (t.get("pnl") or 0) < 0)
+    exp = (sum(rs) / n) if n else None
+    sd = None
+    if n > 1 and exp is not None:
+        sd = (sum((r - exp) ** 2 for r in rs) / n) ** 0.5   # population stdev of R
+    holds = [t["minsToExit"] for t in closed if t.get("minsToExit") is not None]
+    stats = {
+        "closed": n,
+        "target": sum(1 for t in closed if t["status"] == "TARGET"),
+        "stop": sum(1 for t in closed if t["status"] == "STOP"),
+        "expired": sum(1 for t in closed if t["status"] == "EXPIRED"),
+        "winRate": round(len(wins) / n * 100, 1) if n else None,
+        "expectancyR": round(exp, 3) if exp is not None else None,
+        "totalR": round(sum(rs), 2) if rs else 0.0,
+        "avgWinR": round(sum(t["rMultiple"] for t in wins) / len(wins), 2) if wins else None,
+        "avgLossR": round(sum(t["rMultiple"] for t in losses) / len(losses), 2) if losses else None,
+        "bestR": round(max(rs), 2) if rs else None,
+        "worstR": round(min(rs), 2) if rs else None,
+        "profitFactor": round(grossW / grossL, 2) if grossL else (99.9 if grossW else None),
+        "maxDrawdownR": round(maxddR, 2),
+        "maxDrawdownInr": round(maxddInr, 0),
+        "finalR": round(cumR, 2), "finalInr": round(cumInr, 0),
+        "sharpeR": round(exp / sd, 2) if (exp is not None and sd) else None,
+        "avgHoldMins": int(sum(holds) / len(holds)) if holds else None,
+    }
+    return {"points": pts, "hist": bins, "stats": stats}
+
+
+def _by_regime_r(closed):
+    """Per-regime expectancy (R) + win% for a strategy's closed trades (chips)."""
+    rg = {}
+    for t in closed:
+        k = t.get("regimeAtEntry") or "?"
+        g = rg.setdefault(k, {"n": 0, "sumR": 0.0, "wins": 0})
+        g["n"] += 1
+        g["sumR"] += t.get("rMultiple") or 0.0
+        if t["status"] == "TARGET":
+            g["wins"] += 1
+    out = [{"regime": k, "closed": v["n"],
+            "expectancyR": round(v["sumR"] / v["n"], 2) if v["n"] else None,
+            "winRate": round(v["wins"] / v["n"] * 100, 1) if v["n"] else None}
+           for k, v in rg.items()]
+    order = {r: i for i, r in enumerate(_REGIME_ORDER)}
+    out.sort(key=lambda x: order.get(x["regime"], 99))
+    return out
+
+
+def analytics(book="cash"):
+    """
+    Visual analytics for the Sim tab: per-strategy (and a combined portfolio)
+    equity curve (cumulative R & ₹), running drawdown, and R-multiple distribution,
+    computed over the durable ledger's CLOSED trades. This turns the number-only
+    scorecards into charts. Open trades don't move a realised curve, so they're
+    excluded here (their MTM lives in the Today card / scorecards).
+    """
+    _ensure_migrated()
+    trades = db.sim_all_trades(book=book)
+    by = {}
+    for t in trades:
+        if t["status"] in ("TARGET", "STOP", "EXPIRED"):
+            by.setdefault(t["strategy"], []).append(t)
+
+    strategies = []
+    for s in strat.STRATEGIES:
+        cl = by.get(s["id"], [])
+        a = _analytics_for(cl)
+        strategies.append({
+            "id": s["id"], "name": s["name"],
+            "closed": a["stats"]["closed"], "expectancyR": a["stats"]["expectancyR"],
+            "byRegime": _by_regime_r(cl), **a,
+        })
+
+    # Portfolio: every closed trade chronologically, each one fixed-risk unit —
+    # "if I'd taken every signal from every strategy". Dominated by the busiest
+    # strategy, so it's a blended view, not a real book you'd hold (see UI note).
+    all_closed = [t for lst in by.values() for t in lst]
+    portfolio = {"id": "_all", "name": "All strategies (blended)",
+                 "byRegime": _by_regime_r(all_closed), **_analytics_for(all_closed)}
+    portfolio["closed"] = portfolio["stats"]["closed"]
+    portfolio["expectancyR"] = portfolio["stats"]["expectancyR"]
+
+    return {"book": book, "portfolio": portfolio, "strategies": strategies,
+            "riskPerTrade": RISK_PER_TRADE, "generatedAt": _now()}
+
+
 def leaderboard_bundle(book="cash"):
     """One call for the whole leaderboard section: table + today's pick + curves."""
     regime = current_regime()
