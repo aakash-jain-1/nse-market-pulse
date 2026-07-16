@@ -92,6 +92,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
+python -m pytest -q      # 43 unit tests: intrabar + sim + backtest financial math
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -439,8 +440,14 @@ with no creds the app is unchanged.
     sanitisation on the user-typed sinks; capped `nse_quote._cache`; config files
     cached by mtime; tz-aware UTC in `intrabar`. Deferred: intrabar-accurate idea
     verdicts (L7, extra live load) and full scorecard aggregation tests (L8).
-  - Verified: all modules import, 13/13 intrabar tests pass, Flask test-client
-    confirms CSRF(403)/CSP/health. **No behavioural regressions to the sims.**
+  - Verified: all modules import, Flask test-client confirms CSRF(403)/CSP/health.
+    **No behavioural regressions to the sims.**
+- **🧪 Test suite for the financial math (audit L8)** — `test_sim.py` +
+  `test_backtest.py` join `test_intrabar.py`: **43 tests** (`python -m pytest -q`)
+  covering risk-based sizing (+ notional cap / no-stop fallback), %-move, the
+  business-day hold horizon, the coarse exit path incl. the M4 no-price expiry,
+  the STOP-first daily tie-break + MFE/MAE, and scorecard R/expectancy/win-rate.
+  These lock in the exact numbers so a future refactor can't silently drift them.
 - **🔍 Deep code audit → [`AUDIT.md`](AUDIT.md)** — whole-repo read-through
   (security, concurrency, financial-logic correctness, DB/persistence, feeds,
   frontend). Read it before hardening work. Severity is stated *in context*

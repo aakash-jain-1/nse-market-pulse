@@ -72,9 +72,9 @@ throws `ReferenceError: host is not defined` before it ever fetches). *(M1)*
 
 ## 1a. Remediation status (2026-07-16)
 
-All P0/P1/P2 items from §5 were implemented in one pass (verified: every module
-imports, 13/13 intrabar tests pass incl. new `resolve_point` cases, and a Flask
-test-client run confirms CSRF/CSP/health behaviour). Summary:
+All P0/P1/P2 items from §5 were implemented (verified: every module imports,
+**43/43 unit tests pass** — `test_intrabar.py` + `test_sim.py` + `test_backtest.py`
+— and a Flask test-client run confirms CSRF/CSP/health behaviour). Summary:
 
 | ID | Status | What changed |
 |----|--------|--------------|
@@ -96,7 +96,7 @@ test-client run confirms CSRF/CSP/health behaviour). Summary:
 | L5 | ✅ Fixed | `_load_config()` in both feeds caches by file mtime — no per-second disk read from the SSE status poll. |
 | L6 | ✅ Fixed | `sim._sessions_elapsed` counts business days (not just logged days), so trades expire on schedule even if the app was offline. |
 | L7 | ⚠ Deferred | Idea/deep-dive verdicts still use coarse LTP. Making them intrabar-accurate adds a per-idea minute fetch during market hours; deferred to avoid the extra live load. |
-| L8 | ◑ Partial | Added `resolve_point` unit tests (core exit math). Full scorecard/expectancy aggregation tests remain a follow-up. |
+| L8 | ✅ Fixed | Test suite added: `test_sim.py` (sizing, %-move, business-day horizon, coarse exit + M4 expiry, scorecard R/expectancy) and `test_backtest.py` (daily stop-first tie-break + MFE/MAE, coarse resolve, `_scorecard`/`_median`/`_equity`), on top of the intrabar tests. 43 tests total. |
 | L9 | ✅ Noted | `requirements.txt` documents the no-hash/no-lock choice + how to harden for deployment. |
 
 Legend: ✅ fixed · ◑ partially addressed / mitigated · ⚠ deliberately deferred (with reason).
@@ -125,7 +125,7 @@ Legend: ✅ fixed · ◑ partially addressed / mitigated · ⚠ deliberately def
 | L5 | Low | Perf | `is_configured()` hits disk every call; SSE calls `public_status()` every second per client → per-second disk I/O |
 | L6 | Low | Sim logic | Multi-day horizon counts only sessions the app logged; offline days under-count → late expiries |
 | L7 | Low | Sim logic | Idea/deep-dive outcomes use coarse hot-list LTP, not intrabar → poll-timing-dependent verdicts |
-| L8 | Low | Tests | Only `test_intrabar.py` exists; scorecard/R-math/dedupe aggregation is untested |
+| L8 | ✅ Low | Tests | ~~Only `test_intrabar.py` exists~~ → added `test_sim.py` + `test_backtest.py`; 43 tests cover sizing/exit/scorecard math |
 | L9 | Low | Supply chain | `requirements.txt` has no hashes / no lock file |
 
 ---
@@ -324,13 +324,19 @@ differently.
 **Fix:** Reuse the intrabar resolver (M9) for idea outcomes when a charting token
 is available; keep coarse as fallback and label it.
 
-#### L8 — Financial aggregation is untested
-**Where:** only `test_intrabar.py` exists. Scorecard math, R-multiple/expectancy,
-dedupe, and regime tagging have no tests.
+#### L8 — Financial aggregation is untested — ✅ RESOLVED (2026-07-16)
+**Was:** only `test_intrabar.py` existed; scorecard math, R-multiple/expectancy,
+sizing and the exit rules had no tests.
 
-**Fix:** Add unit tests with synthetic price paths asserting exact R and win/loss
-counts for each exit type; a regression here is otherwise silent and would
-quietly corrupt every scorecard.
+**Done:** added `test_sim.py` (14+ cases: `size_position` incl. the notional cap
+and no-stop fallback, `_move_pct`, the business-day `_sessions_elapsed`, the
+coarse `_refresh_trade` exit path **including the M4 no-price expiry**, and
+`_scorecard` R/expectancy/win-rate) and `test_backtest.py` (`backtest_daily._resolve`
+stop-first tie-break + MFE/MAE + expiry for LONG/SHORT, `backtest_strategies._resolve`,
+and `_scorecard`/`_median`/`_equity`). **43 tests pass** (`python -m pytest -q`).
+Remaining follow-up: end-to-end tests for `take()` dedupe + regime tagging (need a
+temp DB fixture); the pure exit/aggregation math — the part most likely to silently
+corrupt a scorecard — is now covered.
 
 ---
 
