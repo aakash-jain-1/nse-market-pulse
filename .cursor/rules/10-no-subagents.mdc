@@ -1,0 +1,24 @@
+---
+description: Never spawn subagents / use the Task tool in this project — work inline in the main chat
+alwaysApply: true
+---
+
+# Never spawn subagents
+
+**Do NOT use the Task tool or spawn any subagent** (explore, generalPurpose,
+shell, best-of-n, etc.) for this project. No exceptions for "just a quick search."
+
+## Why
+
+The owner's Cursor is on a team plan where **Max Mode is disabled by the admin**.
+Subagents therefore silently fall back to **Composer 2.5 Fast** regardless of the
+main-chat model (Opus), so they **cannot inherit Opus** — quality drops on exactly
+the deep work you'd delegate. This is not fixable client-side.
+
+## What to do instead
+
+- Do **all** work inline in the main chat, **sequentially, one module at a time** —
+  including exploration, audits, multi-file refactors, and complex debugging.
+- Search the codebase with **Grep / Glob / Read** directly, never the explore agent.
+- If a task feels large, break it into ordered steps with a todo list and grind
+  through them here rather than fanning out to subagents.

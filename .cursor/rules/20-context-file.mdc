@@ -1,0 +1,27 @@
+---
+description: Always read CONTEXT.md first and keep it updated with every new finding or behavior
+alwaysApply: true
+---
+
+# CONTEXT.md is the living memory — read it, keep it current
+
+`CONTEXT.md` (project root) is the single living context/memory for this project:
+architecture, decisions, behaviors, data quirks, gotchas, endpoints, and current
+state. It is the canonical hand-off between sessions.
+
+## Always refer to it
+
+- **At the start of every task, READ `CONTEXT.md` first** to load current state
+  before searching code or making changes. Trust it, but verify against code when
+  something looks stale.
+
+## Always update it
+
+- After **any** change or discovery, **update `CONTEXT.md` in the same session**:
+  new features, fixes, decisions (and the reasoning), newly observed runtime
+  behavior, NSE data quirks, added/changed endpoints, config knobs, gotchas.
+- Keep the **"Findings & change log"** section at the bottom append-only and dated
+  (IST), newest first.
+- If you learn something that contradicts CONTEXT.md, correct it immediately.
+
+Never let CONTEXT.md drift from reality. When in doubt, over-document here.

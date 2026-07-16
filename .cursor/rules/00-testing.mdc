@@ -1,0 +1,35 @@
+---
+description: Testing must be extensive and in-depth — the top priority, done before anything is called done
+alwaysApply: true
+---
+
+# Testing comes first (extensive + in-depth)
+
+Testing is the **#1 priority**. Nothing is "done" until it is tested thoroughly.
+Treat this as the first thing to plan for on any change, not an afterthought.
+
+## What "extensive + in-depth" means here
+
+- **Unit-test all financial / statistical math**: position sizing, exit
+  resolution, backtest aggregation, Greeks, idea verdicts, imbalance/dedupe. Cover
+  **edge cases**: no price, market closed, ties (stop-first), empty/None data,
+  business-day horizons, look-ahead-bias guards.
+- **Regression test every bug you fix** — add a test that would have caught it.
+- **End-to-end test stateful flows** with a **temporary SQLite DB + temp state**
+  (see `test_take.py`), then clean up (gc + rmtree on Windows).
+- **New behavior ⇒ new tests, same session.** Never weaken/delete a test to make
+  it pass.
+
+## Always run before finishing
+
+```bash
+python -m pytest -q          # full suite (was 62 tests — grow it, don't shrink it)
+```
+
+Plus practical verification for the surface you touched:
+- Python: `python -c "import py_compile; py_compile.compile('file.py', doraise=True)"`.
+- Inline JS in `templates/index.html`: extract the main `<script>` and `node --check`.
+- New endpoints: `curl` smoke-test (status code + shape) against the running app.
+- If `python` hits the MS Store shim, use the full interpreter path (see CONTEXT.md).
+
+Prefer TDD for core logic. Report what you tested and the results.

@@ -1,7 +1,12 @@
 # Project Context — NSE Market Pulse
 
-> This file is the single source of truth for AI agents / future sessions
-> working on this project. Read it first. Keep it updated when things change.
+> Project guide for AI agents / future sessions: conventions, file tree, roadmap,
+> "Done recently". Read it, keep it updated when things change.
+>
+> **Also read `CONTEXT.md`** (the living memory: current state + dated findings
+> log) and the enforced rules in **`.cursor/rules/`** — notably: **never spawn
+> subagents**, **testing is the top priority**, and **keep README + all docs in
+> sync**. Only commit/push when the user explicitly asks.
 
 ## What this project is
 
@@ -50,6 +55,8 @@ NSE/
 ├── test_ideas.py      # Unit tests: intrabar idea-verdict pass (L7)
 ├── test_take.py       # Unit tests: end-to-end sim.take() dedupe/regime (temp DB)
 ├── test_fetch_cache.py # Unit tests: nse_client._fetch() path-keyed TTL cache
+├── test_book.py       # Unit tests: nse_quote.get_book_stats() imbalance/spread math
+├── test_notify.py     # Unit tests: notify.py config/format/dedupe/tick (temp DB)
 ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
 ├── notify.py          # Off-screen alerts (Telegram/webhook) — rides the snapshot logger, opt-in
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context + alerts) → SQLite
@@ -100,7 +107,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 62 unit tests: intrabar/sim/backtest/ideas/take/fetch-cache
+python -m pytest -q      # 98 unit tests: intrabar/sim/backtest/ideas/take/fetch-cache/book/notify
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -442,6 +449,15 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🧭 Project rules + living context** — added `.cursor/rules/` (always-apply):
+  `00-testing` (extensive testing first), `10-no-subagents` (never use the Task
+  tool — Max Mode is admin-disabled so subagents fall back to Composer 2.5 Fast),
+  `20-context-file` (read+update `CONTEXT.md`), `30-documentation` (keep README +
+  AGENTS + AUDIT + roadmap in sync). Created **`CONTEXT.md`** as the living memory.
+- **🧪 Tests for the new features** — `test_book.py` (order-book imbalance/spread
+  math, sanitisation/dedupe/cap, error isolation) + `test_notify.py` (config
+  precedence, no-secret status, HTML-safe formatting, transport fan-out, and the
+  full idea/volume detection + dedupe + gating against a temp DB). Suite **62 → 98**.
 - **📖 Order-book intelligence (depth-derived signals)** — the 5-level depth we
   already fetch (via `nse_quote.getSymbolData`) now drives a **buy/sell pressure
   imbalance** signal everywhere depth is present: a green/red pressure bar +

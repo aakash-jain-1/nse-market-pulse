@@ -1,0 +1,29 @@
+---
+description: Always keep README and all related docs (AGENTS, AUDIT, roadmap) in sync with the code
+alwaysApply: true
+---
+
+# Keep the docs in sync — always
+
+When you change behavior, update the affected docs **in the same session**. Docs
+must never drift from reality.
+
+## Update targets
+
+- **`README.md`** — user-facing overview / run / features. **Always** review and
+  update it for anything user-visible.
+- **`CONTEXT.md`** — living detailed context (see the context-file rule).
+- **`AGENTS.md`** — project guide: conventions, file tree, and the **"Done
+  recently"** list. Add new files to the tree.
+- **`AUDIT.md` / `AUDIT2.md`** — if the change touches something audited
+  (security, concurrency, financial correctness), update its remediation status.
+
+## Roadmap — where it lives
+
+The roadmap is tracked in **`AGENTS.md`** under **"Roadmap / ideas (not yet
+built)"** and **"Futures roadmap"**, and mirrored in **`README.md`** and
+**`CONTEXT.md`**. When you **finish** a roadmap item, mark it done and move a note
+to "Done recently"; when a **new idea** comes up, add it to the roadmap. Keep all
+three copies consistent.
+
+If unsure which doc, at minimum update `README.md` **and** `CONTEXT.md`.

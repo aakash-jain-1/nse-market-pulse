@@ -77,10 +77,16 @@ layers analytics on top:
   time), key metrics, and buy/sell.
 - **Option chain**: full chain for any equity/index, PCR, Max-Pain, ATM, and
   **Greeks** (Black-Scholes: delta/gamma/theta/vega), OI walls, IV skew.
-- **Market depth**: 5-level bid/ask.
+- **Market depth**: 5-level bid/ask, with an **order-book pressure** signal — a
+  buy/sell imbalance (ΣBid vs ΣAsk) + spread shown on the Live depth panel, the
+  detail modal, and as per-row stripes on the Live watchlist. The **Scanner** adds
+  an on-demand **⚖ Order-book scan** button + "Book" column (capped, pooled — no
+  polling).
 - **Alerts**: desktop notification + beep when a stock crosses a configurable
   volume multiple with a rising price; **Sim alerts** when a strategy takes new
-  ideas or a trade hits target/stop.
+  ideas or a trade hits target/stop. Plus **off-screen alerts** (🔔 Push) that
+  reach your phone via **Telegram or a webhook** even with no tab open — server-side,
+  opt-in (see *Getting started*).
 - **CSV export** of the current view.
 
 ### Paper trading (virtual, `paper.py`)
@@ -611,6 +617,23 @@ app at `smartapi.angelone.in`, enable TOTP, copy `angel_config.example.json` →
 then restart. (Dhan also works but its Data API is a paid ₹499+GST/mo plan.)
 See [Live realtime data](#live-realtime-data-free-broker-feed) for the full steps.
 
+### (Optional) enable off-screen alerts (🔔 Push)
+
+Get **Telegram** (or webhook) alerts on your phone for fresh high-conviction ideas
+and volume spikes — even with no tab open. It's server-side and opt-in:
+
+1. In Telegram, message **@BotFather** → `/newbot` → copy the **bot token**.
+2. Get your **numeric chat id** (message your bot, then open
+   `https://api.telegram.org/bot<token>/getUpdates` and read `chat.id`).
+3. Either set env vars before `python app.py`:
+   `TELEGRAM_BOT_TOKEN=…`, `TELEGRAM_CHAT_ID=…` (and/or `ALERT_WEBHOOK_URL=…`),
+   **or** copy `notify_config.example.json` → `notify_config.json` and fill it in.
+4. Restart, then click **🔔 Push** in the header to send a test.
+
+Tuning (in `notify_config.json`): `min_rating` (idea conviction floor:
+`High`/`Medium`/`All`) and `vol_mult` (volume-spike threshold ×). Alerts fire only
+during market hours and are de-duplicated per day. Nothing runs until configured.
+
 ### Command-line scanner
 
 ```bash
@@ -636,6 +659,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/recommendations[?fno=1]` | Ranked LONG/SHORT trade ideas |
 | `GET /api/deepdive/<sym>` | 30/60/90-day price + delivery + OI deep-dive |
 | `GET /api/quote/<sym>` · `/api/chart/<sym>` | Live quote + market depth · intraday price line |
+| `GET /api/depth?symbols=<csv>` | Batch order-book imbalance/spread stats (Scanner "⚖ Order-book scan"; capped, pooled) |
 | `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
 | `GET /api/live/config` | Live feed status: provider (angel/dhan)? configured? connected? market-open? watchlist (never returns secrets) |
 | `POST /api/live/watch` | Set the subscribed symbol set + focus (`{symbols:[…], focus}`) |
@@ -654,6 +678,8 @@ python nse_demand.py losers     # top losers
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
 | `GET /api/iv/rank/<sym>` | IV rank/percentile from logged ATM-IV history |
+| `GET /api/alerts/status` · `POST /api/alerts/test` | Off-screen alert status (no secrets) · send a test Telegram/webhook message |
+| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture) |
 
 ---
 
@@ -671,23 +697,28 @@ nse-market-pulse/
 ├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
 ├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
 ├── backtest_daily.py        # Daily-bar historical backtest over real NSE EOD data
-├── test_intrabar.py        # Unit tests for the intrabar resolver
+├── notify.py               # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger
 ├── paper.py                # Paper-trading engine (equity/futures/options)
-├── snapshot_logger.py      # Background logger (snapshots + IV + context) → SQLite
+├── snapshot_logger.py      # Background logger (snapshots + IV + context + alerts) → SQLite
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
+├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
+├── test_*.py               # Unit tests (intrabar/sim/backtest/ideas/take/fetch-cache/book/notify) — 98
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
+├── .cursor/rules/          # Always-apply agent rules (testing / no-subagents / docs / context)
 ├── angel_config.example.json # Template for Angel One creds → copy to angel_config.json
 ├── dhan_config.example.json  # Template for Dhan creds → copy to dhan_config.json
+├── notify_config.example.json # Template for alert creds → copy to notify_config.json
 ├── data/                   # (gitignored) market.db + any legacy CSVs
 ├── requirements.txt
-├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
 ├── README.md
-├── AGENTS.md               # Context/spec for AI agents & future sessions
-├── AUDIT.md                # Deep code audit — findings, severities, roadmap
-└── *.json                  # (gitignored) sim_state.json, paper_state.json, angel_config.json, dhan_config.json
+├── CONTEXT.md              # Living project memory (current state + dated findings log)
+├── AGENTS.md               # Project guide for AI agents & future sessions
+├── AUDIT.md                # Deep code audit round 1 — findings, severities, roadmap
+├── AUDIT2.md               # Deep audit round 2 — financial-correctness + concurrency
+└── *.json                  # (gitignored) sim_state.json, paper_state.json, *_config.json
 ```
 
 ---
