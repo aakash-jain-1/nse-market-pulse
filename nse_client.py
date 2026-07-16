@@ -16,6 +16,7 @@ import time
 from datetime import datetime
 
 import requests
+from requests.adapters import HTTPAdapter
 
 log = logging.getLogger("nse_client")
 
@@ -52,6 +53,15 @@ _SESSION_TTL = 300  # seconds before we proactively refresh cookies
 def _build_session():
     s = requests.Session()
     s.headers.update(HEADERS)
+    # Size the connection pool above our fan-out. Several features sweep NSE with
+    # 6-worker thread pools (intrabar catch-up, daily backtest, futures sweep) and
+    # they SHARE this one session across www./charting.nseindia.com, so the
+    # default per-host pool of 10 overflows — urllib3 then discards connections
+    # ("connection pool is full") and re-does the TLS handshake each time. A
+    # bigger pool lets it reuse connections instead.
+    adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
     s.get(BASE, timeout=15)
     s.get(BASE + "/market-data/live-equity-market", timeout=15)
     return s
