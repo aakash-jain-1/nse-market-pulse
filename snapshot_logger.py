@@ -229,6 +229,7 @@ def _run_cycle():
     """
     global _last_iv_run, _last_context_run
     ok = False
+    ctx = None
     try:
         ok = capture_snapshot() > 0
     except Exception as e:
@@ -260,6 +261,14 @@ def _run_cycle():
             _last_context_run = time.time()
     except Exception as e:
         _note_error("sim: " + str(e))
+
+    # Off-screen alerts (Telegram/webhook). No-op unless configured, so this is
+    # free for users who haven't opted in. Reuses the context we just built.
+    try:
+        import notify
+        notify.tick(ctx)
+    except Exception as e:
+        _note_error("notify: " + str(e))
     return ok
 
 

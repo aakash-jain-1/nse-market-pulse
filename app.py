@@ -280,6 +280,30 @@ def api_quote(symbol):
     return jsonify(nse_quote.get_quote(symbol))
 
 
+@app.route("/api/depth")
+def api_depth():
+    """Batch order-book imbalance stats (scanner "depth demand" rank).
+
+    User-initiated + capped in nse_quote.get_book_stats so it can't stampede NSE.
+    """
+    syms = (request.args.get("symbols") or "").split(",")
+    return jsonify({"symbols": nse_quote.get_book_stats(syms)})
+
+
+@app.route("/api/alerts/status")
+def api_alerts_status():
+    """Are off-screen (Telegram/webhook) alerts configured? (never returns secrets)."""
+    import notify
+    return jsonify(notify.public_status())
+
+
+@app.route("/api/alerts/test", methods=["POST"])
+def api_alerts_test():
+    """Send a one-off test alert to the configured channel(s)."""
+    import notify
+    return jsonify(notify.send_test())
+
+
 @app.route("/api/chart/<symbol>")
 def api_chart(symbol):
     return jsonify(nse_quote.get_chart(symbol))

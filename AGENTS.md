@@ -51,7 +51,8 @@ NSE/
 ├── test_take.py       # Unit tests: end-to-end sim.take() dedupe/regime (temp DB)
 ├── test_fetch_cache.py # Unit tests: nse_client._fetch() path-keyed TTL cache
 ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
-├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
+├── notify.py          # Off-screen alerts (Telegram/webhook) — rides the snapshot logger, opt-in
+├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context + alerts) → SQLite
 ├── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
@@ -59,6 +60,7 @@ NSE/
 ├── static/vendor/     # (optional) self-hosted Lightweight Charts for offline use
 ├── angel_config.example.json # Template → copy to angel_config.json (gitignored)
 ├── dhan_config.example.json  # Template → copy to dhan_config.json (gitignored)
+├── notify_config.example.json # Template → copy to notify_config.json (gitignored) for alerts
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── requirements.txt
 ├── README.md
@@ -440,6 +442,28 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **📖 Order-book intelligence (depth-derived signals)** — the 5-level depth we
+  already fetch (via `nse_quote.getSymbolData`) now drives a **buy/sell pressure
+  imbalance** signal everywhere depth is present: a green/red pressure bar +
+  "Buy/Sell N% · spread X bps" on the **Live depth panel** and the **stock-detail
+  modal**, and a per-row **right-edge stripe** on the Live watchlist (green=bid-heavy,
+  red=ask-heavy, tooltip has the exact %). All zero added load (depth was already
+  on-screen). The **Scanner** gains an optional **⚖ Order-book scan** button + "Book"
+  column: one *user-initiated*, pool-fanned, **capped-at-30** batch of live depth
+  (`/api/depth` → `nse_quote.get_book_stats`, reusing the 12 s quote cache) — no
+  polling, so it can't stampede NSE. Shared JS helpers `depthStats()`/`obiBarHtml()`.
+- **🔔 Off-screen alerts (Telegram / webhook) — `notify.py`** — server-side alerts
+  that reach your phone when **no tab is open** (the old alerts were client-only).
+  Rides the snapshot logger's existing 60 s market-hours cycle: fires on **fresh
+  high-conviction ideas** (`get_recommendations`, conviction floor by `min_rating`)
+  and **unusual-volume spikes with a rising price** (mirrors the client volume
+  alert). **Opt-in and zero-overhead when unconfigured** (`tick()` fast-returns
+  unless a channel is set). Deduped per (IST-day, kind, symbol[, direction]) via a
+  new `alert_log` SQLite table (survives restarts; pruned at 14 d), capped per
+  cycle. Config via env (`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`/`ALERT_WEBHOOK_URL`)
+  or gitignored `notify_config.json` (see `notify_config.example.json`). UI: header
+  **🔔 Push** pill shows status + sends a test; endpoints `/api/alerts/status`
+  (no secrets) + `/api/alerts/test`.
 - **⚡ Deduplicated NSE hot-list fetches (`nse_client._fetch`)** — the list getters
   (`get_variations`/`get_most_active`/`get_volume_gainers`/`get_oi_spurts`/`get_futures`)
   were uncached, so `get_scanner()`, `strategies.build_context()` and

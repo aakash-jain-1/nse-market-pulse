@@ -182,6 +182,10 @@ def init():
                     PRIMARY KEY (day, symbol, direction)
                 )""")
             c.execute("CREATE INDEX IF NOT EXISTS ix_ideas_day ON ideas(day)")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS alert_log (
+                    key TEXT PRIMARY KEY, kind TEXT, symbol TEXT, fired_at TEXT
+                )""")
         _import_legacy_csv()
         _initialized = True
 
@@ -254,6 +258,24 @@ def iv_stats():
             "SELECT COUNT(DISTINCT ts) t, COUNT(DISTINCT symbol) s, MAX(ts) last "
             "FROM iv_log").fetchone()
     return {"snapshots": r["t"] or 0, "symbols": r["s"] or 0, "last": r["last"]}
+
+
+# ----------------------------------------------------------------------------
+# Alert dedupe log (server-side off-screen alerts — notify.py)
+# ----------------------------------------------------------------------------
+def alert_seen(key):
+    """True if this alert key was already fired (dedupe across cycles/restarts)."""
+    init()
+    with _conn() as c:
+        return c.execute("SELECT 1 FROM alert_log WHERE key=?", (key,)).fetchone() is not None
+
+
+def alert_mark(key, kind, symbol=None):
+    """Record that an alert fired. Keys are IST-day-scoped so they self-expire."""
+    with _write_lock, _conn() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO alert_log (key, kind, symbol, fired_at) VALUES (?,?,?,?)",
+            (key, kind, symbol, datetime.now(IST).isoformat(timespec="seconds")))
 
 
 # ----------------------------------------------------------------------------
@@ -663,6 +685,9 @@ def retention(snapshots_days=90, iv_days=120, context_days=60,
             cutoff_ms = int((time.time() - min_bars_days * 86400) * 1000)
             deleted["min_bars"] = c.execute(
                 "DELETE FROM min_bars WHERE t < ?", (cutoff_ms,)).rowcount
+        # Alert dedupe keys are day-scoped and tiny; keep ~14 days for safety.
+        deleted["alert_log"] = c.execute(
+            "DELETE FROM alert_log WHERE fired_at < ?", (_iso(14),)).rowcount
     if vacuum:
         with _write_lock, _conn() as c:
             c.execute("VACUUM")

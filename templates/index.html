@@ -404,6 +404,18 @@
     .depth-tbl .askp { color: var(--red); }
     .depth-tbl span { position: relative; z-index: 1; }
     .depth-spread { text-align: center; color: var(--muted); font-size: 11px; padding: 6px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin: 4px 0; }
+    /* Order-book imbalance (ΣBid vs ΣAsk) pressure bar. Green share = buy pressure. */
+    .obi-wrap { margin: 10px 0 4px; }
+    .obi-bar { position: relative; height: 9px; border-radius: 5px; background: rgba(255,92,104,0.30); overflow: hidden; }
+    .obi-bar > .obi-bid { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(38,208,124,0.65); }
+    .obi-lbl { font-size: 11px; color: var(--muted); margin-top: 5px; text-align: center; }
+    .obi-lbl b { font-size: 12px; }
+    /* Right-edge stripe on each watch row encodes book pressure (green=buy, red=sell). */
+    .lw-row { border-right: 3px solid transparent; }
+    /* Compact scanner "Book" cell: mini pressure bar + signed imbalance %. */
+    .book-cell { white-space: nowrap; color: var(--muted); }
+    .obi-mini { display: inline-block; width: 40px; height: 7px; border-radius: 4px; background: rgba(255,92,104,0.30); overflow: hidden; vertical-align: middle; margin-right: 5px; }
+    .obi-mini > i { display: block; height: 100%; background: rgba(38,208,124,0.65); }
     .live-setup { max-width: 640px; margin: 30px auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 26px 30px; }
     .live-setup h3 { margin: 0 0 6px; font-size: 18px; }
     .live-setup ol { line-height: 1.9; color: var(--text); padding-left: 20px; }
@@ -450,6 +462,7 @@
           </select>
         </label>
         <button id="soundBtn" title="Toggle sound">🔔 Sound</button>
+        <button id="pushBtn" title="Off-screen alerts to your phone (Telegram/webhook), even when no tab is open. Click to send a test — or see setup if not configured yet.">🔔 Push</button>
         <button id="refreshBtn">↻ Refresh</button>
         <button id="csvBtn" title="Download current view as CSV">⬇ CSV</button>
         <button id="ddBtn" title="Deep-dive analysis of any stock">🔬 Analyze</button>
@@ -510,6 +523,8 @@
         <label class="chk"><input type="checkbox" id="fFno"> F&amp;O only</label>
         <button id="fApply">Apply</button>
         <button id="fReset" title="Clear filters">Clear</button>
+        <button id="fBook" title="Fetch live 5-level order book for the top rows and show buy/sell pressure (market hours only)">⚖ Order-book scan</button>
+        <span id="fBookNote" style="color:var(--muted);font-size:11px"></span>
       </div>
       <div id="futMode" class="scan-filters" style="display:none">
         <span style="color:var(--muted);font-size:12px">Coverage:</span>
@@ -976,6 +991,20 @@
       return `<button class="drill-btn" title="Deep-dive analysis of ${sym}" onclick="event.stopPropagation();openDeepDive('${sym}')">🔬</button>`;
     }
 
+    // Scanner "Book" cell — filled on demand by the ⚖ Order-book scan button from
+    // window._bookStats (nothing is fetched until the user clicks). Mini green/red
+    // bar = ΣBid share; +ve % = buy-heavy book.
+    function bookCell(sym) {
+      const b = (window._bookStats || {})[sym];
+      if (!b) return `<td class="book-cell">—</td>`;
+      const cls = b.imb >= 0 ? "pos" : "neg";
+      const w = (b.totB / (b.totB + b.totA) * 100).toFixed(0);
+      const tip = `ΣBid ${fmtNum(b.totB)} vs ΣAsk ${fmtNum(b.totA)}${b.spreadBps != null ? ` · spread ${b.spreadBps} bps` : ""}`;
+      return `<td class="book-cell" title="${tip}">
+        <span class="obi-mini"><i style="width:${w}%"></i></span>
+        <span class="${cls}" style="font-size:11px">${b.imb >= 0 ? "+" : ""}${b.imb.toFixed(0)}%</span></td>`;
+    }
+
     function renderTable(key, rows) {
       // Always record prices for sparkline history + alerts.
       rows.forEach(r => recordPrice(r.symbol, r.ltp));
@@ -986,7 +1015,7 @@
 
       let head, body;
       if (key === "scanner") {
-        head = `<tr><th>Stock</th><th>LTP</th><th>% Chg</th><th>Vol ×Avg</th><th>Value</th><th>Why it's here</th><th>Score</th><th>Trend</th></tr>`;
+        head = `<tr><th>Stock</th><th>LTP</th><th>% Chg</th><th>Vol ×Avg</th><th>Value</th><th>Why it's here</th><th>Score</th><th title="Order-book buy/sell pressure — click ⚖ Order-book scan (market hours only)">Book</th><th>Trend</th></tr>`;
         const max = rows[0] ? (rows[0].score || 1) : 1;
         body = rows.map((r,i) => {
           const tags = (r.tags || []).map(t =>
@@ -997,6 +1026,7 @@
             <td>${r.value ? fmtCr(r.value) : "—"}</td>
             <td><div class="scan-tags">${tags || "—"}</div></td>
             <td>${r.score}<span class="score-bar"><i style="width:${Math.max(4,(r.score/max)*100)}%"></i></span></td>
+            ${bookCell(r.symbol)}
             <td>${sparkline(r.symbol)}</td></tr>`;
         }).join("");
       } else if (key === "demand") {
@@ -1591,6 +1621,7 @@
           <td>${x.qty?fmtNum(x.qty):"—"}</td></tr>`;
         document.getElementById("mDepth").innerHTML = `<div class="depth-box">
           <h4>Market depth (5 levels)</h4>
+          ${obiBarHtml(depthStats(q.depth))}
           <div class="depth-grid">
             <table><thead><tr><th class="depth-bid" style="text-align:left">Bid</th><th>Qty</th></tr></thead>
               <tbody>${bids.map(b=>rowHtml("bid",b)).join("")}</tbody></table>
@@ -3211,7 +3242,10 @@
         const cls = chgPct == null ? "" : (chgPct >= 0 ? "pos" : "neg");
         const sel = sym === window._liveFocus ? " sel" : "";
         const esym = escapeHtml(sym);
-        return `<div class="lw-row${sel}" data-sym="${esym}">
+        const st = depthStats(rec.depth);
+        const stripe = obiStripe(st);
+        const obiTip = st ? ` · book ${st.imb >= 0 ? "+" : ""}${st.imb.toFixed(0)}% (${st.imb >= 0 ? "buy" : "sell"}-heavy)` : "";
+        return `<div class="lw-row${sel}" data-sym="${esym}"${stripe ? ` style="${stripe}"` : ""} title="${esym}${obiTip}">
           <span class="lw-sym">${esym}</span>
           <span class="lw-ltp"><span class="${cls}">${rec.ltp != null ? fmtPrice(rec.ltp) : "—"}</span>${
             chgPct == null ? "" : `<span class="${cls}" style="font-size:11px"> ${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%</span>`}</span>
@@ -3239,6 +3273,44 @@
         (rec.atp ? `<span>VWAP ${fmtPrice(rec.atp)}</span>` : "");
     }
 
+    // Order-book pressure from a {bids,asks} 5-level ladder. Returns null when the
+    // book is empty (after hours / no depth). imb ∈ [-100,+100]: +ve = bid-heavy
+    // (buy pressure), -ve = ask-heavy. spreadBps is the bid/ask spread vs the mid.
+    function depthStats(depth) {
+      if (!depth || !depth.bids || !depth.asks) return null;
+      const totB = depth.bids.reduce((s, x) => s + (x.qty || 0), 0);
+      const totA = depth.asks.reduce((s, x) => s + (x.qty || 0), 0);
+      if (totB + totA <= 0) return null;
+      const imb = (totB - totA) / (totB + totA) * 100;
+      const bestBid = (depth.bids[0] || {}).price || 0;
+      const bestAsk = (depth.asks[0] || {}).price || 0;
+      const spreadAbs = (bestBid && bestAsk) ? (bestAsk - bestBid) : null;
+      const mid = (bestBid && bestAsk) ? (bestBid + bestAsk) / 2 : null;
+      const spreadBps = (spreadAbs != null && mid) ? (spreadAbs / mid * 10000) : null;
+      return { totB, totA, imb, spreadAbs, spreadBps, bestBid, bestAsk };
+    }
+
+    // Green/red pressure bar + "Buy/Sell N%" label for a depthStats() result.
+    function obiBarHtml(st) {
+      if (!st) return "";
+      const bidShare = (st.totB / (st.totB + st.totA) * 100).toFixed(1);
+      const dir = st.imb >= 0 ? "Buy" : "Sell";
+      const cls = st.imb >= 0 ? "pos" : "neg";
+      return `<div class="obi-wrap" title="Order-book imbalance: ΣBid vs ΣAsk across 5 levels. +ve = buy pressure.">
+        <div class="obi-bar"><span class="obi-bid" style="width:${bidShare}%"></span></div>
+        <div class="obi-lbl"><b class="${cls}">${dir} ${Math.abs(st.imb).toFixed(0)}%</b> book imbalance${
+          st.spreadBps != null ? ` · spread ${st.spreadBps.toFixed(1)} bps` : ""}</div>
+      </div>`;
+    }
+
+    // Per-symbol right-edge stripe colour scaled by |imbalance| (subtle → strong).
+    function obiStripe(st) {
+      if (!st) return "";
+      const a = Math.min(1, Math.abs(st.imb) / 60 + 0.22).toFixed(2);
+      const c = st.imb >= 0 ? `rgba(38,208,124,${a})` : `rgba(255,92,104,${a})`;
+      return `border-right-color:${c}`;
+    }
+
     function liveRenderDepth(depth) {
       const el = document.getElementById("liveDepth");
       if (!el) return;
@@ -3260,9 +3332,11 @@
       const spread = (bestBid && bestAsk) ? (bestAsk - bestBid) : null;
       const totB = bids.reduce((s, x) => s + (x.qty || 0), 0);
       const totA = asks.reduce((s, x) => s + (x.qty || 0), 0);
+      const st = depthStats(depth);
       el.innerHTML = `<table class="depth-tbl">
         <tr><td class="dq" style="text-align:right">Bid Qty</td><td class="bidp">Bid</td><td class="askp">Ask</td><td class="dq">Ask Qty</td></tr>
         ${rows}</table>
+        ${obiBarHtml(st)}
         <div class="depth-spread">Spread ${spread != null ? fmtPrice(spread) : "—"} · ΣBid ${fmtNum(totB)} · ΣAsk ${fmtNum(totA)}</div>`;
     }
 
@@ -4216,6 +4290,35 @@
       document.getElementById("fFno").checked = false;
       load();
     };
+    // ⚖ Order-book scan: one user-initiated batch fetch of live 5-level depth for the
+    // top scanner rows (capped server-side at 30). We update only the Book cells in
+    // place so we don't re-run recordPrice/checkAlerts; the column then persists across
+    // auto-refreshes from window._bookStats until the user clicks again (no polling).
+    document.getElementById("fBook").onclick = async () => {
+      const btn = document.getElementById("fBook");
+      const note = document.getElementById("fBookNote");
+      const rows = window._lastRows || [];
+      const syms = rows.map(r => r.symbol).filter(Boolean).slice(0, 30);
+      if (!syms.length) { note.textContent = "Nothing to scan yet."; return; }
+      const old = btn.textContent;
+      btn.disabled = true; btn.textContent = "Scanning book…"; note.textContent = "";
+      try {
+        const data = await (await fetch("/api/depth?symbols=" + encodeURIComponent(syms.join(",")))).json();
+        window._bookStats = data.symbols || {};
+        const n = Object.keys(window._bookStats).length;
+        document.getElementById("tableWrap").querySelectorAll("tr[data-sym]").forEach(tr => {
+          const bc = tr.querySelector("td.book-cell");
+          if (!bc) return;
+          const t = document.createElement("template");
+          t.innerHTML = bookCell(tr.getAttribute("data-sym")).trim();
+          if (t.content.firstChild) bc.replaceWith(t.content.firstChild);
+        });
+        note.textContent = n ? `Order book: ${n}/${syms.length} names · click to refresh` : "No live book (market closed?).";
+      } catch (e) {
+        note.textContent = "Book scan failed.";
+      }
+      btn.disabled = false; btn.textContent = old;
+    };
     document.getElementById("csvBtn").onclick = exportCSV;
     document.getElementById("portfolioBtn").onclick = openPortfolio;
     document.getElementById("ocBtn").onclick = () => openOptionChain();
@@ -4304,6 +4407,43 @@
       }
     };
 
+    // 🔔 Push — server-side off-screen alerts (Telegram/webhook). The heavy lifting
+    // is server-side (rides the snapshot logger); this button just reflects config
+    // status and fires a test message so you can confirm delivery to your phone.
+    async function initPush() {
+      const btn = document.getElementById("pushBtn");
+      if (!btn) return;
+      try {
+        const s = await (await fetch("/api/alerts/status")).json();
+        window._pushStatus = s;
+        if (s.enabled) {
+          btn.classList.add("on");
+          btn.textContent = "🔔 Push: " + s.channels.join("+");
+          btn.title = `Off-screen alerts ON via ${s.channels.join(" + ")} · ideas ≥ ${s.minRating}, volume ≥ ${s.volMult}×. Click to send a test.`;
+        } else {
+          btn.classList.remove("on");
+          btn.textContent = "🔔 Push";
+          btn.title = "Off-screen alerts not set up. Click for setup instructions (Telegram/webhook).";
+        }
+      } catch (e) { /* status is best-effort */ }
+    }
+    document.getElementById("pushBtn").onclick = async () => {
+      const s = window._pushStatus;
+      if (!s || !s.configured) {
+        toast("Push alerts", "Not configured. Add a Telegram bot token + chat id (or a webhook URL) via env vars or notify_config.json, then reload. See notify_config.example.json.");
+        return;
+      }
+      const btn = document.getElementById("pushBtn");
+      const prev = btn.textContent; btn.disabled = true; btn.textContent = "🔔 Sending…";
+      try {
+        const r = await (await fetch("/api/alerts/test", { method: "POST" })).json();
+        toast("Push alerts", r.ok ? `Test sent via ${(r.channels || []).join(" + ")} — check your phone.` : (r.error || "Send failed."));
+      } catch (e) {
+        toast("Push alerts", "Test failed: " + e.message);
+      }
+      btn.disabled = false; btn.textContent = prev;
+    };
+
     // Load the full F&O universe once, to power the option-chain symbol picker.
     async function loadFnoUniverse() {
       try {
@@ -4332,6 +4472,7 @@
     buildTabs();
     setupRefresh();
     setupIdeaAlerts();
+    initPush();
     load();
     loadFnoUniverse();
   </script>

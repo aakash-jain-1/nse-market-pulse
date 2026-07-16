@@ -17,7 +17,9 @@ hammer NSE (which will bot-block aggressive callers).
 """
 
 import math
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import nse_client as nse
 
@@ -214,6 +216,61 @@ def get_ltp(symbol):
         return get_quote(symbol).get("ltp")
     except Exception:
         return None
+
+
+_BOOK_MAX = 30  # cap the fan-out so one scanner click can't stampede NextApi
+
+
+def get_book_stats(symbols, limit=_BOOK_MAX):
+    """Order-book imbalance stats for several symbols (scanner "depth demand" rank).
+
+    Fans out the 12s-cached get_quote() over a small pool and derives ΣBid/ΣAsk
+    imbalance + spread per symbol. This is USER-INITIATED (a button, not a poll)
+    and hard-capped at _BOOK_MAX so it can't hammer NSE. Returns
+    {SYMBOL: {imb, spreadBps, totB, totA, bestBid, bestAsk, ltp}}; symbols with no
+    live book (after hours) are omitted.
+    """
+    seen, clean = set(), []
+    cap = max(1, min(int(limit or _BOOK_MAX), _BOOK_MAX))
+    for s in symbols or []:
+        s = re.sub(r"[^A-Z0-9&.\-]", "", (s or "").upper())
+        if s and s not in seen:
+            seen.add(s)
+            clean.append(s)
+        if len(clean) >= cap:
+            break
+    if not clean:
+        return {}
+
+    def _one(sym):
+        try:
+            q = get_quote(sym)
+            d = q.get("depth") or {}
+            bids, asks = d.get("bids") or [], d.get("asks") or []
+            tot_b = sum((b.get("qty") or 0) for b in bids)
+            tot_a = sum((a.get("qty") or 0) for a in asks)
+            if tot_b + tot_a <= 0:
+                return sym, None
+            best_bid = (bids[0] or {}).get("price") or 0
+            best_ask = (asks[0] or {}).get("price") or 0
+            spread = (best_ask - best_bid) if (best_bid and best_ask) else None
+            mid = (best_bid + best_ask) / 2 if (best_bid and best_ask) else None
+            return sym, {
+                "imb": round((tot_b - tot_a) / (tot_b + tot_a) * 100, 1),
+                "spreadBps": round(spread / mid * 10000, 1) if (spread is not None and mid) else None,
+                "totB": tot_b, "totA": tot_a,
+                "bestBid": best_bid, "bestAsk": best_ask,
+                "ltp": q.get("ltp"),
+            }
+        except Exception:
+            return sym, None
+
+    out = {}
+    with ThreadPoolExecutor(max_workers=min(6, len(clean))) as ex:
+        for sym, stats in ex.map(_one, clean):
+            if stats is not None:
+                out[sym] = stats
+    return out
 
 
 # ----------------------------------------------------------------------------

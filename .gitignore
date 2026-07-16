@@ -48,6 +48,8 @@ ideas_journal.json
 angel_config.json
 # Dhan (client id + access token)
 dhan_config.json
+# Off-screen alerts (Telegram bot token + chat id / webhook url) — NEVER commit
+notify_config.json
 
 # Angel One SmartAPI SDK writes per-day tick logs here
 logs/

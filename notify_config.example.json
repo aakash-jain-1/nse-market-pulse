@@ -1,0 +1,15 @@
+{
+  "_comment": "Copy to notify_config.json (gitignored) to enable off-screen alerts. You can instead set env vars TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / ALERT_WEBHOOK_URL, which override this file.",
+
+  "_telegram_setup": "1) In Telegram, message @BotFather -> /newbot -> copy the token. 2) message @userinfobot (or your new bot, then open https://api.telegram.org/bot<token>/getUpdates) to get your numeric chat id. Paste both below.",
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+
+  "_webhook": "Optional. Any URL that accepts a POST of {\"text\": \"...\"} (Slack/Discord-style incoming webhook, your own endpoint, etc.). Used in addition to Telegram if both are set.",
+  "webhook_url": "",
+
+  "_tuning": "enabled turns all server-side alerts on/off. min_rating is the idea-alert conviction floor: High (>=66), Medium (>=40), or All. vol_mult is the unusual-volume spike threshold (x average) for a rising stock.",
+  "enabled": true,
+  "min_rating": "High",
+  "vol_mult": 50
+}
