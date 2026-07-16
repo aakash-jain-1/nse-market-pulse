@@ -378,6 +378,10 @@
     .live-chip.off { color: var(--muted); border: 1px solid var(--border); }
     .live-provider { font-size: 11px; padding: 3px 8px; border-radius: 20px; white-space: nowrap; color: var(--accent); border: 1px solid var(--border); }
     .live-chart { width: 100%; height: 470px; }
+    .live-nse-banner { grid-column: 1 / -1; font-size: 12px; color: var(--muted); background: var(--panel-2);
+      border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
+    .live-nse-banner a { color: var(--accent); text-decoration: none; }
+    .live-nse-banner a:hover { text-decoration: underline; }
     .live-note { font-size: 11px; color: var(--muted); margin-top: 8px; }
     .live-add { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border);
                 border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-bottom: 8px; }
@@ -2894,15 +2898,24 @@
       try { cfg = await fetch("/api/live/config").then(r => r.json()); }
       catch (e) { cfg = { configured: false }; }
       window._liveCfg = cfg;
-      if (!cfg.configured) { wrap.innerHTML = liveSetupCard(cfg); window._liveOn = false; return; }
       if (!window.LightweightCharts) { wrap.innerHTML = liveLibError(); window._liveOn = false; return; }
+
+      // No broker feed configured? Still render the full Live tab — just drive it
+      // from NSE's per-stock quote endpoint (LTP + day OHLC + 5-level depth), polled
+      // ~12s. A broker feed (Angel One, free) upgrades this to tick-by-tick streaming.
+      window._liveNSE = !cfg.configured;
+      window._liveConnected = false;
+      // Know the broker's name up front (from config) so the source label can say
+      // "connecting to Angel One…" before the socket confirms.
+      window._liveProviderName = cfg.provider === "dhan" ? "Dhan"
+        : cfg.provider === "angel" ? "Angel One" : (cfg.provider || "your broker feed");
 
       window._liveIv = window._liveIv || "1";
       window._liveWatch = liveWatchLoad();
       window._liveFocus = (window._liveFocus && window._liveWatch.includes(window._liveFocus))
         ? window._liveFocus : (window._liveWatch[0] || null);
 
-      wrap.innerHTML = liveShellHtml();
+      wrap.innerHTML = liveShellHtml(window._liveNSE);
       wireLiveShell();
       liveCreateChart();
       liveRenderWatch();
@@ -2910,18 +2923,21 @@
 
       await liveSyncWatch();
       if (window._liveFocus) await liveSeed(window._liveFocus);
-      liveOpenStream();
+      if (window._liveNSE) liveStartNsePoll();
+      else liveOpenStream();
     }
 
     function stopLive() {
       window._liveOn = false;
       if (window._liveES) { try { window._liveES.close(); } catch (e) {} window._liveES = null; }
+      if (window._liveNsePoll) { clearInterval(window._liveNsePoll); window._liveNsePoll = null; }
       if (window._lwc && window._lwc.chart) { try { window._lwc.chart.remove(); } catch (e) {} }
       window._lwc = null;
     }
 
-    function liveShellHtml() {
-      return `<div class="live-wrap">
+    function liveShellHtml(nseMode) {
+      const banner = nseMode ? `<div class="live-nse-banner">◷ <b>NSE polled mode</b> — live quotes &amp; 5-level market depth, refreshed ~every 12s (no broker feed needed). For genuine tick-by-tick streaming + intraday candles, <a href="#" onclick="liveShowSetup();return false;">set up Angel One (free) →</a></div>` : "";
+      return `${banner}<div class="live-wrap">
         <div class="live-col">
           <h4>Watchlist</h4>
           <input id="liveAdd" class="live-add" placeholder="Add symbol (e.g. INFY) ↵" autocomplete="off">
@@ -2994,6 +3010,22 @@
       if (window._liveFocus) liveSeed(window._liveFocus);
     }
 
+    // Human label for where the Live tab's data is CURRENTLY coming from. This is
+    // the single source of truth used by both the seed note and (implicitly) the
+    // status chips, so the UI never claims "broker" while NSE is actually feeding it.
+    function liveSourceLabel() {
+      if (window._liveNSE || window._liveNsePoll) return "NSE · polled ~12s";
+      if (window._liveConnected) return "streaming live via " + (window._liveProviderName || "your broker feed");
+      return "connecting to " + (window._liveProviderName || "broker feed") + "…";
+    }
+
+    // Compose the note under the chart from the last seed result + the live source.
+    function liveRenderNote() {
+      const note = document.getElementById("liveNote");
+      if (!note || !window._liveSeedMsg) return;   // don't clobber loading/error text
+      note.textContent = window._liveSeedMsg + " · " + liveSourceLabel();
+    }
+
     // Seed the chart with historical candles from NSE's OHLCV feed. Baked epoch
     // ms -> UNIX seconds; Lightweight Charts renders UTC components, which (given
     // the IST-baked epoch) shows the correct IST time — same trick as istTime().
@@ -3002,6 +3034,7 @@
       const iv = window._liveIv || "1";
       const daily = iv === "D";
       const qs = daily ? "interval=D&days=120" : ("interval=" + iv);
+      window._liveSeedMsg = null;
       if (note) note.textContent = "Loading " + sym + " candles…";
       try {
         const d = await fetch("/api/live/seed/" + encodeURIComponent(sym) + "?" + qs).then(r => r.json());
@@ -3009,6 +3042,7 @@
         const pts = d.points || [];
         if (d.error || pts.length < 2) {
           window._lwc.candle.setData([]); window._lwc.vol.setData([]); window._lwc.lastBar = null;
+          window._liveSeedMsg = null;
           if (note) note.textContent = "No candles for " + sym + " (market may be closed or no charting token).";
           return;
         }
@@ -3025,11 +3059,15 @@
         window._lwc.chart.timeScale().fitContent();
         window._lwc.lastBar = cd[cd.length - 1];
         window._lwc.seedIv = iv;
-        if (note) note.textContent = `Seeded ${cd.length} ${daily ? "daily" : iv + "m"} candles · streaming live via ${window._liveProviderName || "your broker feed"}`;
-      } catch (e) { if (note) note.textContent = "Seed failed: " + e.message; }
+        window._liveSeedMsg = `Seeded ${cd.length} ${daily ? "daily" : iv + "m"} candles`;
+        liveRenderNote();
+      } catch (e) { window._liveSeedMsg = null; if (note) note.textContent = "Seed failed: " + e.message; }
     }
 
     async function liveSyncWatch() {
+      // NSE-polled mode has no broker socket to subscribe; the poll reads whatever
+      // symbols are in the watch list directly.
+      if (window._liveNSE) { window._liveUnresolved = []; return {}; }
       try {
         const r = await fetch("/api/live/watch", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -3046,21 +3084,32 @@
       es.onerror = () => {
         const chip = document.getElementById("liveStatus");
         if (chip) { chip.textContent = "● reconnecting…"; chip.className = "live-chip off"; }
+        // Stream hiccup — cover with NSE polling so depth/quotes don't freeze.
+        if (!window._liveNsePoll) liveStartNsePoll();
       };
       window._liveES = es;
     }
 
     function liveApply(payload) {
       if (current !== "live" || !window._lwc) return;
-      window._liveQuotes = payload.quotes || {};
       const st = payload.status || {};
+
+      // Broker configured but NOT actually streaming (market closed, token pending,
+      // socket dropped)? Hand off to the NSE polled fallback so the tab still shows
+      // quotes + depth. Once the broker connects it takes over and we stop the poll.
+      if (!st.connected) {
+        window._liveConnected = false;
+        if (!window._liveNsePoll) liveStartNsePoll();
+        return;
+      }
+      if (window._liveNsePoll) { clearInterval(window._liveNsePoll); window._liveNsePoll = null; }
+      window._liveConnected = true;
+
+      window._liveQuotes = payload.quotes || {};
       const chip = document.getElementById("liveStatus");
       if (chip) {
-        if (st.connected && st.marketOpen) { chip.textContent = "● LIVE"; chip.className = "live-chip on"; }
-        else if (st.connected) { chip.textContent = "● connected · market closed"; chip.className = "live-chip off"; }
-        else if (!st.marketOpen) { chip.textContent = "● market closed"; chip.className = "live-chip off"; }
-        else if (st.error || st.restarts) { chip.textContent = "● disconnected — check token"; chip.className = "live-chip off"; }
-        else { chip.textContent = "● connecting…"; chip.className = "live-chip off"; }
+        if (st.marketOpen) { chip.textContent = "● LIVE"; chip.className = "live-chip on"; }
+        else { chip.textContent = "● connected · market closed"; chip.className = "live-chip off"; }
       }
       // Show which broker feed is actually connected (Angel One = free, Dhan = paid).
       // This is always a BROKER WebSocket — never NSE (NSE powers the other tabs).
@@ -3074,12 +3123,79 @@
         if (p) { prov.textContent = p[0]; prov.title = p[1]; prov.style.display = ""; }
         else { prov.style.display = "none"; }
       }
-      document.getElementById("liveDot").style.background = st.connected ? "var(--green)" : "var(--muted)";
+      document.getElementById("liveDot").style.background = "var(--green)";
       document.getElementById("updated").textContent = "Live " + new Date().toLocaleTimeString("en-IN");
+      liveRenderNote();
       liveRenderWatch();
       const rec = window._liveQuotes[window._liveFocus];
       liveHeader(rec);
       if (rec) { liveRenderDepth(rec.depth); liveUpdateForming(rec); }
+    }
+
+    // ---- NSE polled fallback (no broker feed) --------------------------------
+    // Shapes an NSE /api/quote payload into the same record the broker feed emits,
+    // so the watchlist / header / depth / chart-fold all reuse the broker renderers.
+    function nseQuoteToRec(sym, q) {
+      return {
+        symbol: sym, ltp: q.ltp, open: q.open, high: q.dayHigh, low: q.dayLow,
+        prevClose: q.prevClose, close: q.prevClose, volume: q.volume,
+        atp: q.vwap, depth: q.depth || null,
+      };
+    }
+
+    function liveStartNsePoll() {
+      if (window._liveNsePoll) clearInterval(window._liveNsePoll);
+      liveNsePollOnce();
+      // NSE per-stock quotes are server-cached ~12s, so polling faster just returns
+      // the same snapshot — 12s keeps freshness without adding NSE load.
+      window._liveNsePoll = setInterval(liveNsePollOnce, 12000);
+    }
+
+    async function liveNsePollOnce() {
+      if (current !== "live" || !window._lwc) return;
+      const wl = (window._liveWatch || []).slice(0, 12);   // cap the NSE fan-out
+      try {
+        const pairs = await Promise.all(wl.map(async (sym) => {
+          try {
+            const q = await (await fetch("/api/quote/" + encodeURIComponent(sym))).json();
+            return (q && !q.error) ? [sym, nseQuoteToRec(sym, q)] : [sym, null];
+          } catch (e) { return [sym, null]; }
+        }));
+        const quotes = {};
+        for (const [sym, rec] of pairs) if (rec) quotes[sym] = rec;
+        window._liveQuotes = quotes;
+      } catch (e) { /* best-effort; keep last snapshot */ }
+
+      const rec = window._liveQuotes[window._liveFocus];
+      const hasDepth = rec && rec.depth &&
+        ((rec.depth.bids || []).some(b => b.qty) || (rec.depth.asks || []).some(a => a.qty));
+      const chip = document.getElementById("liveStatus");
+      if (chip) {
+        chip.textContent = hasDepth ? "● NSE · ~12s" : "● NSE · market closed";
+        chip.className = "live-chip " + (hasDepth ? "on" : "off");
+      }
+      const prov = document.getElementById("liveProvider");
+      if (prov) {
+        prov.textContent = "◷ NSE polled";
+        prov.title = "Quotes + 5-level depth polled ~12s from NSE. Real-time tick streaming needs a connected broker feed (Angel One, free).";
+        prov.style.display = "";
+      }
+      const dot = document.getElementById("liveDot");
+      if (dot) dot.style.background = hasDepth ? "var(--green)" : "var(--muted)";
+      const upd = document.getElementById("updated");
+      if (upd) upd.textContent = "NSE " + new Date().toLocaleTimeString("en-IN");
+      liveRenderNote();
+      liveRenderWatch();
+      liveHeader(rec);
+      liveRenderDepth(rec ? rec.depth : null);
+      liveUpdateForming(rec);
+    }
+
+    // Swap the NSE-polled shell for the broker setup card (from the banner link).
+    function liveShowSetup() {
+      stopLive();
+      const wrap = document.getElementById("tableWrap");
+      if (wrap) wrap.innerHTML = liveSetupCard(window._liveCfg || {});
     }
 
     function liveRenderWatch() {
@@ -3176,6 +3292,7 @@
       liveRenderWatch();
       await liveSyncWatch();
       await liveSeed(sym);
+      if (window._liveNsePoll) liveNsePollOnce();
     }
 
     async function liveAddSymbol() {
@@ -3197,6 +3314,7 @@
         return;
       }
       await liveSeed(sym);
+      if (window._liveNsePoll) liveNsePollOnce();
     }
 
     async function liveRemoveSymbol(sym) {
@@ -3206,6 +3324,7 @@
       liveRenderWatch();
       await liveSyncWatch();
       if (window._liveFocus) await liveSeed(window._liveFocus);
+      if (window._liveNsePoll) liveNsePollOnce();
     }
 
     function liveSetupCard(cfg) {

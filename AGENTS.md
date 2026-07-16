@@ -281,6 +281,18 @@ with no creds the app is unchanged.
   in `localStorage` (`nseLiveWatch.v1`).
   The lib loads from CDN; `static/vendor/lightweight-charts.standalone.production.js`
   is an offline fallback (browser `onerror`).
+- **NSE polled fallback (no/again-offline broker):** the Live tab is no longer
+  broker-only. When the feed is **unconfigured** (`liveShellHtml` shows an NSE banner)
+  OR configured **but not connected** (after hours / token issue / SSE hiccup — see
+  `liveApply`'s `!st.connected` branch and the `es.onerror` net), a ~12s poll
+  (`liveStartNsePoll`/`liveNsePollOnce`) fetches `/api/quote/<sym>` for the watchlist
+  and reuses the SAME renderers (`liveRenderWatch/Header/Depth`, chart-fold) via
+  `nseQuoteToRec`. So the **5-level depth ladder + quotes work straight from NSE**
+  (`nse_quote.get_quote().depth`, the NextApi `getSymbolData` order book) with no
+  broker at all. A connected broker always **supersedes** it (real-time > polled; the
+  poll is stopped in `liveApply`). Chip: **● NSE · ~12s** / **● NSE (broker offline) ·
+  …** / **· market closed** (depth is empty outside 09:15–15:30 IST either way). The
+  per-stock **detail modal already renders NSE depth** the same way (`loadDepth`).
 
 ### BLOCKED / unreliable endpoints (do not rely on)
 - `/api/quote-equity?symbol=X` → **403 Forbidden** (superseded by NextApi above).
