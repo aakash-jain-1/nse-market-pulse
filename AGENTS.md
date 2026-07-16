@@ -49,6 +49,7 @@ NSE/
 ├── test_backtest.py   # Unit tests: daily + strategy backtest exit & aggregation
 ├── test_ideas.py      # Unit tests: intrabar idea-verdict pass (L7)
 ├── test_take.py       # Unit tests: end-to-end sim.take() dedupe/regime (temp DB)
+├── test_fetch_cache.py # Unit tests: nse_client._fetch() path-keyed TTL cache
 ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
 ├── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
@@ -96,7 +97,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 56 unit tests: intrabar + sim + backtest + ideas + take()
+python -m pytest -q      # 62 unit tests: intrabar/sim/backtest/ideas/take/fetch-cache
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -426,6 +427,15 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **⚡ Deduplicated NSE hot-list fetches (`nse_client._fetch`)** — the list getters
+  (`get_variations`/`get_most_active`/`get_volume_gainers`/`get_oi_spurts`/`get_futures`)
+  were uncached, so `get_scanner()`, `strategies.build_context()` and
+  `get_demand_score()` re-hit the SAME endpoints many times per 60s logger cycle
+  (and frontend polls piled on top). Added a small **path-keyed 15s TTL micro-cache**
+  in `_fetch` (only successful JSON; `ttl=0` forces live; size-capped). Measured
+  **29 → 8 GETs per build-context+demand cycle (~72% fewer)**, with zero meaningful
+  freshness change (reco already 12s, price 20s, index 30s). Tests in
+  `test_fetch_cache.py` (hit/expiry/distinct-paths/ttl-0/error-not-cached/cap).
 - **🛠 Audit findings implemented (all P0/P1/P2)** — see the dated **Remediation
   status** table in [`AUDIT.md`](AUDIT.md#1a-remediation-status-2026-07-16). Highlights:
   - **Security:** debugger off by default (`FLASK_DEBUG` opt-in), generic error

@@ -101,6 +101,14 @@ All P0/P1/P2 items from §5 were implemented (verified: every module imports,
 
 Legend: ✅ fixed · ◑ partially addressed / mitigated · ⚠ deliberately deferred (with reason).
 
+**Post-audit load win (2026-07-16):** the uncached NSE hot-list getters were
+re-fetching the same endpoints several times per cycle (`get_scanner` +
+`build_context` + `get_demand_score` overlap, plus frontend polls vs the 60s
+logger). Added a path-keyed **15s TTL micro-cache in `nse_client._fetch`**
+(successful JSON only, `ttl=0` bypass, size-capped) — measured **29 → 8 GETs per
+build-context+demand cycle (~72% fewer)** with no meaningful freshness change.
+Covered by `test_fetch_cache.py`.
+
 ---
 
 ## 2. Findings at a glance

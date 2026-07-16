@@ -102,16 +102,45 @@ def get_session(force=False):
         return _session
 
 
-def _fetch(path):
-    """Fetch JSON, transparently rebuilding the session once on failure."""
+# Short-lived path-keyed cache so the SAME read-only list endpoint isn't hit
+# several times within one cycle. get_scanner(), strategies.build_context() and
+# get_demand_score() pull heavily OVERLAPPING hot lists (gainers/losers/volume-
+# gainers/most-active/oi-spurts/futures), and the 60s snapshot logger overlaps
+# the frontend polls too — so the same GET fires many times a minute. A small
+# TTL collapses those duplicates into one live request without meaningfully
+# changing freshness (recommendations already cache 12s, price map 20s, index
+# 30s). Only successful JSON is cached; failures always retry live. Callers can
+# pass ttl=0 to force a live fetch.
+_FETCH_TTL = 15          # seconds
+_FETCH_CACHE_MAX = 128   # paths are a fixed handful; cap is just a safety net
+_fetch_cache = {}        # path -> (ts, json)
+_fetch_lock = threading.Lock()
+
+
+def _fetch(path, ttl=_FETCH_TTL):
+    """Fetch JSON, transparently rebuilding the session once on failure.
+
+    Results are cached per `path` for `ttl` seconds (ttl=0 forces a live fetch).
+    """
+    if ttl:
+        hit = _fetch_cache.get(path)      # atomic read; benign if a racer refetches
+        if hit and (time.time() - hit[0]) < ttl:
+            return hit[1]
     try:
         r = get_session().get(BASE + path, timeout=15)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
     except Exception:
         r = get_session(force=True).get(BASE + path, timeout=15)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+    if ttl:
+        with _fetch_lock:
+            if len(_fetch_cache) >= _FETCH_CACHE_MAX and path not in _fetch_cache:
+                oldest = min(_fetch_cache, key=lambda k: _fetch_cache[k][0])
+                _fetch_cache.pop(oldest, None)
+            _fetch_cache[path] = (time.time(), data)
+    return data
 
 
 def _num(x):
