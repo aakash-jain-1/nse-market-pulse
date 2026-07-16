@@ -692,36 +692,53 @@ def _build_idea(e):
     }
 
 
+_reco_cache = {"ts": 0.0, "data": None}
+_RECO_TTL = 12  # share one scanner sweep across the Ideas tab + the new-idea alert poll
+
+
 def get_recommendations(fno_only=False, limit=10):
     """
     Ranked LONG / SHORT trade ideas derived from the live signal aggregate.
     Each idea carries a conviction score, plain-English reasons and a simple
     entry/stop/target plan. Educational signal summary — NOT investment advice.
+
+    The (unfiltered) enriched set is cached briefly so the dashboard's Ideas tab
+    and the always-on new-idea alert poll don't each trigger a full scanner
+    sweep; the F&O toggle only filters the already-computed view.
     """
-    rows = get_scanner(limit=250)
-    # Journal ALL qualifying ideas (not just the fno subset) so entries stay
-    # consistent regardless of the F&O toggle; the toggle only filters the view.
-    ideas = [i for i in (_build_idea(e) for e in rows) if i]
-    longs = sorted([i for i in ideas if i["direction"] == "LONG"],
-                   key=lambda x: x["conviction"], reverse=True)
-    shorts = sorted([i for i in ideas if i["direction"] == "SHORT"],
-                    key=lambda x: x["conviction"], reverse=True)
+    now = time.time()
+    c = _reco_cache
+    if not (c["data"] and (now - c["ts"]) < _RECO_TTL):
+        rows = get_scanner(limit=250)
+        # Journal ALL qualifying ideas (not just the fno subset) so entries stay
+        # consistent regardless of the F&O toggle; the toggle only filters the view.
+        ideas = [i for i in (_build_idea(e) for e in rows) if i]
+        longs = sorted([i for i in ideas if i["direction"] == "LONG"],
+                       key=lambda x: x["conviction"], reverse=True)
+        shorts = sorted([i for i in ideas if i["direction"] == "SHORT"],
+                        key=lambda x: x["conviction"], reverse=True)
 
-    # Fix each idea's entry + timestamp on first sight today and re-price the
-    # whole day's set, so the UI can show "given HH:MM" + move-since-entry even
-    # after an idea drops out of the fresh top set. Re-pricing uses ONLY the
-    # cached hot-list map (a dict lookup) — never a per-symbol network fetch.
-    try:
-        pmap = get_price_map()
-    except Exception:
-        pmap = {}
-    try:
-        import ideas_journal
-        longs, shorts = ideas_journal.enrich(longs, shorts,
-                                             price_fn=lambda s: pmap.get(s))
-    except Exception:
-        longs, shorts = longs[:limit], shorts[:limit]
+        # Fix each idea's entry + timestamp on first sight today and re-price the
+        # whole day's set, so the UI can show "given HH:MM" + move-since-entry even
+        # after an idea drops out of the fresh top set. Re-pricing uses ONLY the
+        # cached hot-list map (a dict lookup) — never a per-symbol network fetch.
+        try:
+            pmap = get_price_map()
+        except Exception:
+            pmap = {}
+        try:
+            import ideas_journal
+            longs, shorts = ideas_journal.enrich(longs, shorts,
+                                                 price_fn=lambda s: pmap.get(s))
+        except Exception:
+            longs, shorts = longs[:limit], shorts[:limit]
 
+        c["data"] = {"longs": longs, "shorts": shorts,
+                     "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        c["ts"] = now
+
+    d = c["data"]
+    longs, shorts = d["longs"], d["shorts"]
     if fno_only:
         longs = [i for i in longs if i.get("fno")]
         shorts = [i for i in shorts if i.get("fno")]
@@ -729,7 +746,7 @@ def get_recommendations(fno_only=False, limit=10):
         "longs": longs,
         "shorts": shorts,
         "count": len(longs) + len(shorts),
-        "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generatedAt": d["generatedAt"],
     }
 
 

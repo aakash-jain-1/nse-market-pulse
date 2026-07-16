@@ -227,3 +227,36 @@ def day_ideas(day):
     day = (day or "")[:10]
     rows = db.ideas_for_day(day)
     return {"date": day, "count": len(rows), "ideas": rows}
+
+
+_RATING_RANK = {"High": 3, "Medium": 2, "Low": 1}
+
+
+def recent(window_min=60, limit=30, min_rating=None):
+    """
+    Today's ideas, NEWEST first — a rolling "just flagged" feed. Optionally
+    restrict to the last `window_min` minutes (0/None = whole day) and to a
+    minimum conviction rating ("Medium"/"High"). Each row carries the frozen
+    entry/plan + its live-ish move + outcome (as last persisted by enrich).
+    """
+    db.init()
+    _migrate_json_once()
+    today = _today()
+    rows = db.ideas_for_day(today)
+    rows.sort(key=lambda r: r.get("firstSeenAt") or "", reverse=True)
+
+    if window_min:
+        cutoff = (datetime.now(IST) - timedelta(minutes=int(window_min))
+                  ).strftime("%Y-%m-%d %H:%M:%S")
+        rows = [r for r in rows if (r.get("firstSeenAt") or "") >= cutoff]
+    if min_rating:
+        floor = _RATING_RANK.get(min_rating, 0)
+        rows = [r for r in rows if _RATING_RANK.get(r.get("rating"), 0) >= floor]
+
+    out = []
+    for r in rows[:int(limit)]:
+        r = dict(r)
+        r["ageMin"] = _age_min(r.get("firstSeenAt"))
+        out.append(r)
+    return {"date": today, "windowMin": window_min, "minRating": min_rating,
+            "count": len(out), "ideas": out}

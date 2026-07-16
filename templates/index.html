@@ -237,6 +237,11 @@
     .iday-row:hover { background: rgba(255,255,255,0.03); }
     .iday-sub > td { padding: 0 !important; }
     .iday-sub .tbl { margin: 0; border-radius: 0; }
+    .panel-lite { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 0 0 14px; }
+    .rchips { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+    .rchip { font-size: 11px; padding: 2px 9px; border-radius: 12px; border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; }
+    .rchip:hover { color: var(--text); }
+    .rchip.on { color: var(--accent); border-color: var(--accent); }
     .reco-sym .fno-badge { font-size: 9px; font-weight: 700; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; margin-left: 6px; vertical-align: middle; }
     .reco-conv { text-align: right; font-size: 11px; color: var(--muted); }
     .reco-conv b { display: block; font-size: 15px; }
@@ -430,6 +435,14 @@
             <option value="20">20x vol</option>
             <option value="50" selected>50x vol</option>
             <option value="100">100x vol</option>
+          </select>
+        </label>
+        <label title="Pop an instant notification (toast + desktop + beep) the moment a NEW trade idea appears — on any tab. Filter by conviction to cut noise.">💡 New ideas
+          <select id="ideaAlertSel">
+            <option value="off">Off</option>
+            <option value="high" selected>🔥 High only</option>
+            <option value="med">High + Med</option>
+            <option value="all">All</option>
           </select>
         </label>
         <button id="soundBtn" title="Toggle sound">🔔 Sound</button>
@@ -738,6 +751,13 @@
     let ocView = "oi";   // Option-chain grid: "oi" or "greeks"
     let timer = null;
     let soundOn = false;
+    // New-idea alerts (fire on ANY tab). Seeded silently on the first non-empty
+    // poll so we never dump the existing backlog; only ideas appearing AFTER
+    // that ping. `ideaNotified` holds keys we've already handled (seed/alert).
+    let ideaAlertTimer = null;
+    let ideaSeeded = false;
+    const ideaNotified = new Set();
+    const IDEA_ALERT_MS = 20000;
     // Live price history accumulated across refreshes: { SYMBOL: [{t, price}] }
     // Persisted to localStorage so a browser refresh doesn't wipe sparklines.
     // Intraday-only: anything from a previous day is discarded on load.
@@ -1085,6 +1105,89 @@
           fireAlert(r.symbol, `${mult.toFixed(0)}x avg volume · +${(r.pChange).toFixed(2)}% @ ₹${fmtPrice(r.ltp)}`);
         }
       });
+    }
+
+    // ---- New-idea alerts (independent of the active tab) ----
+    const ideaKey = (i) => i.symbol + "|" + i.direction;
+    function ideaRatingOK(rating, level) {
+      if (level === "all") return true;
+      if (level === "med") return rating === "High" || rating === "Medium";
+      return rating === "High";                 // "high"
+    }
+    // IST (UTC+5:30, no DST) market-ish window so we don't poll/ping off-hours.
+    function _marketishNow() {
+      const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+      const dow = ist.getUTCDay();              // 0 Sun … 6 Sat
+      if (dow === 0 || dow === 6) return false;
+      const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+      return mins >= 9 * 60 && mins <= 15 * 60 + 45;   // 09:00–15:45 IST
+    }
+    function ideaToast(title, body, sym, dir) {
+      const box = document.getElementById("toasts");
+      const el = document.createElement("div");
+      el.className = "toast";
+      el.style.borderLeft = `3px solid ${dir === "LONG" ? "var(--green)" : "var(--red)"}`;
+      el.style.cursor = "pointer";
+      el.title = "Open " + sym;
+      el.innerHTML = `<b>💡 ${title}</b><div class="sub">${body}</div>`;
+      el.onclick = () => { el.remove(); openDetail(sym); };
+      box.appendChild(el);
+      setTimeout(() => el.remove(), 12000);
+    }
+    function fireIdeaAlert(i) {
+      const ico = i.direction === "LONG" ? "🟢" : "🔴";
+      const conv = i.conviction != null ? ` (${i.conviction})` : "";
+      const title = `${ico} ${i.symbol} ${i.direction} — ${i.rating}${conv}`;
+      const bits = [];
+      if (i.reasons && i.reasons[0]) bits.push(i.reasons[0]);
+      if (i.pChange != null) bits.push(`${i.pChange >= 0 ? "+" : ""}${i.pChange.toFixed(2)}% today`);
+      if (i.entry != null) bits.push(`entry ₹${fmtPrice(i.entry)}`);
+      if (i.target != null && i.stop != null)
+        bits.push(`tgt ₹${fmtPrice(i.target)} / stop ₹${fmtPrice(i.stop)}`);
+      const body = bits.join(" · ") || "New trade idea";
+      ideaToast(title, body, i.symbol, i.direction);
+      beep();
+      if ("Notification" in window && Notification.permission === "granted") {
+        const n = new Notification(title, { body, tag: "idea-" + ideaKey(i) });
+        n.onclick = () => { window.focus(); openDetail(i.symbol); };
+      }
+    }
+    async function ideaAlertTick() {
+      const level = document.getElementById("ideaAlertSel").value;
+      if (level === "off" || !_marketishNow()) return;
+      let data;
+      try { data = await fetch("/api/recommendations").then(r => r.json()); }
+      catch (e) { return; }
+      const ideas = (data.longs || []).concat(data.shorts || []);
+      if (!ideas.length) return;
+      if (!ideaSeeded) {                 // first non-empty poll: baseline silently
+        ideas.forEach(i => ideaNotified.add(ideaKey(i)));
+        ideaSeeded = true;
+        return;
+      }
+      let fired = 0;
+      ideas.forEach(i => {
+        const k = ideaKey(i);
+        if (ideaNotified.has(k)) return;
+        if (i.fresh === false) { ideaNotified.add(k); return; }   // stale/tracking — never ping
+        if (!ideaRatingOK(i.rating, level)) return;               // keep watching; may upgrade later
+        ideaNotified.add(k);
+        if (fired < 5) { fireIdeaAlert(i); fired++; }             // cap a burst so we never spam
+      });
+    }
+    function setupIdeaAlerts() {
+      const sel = document.getElementById("ideaAlertSel");
+      const apply = () => {
+        if (ideaAlertTimer) { clearInterval(ideaAlertTimer); ideaAlertTimer = null; }
+        if (sel.value === "off") return;
+        ideaSeeded = false;              // re-baseline against the current set on (re)enable
+        if ("Notification" in window && Notification.permission === "default")
+          Notification.requestPermission();
+        ideaAlertTick();                 // seed now, then poll
+        ideaAlertTimer = setInterval(ideaAlertTick, IDEA_ALERT_MS);
+      };
+      sel.onchange = apply;
+      apply();                           // honor the default (High only)
     }
 
     // ---- Detail modal ----
@@ -1631,6 +1734,59 @@
         ${colHtml(longs, "long", "🟢 Long ideas (buy)")}
         ${colHtml(shorts, "short", "🔴 Short ideas (sell)")}
       </div>`;
+    }
+
+    // ---- "Just flagged" feed: today's ideas, newest first ----------------
+    // A rolling activity feed (independent of the long/short conviction cards)
+    // so you can see WHEN each idea fired and how it's doing since. Window +
+    // conviction filters live in window._ideaRecentWin / window._ideaRecentMin.
+    function renderRecentIdeas(payload) {
+      const ideas = (payload && payload.ideas) || [];
+      const win = window._ideaRecentWin != null ? window._ideaRecentWin : 60;
+      const minR = window._ideaRecentMin != null ? window._ideaRecentMin : "Medium";
+      const winChips = [[30, "30m"], [60, "1h"], [120, "2h"], [0, "Today"]].map(([v, l]) =>
+        `<button class="rchip ${win === v ? "on" : ""}" data-rwin="${v}">${l}</button>`).join("");
+      const minChips = [["", "All"], ["Medium", "Med+"], ["High", "High"]].map(([v, l]) =>
+        `<button class="rchip ${minR === v ? "on" : ""}" data-rmin="${v}">${l}</button>`).join("");
+      const head = `<div class="reco-colhead" style="justify-content:space-between;margin-bottom:8px">
+        <span>🆕 Just flagged <span style="color:var(--muted);font-weight:400">· newest first${payload && payload.count != null ? ` · ${payload.count}` : ""}</span></span>
+        <span class="rchips" title="Time window">${winChips}<span style="width:10px;display:inline-block"></span><span class="rchips" title="Min conviction">${minChips}</span></span>
+      </div>`;
+      if (!ideas.length)
+        return `<div class="panel-lite">${head}<div class="chart-note" style="margin:2px 0">No ideas flagged in this window${_marketishNow() ? "" : " (market closed)"}.</div></div>`;
+      const rows = ideas.map(i => {
+        const arrow = i.direction === "LONG" ? "▲" : "▼";
+        const dcls = i.direction === "LONG" ? "pos" : "neg";
+        const t = i.firstSeenAt ? i.firstSeenAt.slice(11, 16) : "";
+        const age = agoStr(i.ageMin);
+        const mv = i.movePct;
+        const oc = i.outcome === "TARGET" ? '<span class="pos">✓ tgt</span>'
+          : i.outcome === "STOP" ? '<span class="neg">✗ stop</span>'
+          : '<span style="color:var(--muted)">—</span>';
+        const cc = i.rating === "High" ? "var(--green)" : i.rating === "Medium" ? "#f0b90b" : "var(--muted)";
+        const fno = i.fno ? ' <span class="fno-badge">F&O</span>' : "";
+        const mvTitle = (i.maxMovePct != null && i.minMovePct != null)
+          ? `best ${_sgn(i.maxMovePct)}${i.maxMovePct}% / worst ${_sgn(i.minMovePct)}${i.minMovePct}%` : "";
+        return `<tr data-sym="${i.symbol}" title="Open ${i.symbol}">
+          <td style="text-align:left;color:var(--muted)" title="${age}">${t}</td>
+          <td style="text-align:left"><b>${i.symbol}</b>${fno} ${drillBtn(i.symbol)}</td>
+          <td class="${dcls}" style="text-align:left">${arrow} ${i.direction}</td>
+          <td style="text-align:left"><b style="color:${cc}">${i.conviction}</b> <span style="color:var(--muted);font-size:11px">${i.rating}</span></td>
+          <td>₹${fmtPrice(i.entry)}</td>
+          <td class="${(mv || 0) >= 0 ? "pos" : "neg"}" title="${mvTitle}">${mv == null ? "—" : _sgn(mv) + mv + "%"}</td>
+          <td style="text-align:left">${oc}</td>
+        </tr>`;
+      }).join("");
+      return `<div class="panel-lite">${head}
+        <table class="tbl"><thead><tr>
+          <th style="text-align:left" title="When it first fired today (IST)">Time</th>
+          <th style="text-align:left">Symbol</th>
+          <th style="text-align:left">Dir</th>
+          <th style="text-align:left" title="Conviction score + rating">Conv</th>
+          <th title="Frozen entry price">Entry</th>
+          <th title="Move since entry, in the idea's direction">Move</th>
+          <th style="text-align:left" title="First-touch target/stop verdict">Outcome</th>
+        </tr></thead><tbody>${rows}</tbody></table></div>`;
     }
 
     // ---- Ideas history (durable, multi-session) --------------------------
@@ -3156,12 +3312,24 @@
         if (data.error) throw new Error(data.error);
         if (current === "recos") {
           window._lastRows = (data.longs || []).concat(data.shorts || []);
-          let hist = { days: [] };
-          try { hist = await fetch("/api/ideas/history").then(r => r.json()); } catch (e) {}
-          wrap.innerHTML = renderRecos(data) + renderIdeaHistory(hist);
+          const rwin = window._ideaRecentWin != null ? window._ideaRecentWin : 60;
+          const rmin = window._ideaRecentMin != null ? window._ideaRecentMin : "Medium";
+          let hist = { days: [] }, recent = { ideas: [] };
+          try {
+            [recent, hist] = await Promise.all([
+              fetch(`/api/ideas/recent?window=${rwin}&min=${encodeURIComponent(rmin)}&limit=40`).then(r => r.json()),
+              fetch("/api/ideas/history").then(r => r.json()),
+            ]);
+          } catch (e) {}
+          wrap.innerHTML = renderRecentIdeas(recent) + renderRecos(data) + renderIdeaHistory(hist);
           annotateInfo(wrap);
           wrap.querySelectorAll("[data-sym]").forEach(el =>
             el.onclick = () => openDetail(el.getAttribute("data-sym")));
+          // "Just flagged" feed: window + min-conviction chips re-query the feed.
+          wrap.querySelectorAll("[data-rwin]").forEach(b =>
+            b.onclick = () => { window._ideaRecentWin = parseInt(b.getAttribute("data-rwin"), 10); load(); });
+          wrap.querySelectorAll("[data-rmin]").forEach(b =>
+            b.onclick = () => { window._ideaRecentMin = b.getAttribute("data-rmin"); load(); });
           // History day-rows expand into that day's individual ideas + outcomes.
           wrap.querySelectorAll("tr.iday-row").forEach(tr =>
             tr.onclick = () => toggleIdeaDay(tr.getAttribute("data-iday")));
@@ -4027,8 +4195,17 @@
       } catch (e) { /* picker is best-effort */ }
     }
 
+    // Browsers only grant Notification permission from a user gesture — ask on
+    // the first interaction if new-idea alerts are on and it's still undecided.
+    document.addEventListener("pointerdown", function askNotif() {
+      if ("Notification" in window && Notification.permission === "default" &&
+          document.getElementById("ideaAlertSel").value !== "off")
+        Notification.requestPermission();
+    }, { once: true });
+
     buildTabs();
     setupRefresh();
+    setupIdeaAlerts();
     load();
     loadFnoUniverse();
   </script>

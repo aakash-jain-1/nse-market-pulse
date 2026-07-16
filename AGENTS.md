@@ -405,6 +405,14 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🔔 New-idea alerts (any tab)** — an always-on client poller (`ideaAlertTick`,
+  20s, market-hours gated) pings the moment a *new* idea appears: in-app toast
+  (click → detail) + desktop Notification + beep. Seeds silently on the first
+  non-empty poll so the existing backlog never floods; a `💡 New ideas` header
+  dropdown filters by conviction (Off / High / High+Med / All, default High) and
+  a 5-per-tick cap prevents bursts. Backend: `get_recommendations` now caches its
+  (unfiltered) enriched set ~12s so the Ideas tab + the alert poll share ONE
+  scanner sweep (the F&O toggle just filters the cached view). No new endpoint.
 - **💡 Ideas journal → durable + historical view** (`ideas_journal.py`, now
   SQLite-backed via the new `ideas` table in `db.py`). The Ideas tab was
   stateless (entry == current price every poll, no memory). The journal now

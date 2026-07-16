@@ -138,6 +138,23 @@ def api_ideas_day():
     return jsonify(ideas_journal.day_ideas(request.args.get("date", "")))
 
 
+@app.route("/api/ideas/recent")
+def api_ideas_recent():
+    """Today's ideas newest-first (rolling feed). ?window=min &min=High &limit=N."""
+    import ideas_journal
+    try:
+        window = int(request.args.get("window", 60))
+    except (TypeError, ValueError):
+        window = 60
+    try:
+        limit = int(request.args.get("limit", 40))
+    except (TypeError, ValueError):
+        limit = 40
+    min_rating = request.args.get("min") or None
+    return jsonify(ideas_journal.recent(window_min=window, limit=limit,
+                                        min_rating=min_rating))
+
+
 @app.route("/api/deepdive/<symbol>")
 def api_deepdive(symbol):
     return jsonify(nse.get_stock_deepdive(symbol))
