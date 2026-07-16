@@ -32,12 +32,17 @@ symbols that fall out of the hot lists keep their last-known price.
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 
 import db
 
 IST = timezone(timedelta(hours=5, minutes=30))
 MAX_PER_SIDE = 20          # cap how many tracked ideas we surface per direction
+# Intrabar outcome pass: how often (seconds) we re-check unresolved ideas against
+# real 1-min candles. Throttled + market-hours gated to stay light on NSE.
+INTRABAR_INTERVAL = 180
+_last_intrabar = 0.0
 # Legacy per-day JSON (pre-SQLite). Imported once so a mid-day switch loses nothing.
 LEGACY_FILE = os.path.join(os.path.dirname(__file__), "ideas_journal.json")
 
@@ -102,7 +107,12 @@ def _migrate_json_once():
 
 
 def _resolve_outcome(rec, mv, now):
-    """Sticky first-touch verdict: once target/stop is reached, freeze it."""
+    """Sticky first-touch verdict from the COARSE move (poll-time LTP).
+
+    A cheap fallback: it can miss an intrabar wick between polls and records the
+    poll-time move rather than the exact level. `resolve_outcomes_intrabar()`
+    supersedes it with candle-accurate verdicts for tokened symbols (AUDIT.md L7).
+    """
     if rec.get("outcome") or not rec.get("entry") or mv is None:
         return
     tp, sp = rec.get("targetPct"), rec.get("stopPct")
@@ -110,6 +120,103 @@ def _resolve_outcome(rec, mv, now):
         rec["outcome"], rec["outcomeAt"], rec["outcomePct"] = "TARGET", now, mv
     elif sp and mv <= -sp:
         rec["outcome"], rec["outcomeAt"], rec["outcomePct"] = "STOP", now, mv
+
+
+def _market_ish():
+    """Weekday 09:15–15:45 IST — the only window where new 1-min candles arrive,
+    so we don't fetch (or throttle-burn) outside it."""
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    hm = now.hour * 60 + now.minute
+    return (9 * 60 + 15) <= hm <= (15 * 60 + 45)
+
+
+def _firstseen_baked_epoch(first_seen):
+    """firstSeenAt ('YYYY-MM-DD HH:MM:SS', naive IST) -> charting baked epoch (s)."""
+    import nse_quote
+    dt = datetime.strptime(first_seen, "%Y-%m-%d %H:%M:%S")
+    return nse_quote._baked_epoch(dt)
+
+
+def resolve_outcomes_intrabar():
+    """Candle-accurate first-touch verdicts for today's UNRESOLVED ideas (L7).
+
+    Load-conscious by design: throttled to INTRABAR_INTERVAL, market-hours gated,
+    only for ideas that still lack a verdict AND have a full plan, one batched
+    1-min fetch per symbol (deduped, 6-worker pool, token-gated + 30s-cached in
+    nse_quote), conservative STOP-first tie-break via intrabar.resolve. Symbols
+    without a charting token keep enrich()'s coarse LTP verdict. The DB write only
+    sets the outcome fields (re-read under the lock) so it can't clobber a
+    concurrent poll's live ltp/movePct.
+    """
+    global _last_intrabar
+    # Race-safe throttle: only one caller per interval wins the pass.
+    with _lock:
+        if (time.time() - _last_intrabar) < INTRABAR_INTERVAL or not _market_ish():
+            return
+        _last_intrabar = time.time()
+
+    db.init()
+    today = _today()
+    pending = [r for r in db.ideas_for_day(today)
+               if not r.get("outcome") and r.get("entry") and r.get("stop")
+               and r.get("target") and r.get("firstSeenAt")]
+    if not pending:
+        return
+    try:
+        import concurrent.futures as cf
+        import intrabar
+        import nse_quote
+    except Exception:
+        return
+
+    # One fetch per symbol, from its EARLIEST idea's first-seen time.
+    first = {}
+    for r in pending:
+        s = r["symbol"]
+        if s not in first or r["firstSeenAt"] < first[s]:
+            first[s] = r["firstSeenAt"]
+    to = nse_quote._baked_now()
+
+    def _one(s):
+        try:
+            frm = _firstseen_baked_epoch(first[s]) - 120
+            d = nse_quote.get_ohlc(s, interval=1, from_ts=frm, to_ts=to)
+            return s, ((d.get("points") or []) if not d.get("error") else [])
+        except Exception:
+            return s, []
+
+    with cf.ThreadPoolExecutor(max_workers=6) as ex:
+        candles = dict(ex.map(_one, sorted(first)))
+
+    verdicts = {}   # (symbol,direction) -> (outcome, outcomeAt, outcomePct)
+    for r in pending:
+        bars = candles.get(r["symbol"])
+        if not bars:
+            continue
+        probe = {"direction": r["direction"], "entry": r["entry"],
+                 "stop": r.get("stop"), "target": r.get("target"),
+                 "qty": 1.0, "openedTs": r["firstSeenAt"], "maxSessions": 999}
+        res = intrabar.resolve(probe, bars, 1.0, max_sessions=999)
+        if res in ("TARGET", "STOP"):
+            at = (probe.get("closedTs") or "").replace("T", " ") or _now()
+            verdicts[_key(r["symbol"], r["direction"])] = (res, at, probe.get("pnlPct"))
+
+    if not verdicts:
+        return
+    # Merge only the outcome fields onto the freshest rows (don't overwrite live
+    # ltp/movePct a concurrent enrich() may have just written).
+    with _lock:
+        latest = {_key(r["symbol"], r["direction"]): r for r in db.ideas_for_day(today)}
+        merged = []
+        for k, (outcome, at, pct) in verdicts.items():
+            cur = latest.get(k)
+            if cur and not cur.get("outcome"):
+                cur["outcome"], cur["outcomeAt"], cur["outcomePct"] = outcome, at, pct
+                merged.append(cur)
+        if merged:
+            db.ideas_upsert(merged)
 
 
 def enrich(fresh_longs, fresh_shorts, price_fn=None):
@@ -123,6 +230,13 @@ def enrich(fresh_longs, fresh_shorts, price_fn=None):
     """
     db.init()
     _migrate_json_once()
+    # Kick the candle-accurate outcome pass in the background (throttled + market-
+    # hours gated internally) so it never blocks this poll (AUDIT.md L7). Its
+    # verdicts land in the DB and are picked up by this + subsequent reads.
+    try:
+        threading.Thread(target=resolve_outcomes_intrabar, daemon=True).start()
+    except Exception:
+        pass
     with _lock:
         today, now = _today(), _now()
         ideas = {_key(r["symbol"], r["direction"]): r for r in db.ideas_for_day(today)}

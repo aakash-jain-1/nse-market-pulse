@@ -44,7 +44,10 @@ NSE/
 ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (6 strategies)
-├── test_intrabar.py   # Unit tests for the intrabar resolver
+├── test_intrabar.py   # Unit tests: intrabar resolver + resolve_point
+├── test_sim.py        # Unit tests: sim sizing / horizon / exit / scorecard math
+├── test_backtest.py   # Unit tests: daily + strategy backtest exit & aggregation
+├── test_ideas.py      # Unit tests: intrabar idea-verdict pass (L7)
 ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
 ├── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
@@ -92,7 +95,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 43 unit tests: intrabar + sim + backtest financial math
+python -m pytest -q      # 48 unit tests: intrabar + sim + backtest + ideas math
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -438,15 +441,23 @@ with no creds the app is unchanged.
   - **Fixed the broken "⏮ Backtest history" button** (`host is not defined`).
   - Feeds now expose only coarse error categories; `escapeHtml()` + input
     sanitisation on the user-typed sinks; capped `nse_quote._cache`; config files
-    cached by mtime; tz-aware UTC in `intrabar`. Deferred: intrabar-accurate idea
-    verdicts (L7, extra live load) and full scorecard aggregation tests (L8).
+    cached by mtime; tz-aware UTC in `intrabar`.
   - Verified: all modules import, Flask test-client confirms CSRF(403)/CSP/health.
     **No behavioural regressions to the sims.**
+- **🎯 Intrabar-accurate idea verdicts (audit L7)** — `ideas_journal.resolve_outcomes_intrabar()`
+  now re-scores today's *unresolved* ideas against real 1-min candles from each
+  idea's `firstSeenAt` via the canonical `intrabar.resolve` (STOP-first), so an
+  idea's TARGET/STOP verdict matches the backtesters instead of depending on poll
+  timing. Load-conscious: **throttled ~3 min** (race-safe), **market-hours gated**,
+  one **batched, token-gated, 30 s-cached** fetch per symbol on a **background
+  thread** (never blocks the poll); coarse LTP stays as the labelled fallback for
+  tokenless symbols. Covered by `test_ideas.py`.
 - **🧪 Test suite for the financial math (audit L8)** — `test_sim.py` +
-  `test_backtest.py` join `test_intrabar.py`: **43 tests** (`python -m pytest -q`)
-  covering risk-based sizing (+ notional cap / no-stop fallback), %-move, the
-  business-day hold horizon, the coarse exit path incl. the M4 no-price expiry,
-  the STOP-first daily tie-break + MFE/MAE, and scorecard R/expectancy/win-rate.
+  `test_backtest.py` + `test_ideas.py` join `test_intrabar.py`: **48 tests**
+  (`python -m pytest -q`) covering risk-based sizing (+ notional cap / no-stop
+  fallback), %-move, the business-day hold horizon, the coarse exit path incl. the
+  M4 no-price expiry, the STOP-first daily tie-break + MFE/MAE, scorecard
+  R/expectancy/win-rate, and the L7 intrabar idea verdicts (tie/fallback/throttle).
   These lock in the exact numbers so a future refactor can't silently drift them.
 - **🔍 Deep code audit → [`AUDIT.md`](AUDIT.md)** — whole-repo read-through
   (security, concurrency, financial-logic correctness, DB/persistence, feeds,

@@ -73,8 +73,8 @@ throws `ReferenceError: host is not defined` before it ever fetches). *(M1)*
 ## 1a. Remediation status (2026-07-16)
 
 All P0/P1/P2 items from §5 were implemented (verified: every module imports,
-**43/43 unit tests pass** — `test_intrabar.py` + `test_sim.py` + `test_backtest.py`
-— and a Flask test-client run confirms CSRF/CSP/health behaviour). Summary:
+**48/48 unit tests pass** — `test_intrabar.py` + `test_sim.py` + `test_backtest.py`
++ `test_ideas.py` — and a Flask test-client run confirms CSRF/CSP/health). Summary:
 
 | ID | Status | What changed |
 |----|--------|--------------|
@@ -95,8 +95,8 @@ All P0/P1/P2 items from §5 were implemented (verified: every module imports,
 | L3 | ✅ Fixed | `intrabar.candle_dt` uses tz-aware UTC (no more `utcfromtimestamp` deprecation). |
 | L5 | ✅ Fixed | `_load_config()` in both feeds caches by file mtime — no per-second disk read from the SSE status poll. |
 | L6 | ✅ Fixed | `sim._sessions_elapsed` counts business days (not just logged days), so trades expire on schedule even if the app was offline. |
-| L7 | ⚠ Deferred | Idea/deep-dive verdicts still use coarse LTP. Making them intrabar-accurate adds a per-idea minute fetch during market hours; deferred to avoid the extra live load. |
-| L8 | ✅ Fixed | Test suite added: `test_sim.py` (sizing, %-move, business-day horizon, coarse exit + M4 expiry, scorecard R/expectancy) and `test_backtest.py` (daily stop-first tie-break + MFE/MAE, coarse resolve, `_scorecard`/`_median`/`_equity`), on top of the intrabar tests. 43 tests total. |
+| L7 | ✅ Fixed | Idea verdicts now resolve against real 1-min candles (`ideas_journal.resolve_outcomes_intrabar`, STOP-first) — done load-consciously: throttled (~3 min), market-hours gated, token-gated + 30s-cached, batched (6 workers), fired off the poll thread, coarse LTP kept as fallback. |
+| L8 | ✅ Fixed | Test suite added: `test_sim.py` (sizing, %-move, business-day horizon, coarse exit + M4 expiry, scorecard R/expectancy), `test_backtest.py` (daily stop-first tie-break + MFE/MAE, coarse resolve, `_scorecard`/`_median`/`_equity`) and `test_ideas.py` (intrabar verdict/tie/fallback/throttle). 48 tests total. |
 | L9 | ✅ Noted | `requirements.txt` documents the no-hash/no-lock choice + how to harden for deployment. |
 
 Legend: ✅ fixed · ◑ partially addressed / mitigated · ⚠ deliberately deferred (with reason).
@@ -124,8 +124,8 @@ Legend: ✅ fixed · ◑ partially addressed / mitigated · ⚠ deliberately def
 | L4 | Low | DB | Inconsistent write-locking: `_write_lock` wraps only EOD/min/ideas writes; sim/snapshot/iv/context rely on busy-timeout |
 | L5 | Low | Perf | `is_configured()` hits disk every call; SSE calls `public_status()` every second per client → per-second disk I/O |
 | L6 | Low | Sim logic | Multi-day horizon counts only sessions the app logged; offline days under-count → late expiries |
-| L7 | Low | Sim logic | Idea/deep-dive outcomes use coarse hot-list LTP, not intrabar → poll-timing-dependent verdicts |
-| L8 | ✅ Low | Tests | ~~Only `test_intrabar.py` exists~~ → added `test_sim.py` + `test_backtest.py`; 43 tests cover sizing/exit/scorecard math |
+| L7 | ✅ Low | Sim logic | ~~Idea outcomes use coarse hot-list LTP~~ → intrabar-accurate first-touch via `resolve_outcomes_intrabar` (throttled, gated, batched); coarse LTP kept as fallback |
+| L8 | ✅ Low | Tests | ~~Only `test_intrabar.py` exists~~ → added `test_sim.py` + `test_backtest.py` + `test_ideas.py`; 48 tests cover sizing/exit/scorecard/idea-verdict math |
 | L9 | Low | Supply chain | `requirements.txt` has no hashes / no lock file |
 
 ---
@@ -313,16 +313,24 @@ daily-rollup history, which only advances on days the app actually ran.
 `openedDate` vs today's IST date minus weekends/holidays) rather than logged
 sessions.
 
-#### L7 — Idea/deep-dive verdicts use coarse LTP
-**Where:** `ideas_journal` outcome resolution + `_analyze_stock` use hot-list LTP
-snapshots, not intrabar candles.
+#### L7 — Idea verdicts use coarse LTP — ✅ RESOLVED (2026-07-16)
+**Was:** `ideas_journal` TARGET/STOP verdicts came from the hot-list LTP at poll
+time, so they could miss an intrabar wick between polls or record a poll-timing
+level rather than the exact touch.
 
-**What:** TARGET/STOP verdicts on ideas are "last-touch at poll time," so they
-can miss an intrabar spike or record a level that a finer path would classify
-differently.
-
-**Fix:** Reuse the intrabar resolver (M9) for idea outcomes when a charting token
-is available; keep coarse as fallback and label it.
+**Done:** added `ideas_journal.resolve_outcomes_intrabar()` — for today's *unresolved*
+ideas it pulls real 1-min candles from each idea's `firstSeenAt` and resolves the
+first touch through the canonical `intrabar.resolve` (STOP-first tie-break, M9), so
+verdicts now match the daily/strategy backtesters. It's deliberately light on NSE:
+throttled to `INTRABAR_INTERVAL` (~3 min) under a race-safe lock, **market-hours
+gated** (`_market_ish`, weekday 09:15–15:45), one **batched** fetch per symbol
+(6-worker pool, deduped, **token-gated** + 30 s-cached in `nse_quote`), and fired on
+a **background daemon thread** so it never blocks the `/api/recommendations` poll.
+The DB write re-reads under the lock and sets **only** the outcome fields, so it
+can't clobber a concurrent poll's live `ltp`/`movePct`. Symbols with no charting
+token keep the coarse `_resolve_outcome` verdict as a labelled fallback. Covered by
+`test_ideas.py` (target, STOP-first tie, no-token fallback, already-resolved skip,
+throttle no-op).
 
 #### L8 — Financial aggregation is untested — ✅ RESOLVED (2026-07-16)
 **Was:** only `test_intrabar.py` existed; scorecard math, R-multiple/expectancy,
@@ -333,10 +341,11 @@ and no-stop fallback, `_move_pct`, the business-day `_sessions_elapsed`, the
 coarse `_refresh_trade` exit path **including the M4 no-price expiry**, and
 `_scorecard` R/expectancy/win-rate) and `test_backtest.py` (`backtest_daily._resolve`
 stop-first tie-break + MFE/MAE + expiry for LONG/SHORT, `backtest_strategies._resolve`,
-and `_scorecard`/`_median`/`_equity`). **43 tests pass** (`python -m pytest -q`).
-Remaining follow-up: end-to-end tests for `take()` dedupe + regime tagging (need a
-temp DB fixture); the pure exit/aggregation math — the part most likely to silently
-corrupt a scorecard — is now covered.
+and `_scorecard`/`_median`/`_equity`), plus `test_ideas.py` for the L7 intrabar
+verdicts. **48 tests pass** (`python -m pytest -q`). Remaining follow-up: end-to-end
+tests for `take()` dedupe + regime tagging (need a temp DB fixture); the pure
+exit/aggregation/verdict math — the part most likely to silently corrupt a
+scorecard — is now covered.
 
 ---
 
