@@ -703,7 +703,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # Unit tests (intrabar/sim/backtest/ideas/take/fetch-cache/book/notify) — 98
+├── test_*.py               # 340 unit tests, 21 suites (client/quote/paper/strategies/sim/backtests/db/app/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

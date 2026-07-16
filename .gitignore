@@ -29,6 +29,12 @@ Thumbs.db
 *.log
 *.csv
 
+# Test coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
 # SQLite time-series store (snapshots / IV / strategy context)
 *.db
 *.db-wal

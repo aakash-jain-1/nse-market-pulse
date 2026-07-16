@@ -94,7 +94,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests (intrabar/sim/backtest/ideas/take/fetch_cache)
+test_*.py            Unit tests — 340 across 21 suites (client/quote/paper/strategies/sim/backtests/db/app/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -164,11 +164,18 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **98 tests** (grow it with every change; never shrink it).
-  Suites: `test_intrabar.py`, `test_sim.py`, `test_backtest.py`, `test_ideas.py`,
-  `test_take.py` (temp DB e2e), `test_fetch_cache.py`, `test_book.py`
-  (order-book imbalance/spread math), `test_notify.py` (alerts config/format/
-  dedupe/tick, temp DB).
+- `python -m pytest -q` — **340 tests** (grow it with every change; never shrink it).
+  Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
+  read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
+  `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
+  math), `test_ideas.py` + `test_ideas_journal.py`, `test_fetch_cache.py`,
+  `test_client.py` + `test_client_fetchers.py` (normalizers + raw-payload
+  parsers), `test_quote.py` + `test_quote_more.py`, `test_paper.py`,
+  `test_strategies.py`, `test_app.py`, `test_db.py`, `test_logger.py`,
+  `test_feeds.py`, `test_book.py`, `test_notify.py`.
+- Coverage: `python -m coverage run -m pytest && coverage report -m --omit="test_*.py"`
+  → **~69 % of source** (100 % pure math; the rest is network/thread/websocket
+  glue tested via stubs). `.coverage`/`htmlcov/` are gitignored.
 - Also: `py_compile` for Python, `node --check` on the extracted inline `<script>`,
   and `curl` smoke tests for endpoints.
 
@@ -219,6 +226,33 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-16 — Full test-coverage sweep (suite 98 → 340, source ~54 % → ~69 %)
+- New suites for the previously thin modules:
+  - `test_sim_views.py` (12) — `performance`/`daily_performance`/`day_trades`/
+    `analytics`/`_by_regime_r`/`regime_leaderboard`/`strategy_of_the_day`/
+    `equity_curves`/settings/`reset` on a temp DB + temp `sim_state.json`.
+  - `test_backtest_daily.py` (17) — date parsers, `_features`, `_signals`,
+    stop-first `_resolve` (incl. straddle/expiry), `_trade`, `_backtest_symbol`,
+    `_classify_regime`/`_regime_map`, regime leaderboard, `_gated`, `_scorecard`,
+    `strategy_of_day` (regime + leaderboard stubbed).
+  - `test_backtest_strategies.py` (12) — `_epoch_s` (baked-UTC), `_price_map`,
+    `_resolve`, `_median`, `_scorecard`, `_equity`, `_leaderboard`,
+    `_resolve_ltp`, `_take_entries` (dedup) with `strat.generate` stubbed.
+  - `test_client_fetchers.py` (8) — `get_stock_history`/`get_futures_oi_history`
+    (raw NSE JSON → clean bars), `get_fno_universe`, `get_lot_sizes` (CSV),
+    `get_recommendations` (split/filter/limit), `_underlying_price_map`,
+    `_oi_change_map`, `_mean`/`_pct`; all via a fake `requests.Session`/`_fetch`.
+  - `test_quote_more.py` (8) — `_leg`, `get_ltp`, `get_token` (exact-EQ vs prefix
+    + cache), `get_ohlc` parse + token-not-found, `get_option_expiries`/
+    `get_option_summary`, IST-as-UTC clock helpers.
+  - `test_ideas_journal.py` (11) — `_move_pct`/`_key`/`_age_min`, sticky
+    `_resolve_outcome`, `enrich()` freeze/track/resolve/sort + history views.
+  - `+2` to `test_logger.py` — `capture_context` (trimmed gzip cycle) + `_note_error`.
+- Result: `nse_client` 48→66 %, `sim` 59→70 %, `nse_quote` 68→82 %,
+  `backtest_daily` 15→56 %, `backtest_strategies` 30→71 %, `ideas_journal` →82 %.
+  Remaining misses are session/HTTP/websocket/route/thread glue (integration, not
+  unit). Installed `coverage.py` to target gaps; `.coverage`/`htmlcov/` gitignored.
 
 ### 2026-07-16 — Extensive tests for the new features (suite 62 → 98)
 - Added `test_book.py` (11) + `test_notify.py` (25): imbalance/spread math,
