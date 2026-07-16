@@ -508,6 +508,7 @@
         <label class="chk" title="Ignore the on-disk cache and re-pull fresh EOD history from NSE"><input type="checkbox" id="simBtRefresh"> force refresh</label>
         <label class="chk" title="Re-resolve exits on REAL 1-minute candles (true intraday path — which-came-first, wick timing) instead of the daily high/low. Heavier; limited to NSE's ~30-40 day minute retention, older trades fall back to daily."><input type="checkbox" id="simBtIntrabar"> minute-accurate</label>
         <button id="simBacktestDaily" style="padding:6px 12px">📅 Daily backtest (real EOD)</button>
+        <button id="simWalkforward" style="padding:6px 12px" title="Out-of-sample check: split the daily history into train/test, learn the best-per-regime playbook on train, and measure whether each strategy's edge — and the regime-adaptive selection — actually survives out-of-sample. Separates a real edge from a curve-fit one.">🧪 Walk-forward (out-of-sample)</button>
         <span style="color:var(--muted);font-size:11px">Risk-based sizing: each trade risks ₹2,000 to its stop · target=right, stop=wrong · multi-day hold (≤3 sessions). Expectancy in R.</span>
       </div>
       <div id="scanFilters" class="scan-filters" style="display:none">
@@ -2689,7 +2690,8 @@
         renderSimAnalytics(analytics, sum.book || "cash") +
         renderSimLeaderboard(lb) + renderSimDaily(daily) +
         `<div id="btResult">${window._btHtml || ""}</div>` +
-        `<div id="btDailyResult">${window._btDailyHtml || ""}</div>`;
+        `<div id="btDailyResult">${window._btDailyHtml || ""}</div>` +
+        `<div id="btWfResult">${window._btWfHtml || ""}</div>`;
     }
 
     // Backtest panels are injected on button click, but the Sim tab auto-refreshes
@@ -2764,6 +2766,88 @@
         <div class="chart-note" style="margin-top:8px">📊 <b>How to read it:</b> <b>Tgt%</b> = ran to the full target; <b>Profit%</b> = ended positive (many trades time-expire in partial profit, so Profit% ≫ Tgt%). <b>Exp. R</b> is the real edge (avg R/trade); <b>Realized ₹</b> just sums every trade at ₹${fmtNum(bt.riskPerTrade)} risk — it's <i>not</i> a portfolio you'd hold (you'd never run all these at once), so judge by Exp. R, not the rupee total. <b>MFE/MAE</b> = avg best/worst excursion: a big MFE with low Tgt% means winners give it back (exit sooner / trail), while MAE hugging the stop means stops are getting tagged.</div>
         <div class="chart-note" style="margin-top:6px">⚠️ <b>Daily-bar approximation</b>, not the exact intraday logic: entries at the signal day's <b>close</b>, exits resolved on subsequent daily high/low (a bar piercing both stop &amp; target counts as a <b>stop</b>). A small liquid sample over a short window — read it as directional, not statistically final. Not covered here: ${nc}. The live sim (auto, every session) accumulates the pure, intrabar-accurate version over time.</div>
         ${renderDailyRegime(bt)}
+      </div>`;
+    }
+
+    // Walk-forward out-of-sample validation: does the edge survive on data that
+    // wasn't used to pick it? Separates a real edge from a curve-fit backtest.
+    function wfBadge(v) {
+      const pos = ["robust", "adds-value", "improving"];
+      const neg = ["overfit", "no-edge", "no-better-than-fixed"];
+      const col = pos.includes(v) ? "var(--green)" : neg.includes(v) ? "var(--red)" : "var(--muted)";
+      const tip = {
+        robust: "Edge largely persists out-of-sample (OOS ≥ 60% of in-sample).",
+        decaying: "Positive out-of-sample but materially weaker than in-sample.",
+        overfit: "Positive in-sample but NEGATIVE out-of-sample — curve-fit.",
+        "no-edge": "No edge in either window.",
+        improving: "Weak in-sample, stronger out-of-sample.",
+        insufficient: "Not enough out-of-sample trades to judge.",
+        "adds-value": "Regime-switching beats the best fixed strategy out-of-sample.",
+        "no-better-than-fixed": "Regime-switching did NOT beat a fixed strategy OOS — the selection was curve-fit.",
+        weak: "Adaptive out-of-sample result is not clearly positive.",
+      }[v] || "";
+      return `<span title="${tip}" style="background:${col};color:#04121f;font-weight:700;padding:2px 7px;border-radius:4px;font-size:11px">${v}</span>`;
+    }
+    function _er(v) { return v == null ? "—" : _sgn(v) + v + "R"; }
+
+    function renderWalkforward(wf) {
+      if (!wf) return "";
+      if (!wf.ok)
+        return `<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:12px">
+          <h3 class="reco-colhead">🧪 Walk-forward validation</h3>
+          <div class="chart-note">${wf.reason || "Not enough history yet."}${wf.closed != null ? ` (${wf.closed} closed trades over ${wf.days} days)` : ""}</div></div>`;
+      const a = wf.adaptive || {};
+      const bf = a.bestFixed;
+      const playbook = Object.entries(a.playbook || {})
+        .map(([rg, s]) => `${rg} → <b>${s.name}</b>`).join(" · ") || "—";
+      const rows = (wf.perStrategy || []).map(s => `<tr>
+          <td class="sym">${s.name}</td>
+          <td class="${(s.isExpectancyR||0)>=0?'pos':'neg'}">${_er(s.isExpectancyR)}</td>
+          <td style="color:var(--muted);font-size:11px">${s.isN}</td>
+          <td class="${(s.oosExpectancyR||0)>=0?'pos':'neg'}">${_er(s.oosExpectancyR)}</td>
+          <td style="color:var(--muted);font-size:11px">${s.oosN}</td>
+          <td>${s.isWinRate==null?"—":s.isWinRate+"%"} → ${s.oosWinRate==null?"—":s.oosWinRate+"%"}</td>
+          <td>${wfBadge(s.verdict)}</td></tr>`).join("");
+      const folds = (wf.walkForward && wf.walkForward.folds || []).map(f => `<tr>
+          <td class="day">${f.from} → ${f.to}</td>
+          <td style="color:var(--muted)">${f.trainN}/${f.testN}</td>
+          <td class="${(f.adaptiveR||0)>=0?'pos':'neg'}">${_er(f.adaptiveR)} <span style="color:var(--muted);font-size:10px">(${f.adaptiveN})</span></td>
+          <td>${f.bestTrainStrategyName ? f.bestTrainStrategyName.split(" ")[0] : "—"}</td>
+          <td class="${(f.bestFixedTestR||0)>=0?'pos':'neg'}">${_er(f.bestFixedTestR)}</td></tr>`).join("");
+      const pooled = wf.walkForward || {};
+      return `<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:12px">
+        <h3 class="reco-colhead">🧪 Walk-forward — does the edge survive out-of-sample?</h3>
+        <div class="chart-note">Split ${wf.days} trading days (${wf.range ? wf.range.from + " → " + wf.range.to : ""}, ${wf.closed} closed trades) at <b>${wf.trainCut}</b>: earlier = train (${wf.trainN}), later = <b>out-of-sample</b> (${wf.testN}). The strategy picked in-sample is judged only on data it never saw.</div>
+        <div class="pick" style="cursor:default;margin:10px 0">
+          <div class="pick-lab">🎯 Adaptive verdict</div>
+          <div style="flex:1">
+            <div style="margin-bottom:4px">Following the <b>train-learned playbook</b> out-of-sample: ${_er(a.oosExpectancyR)} <span style="color:var(--muted)">over ${a.oosN||0} trades</span> ${wfBadge(a.verdict)}</div>
+            <div style="color:var(--muted);font-size:12px">
+              Best single fixed strategy OOS: ${bf ? `<b>${bf.name}</b> ${_er(bf.oosExpectancyR)}` : "—"} ·
+              A-priori design OOS: ${_er(a.aprioriOosExpectancyR)} (${a.aprioriN||0}t)<br>
+              Playbook learned on train: ${playbook}
+            </div>
+          </div>
+        </div>
+        <table class="tbl"><thead><tr>
+          <th>Strategy</th>
+          <th title="In-sample expectancy (train window)">IS Exp R</th><th title="In-sample closed trades">n</th>
+          <th title="Out-of-sample expectancy (later window it never saw)">OOS Exp R</th><th title="Out-of-sample closed trades">n</th>
+          <th title="Win% in-sample → out-of-sample">Win% IS→OOS</th>
+          <th title="robust = edge persists · decaying = weaker · overfit = flips negative OOS">Verdict</th>
+        </tr></thead><tbody>${rows}</tbody></table>
+        <h3 class="reco-colhead" style="margin-top:16px">Walk-forward folds — re-learn &amp; re-test across the window</h3>
+        <table class="tbl"><thead><tr>
+          <th class="day">Out-of-sample fold</th><th title="train / test closed trades">Train/Test</th>
+          <th title="Following the train-learned playbook on this fold">Adaptive R</th>
+          <th title="Best single strategy on the train part of this fold">Train pick</th>
+          <th title="That pick's expectancy on the test part (true walk-forward)">Its test R</th>
+        </tr></thead><tbody>${folds}</tbody>
+        <tfoot><tr style="border-top:2px solid var(--border);font-weight:600">
+          <td class="day">Pooled OOS (all folds)</td><td></td>
+          <td class="${(pooled.adaptivePooledR||0)>=0?'pos':'neg'}">${_er(pooled.adaptivePooledR)} <span style="color:var(--muted);font-size:10px">(${pooled.adaptivePooledN||0})</span></td>
+          <td colspan="2"></td></tr></tfoot></table>
+        <div class="chart-note" style="margin-top:8px">📊 <b>Read it:</b> a strategy is only trustworthy if its <b>OOS Exp R</b> stays positive — <span style="color:var(--green)">robust</span> means the edge held up; <span style="color:var(--red)">overfit</span> means it looked good in-sample then lost money on unseen data. The <b>Adaptive verdict</b> is the key test: if "follow the best-per-regime playbook" doesn't beat the best fixed strategy out-of-sample, the regime-switching was curve-fit. Daily-bar approximation over a liquid sample — directional, not statistically final.</div>
       </div>`;
     }
 
@@ -4280,6 +4364,19 @@
         setBtHtml("btDailyResult", "_btDailyHtml", `<div class="chart-note">Daily backtest failed: ${e}</div>`);
       }
       btn.disabled = false; btn.textContent = "📅 Daily backtest (real EOD)";
+    };
+    document.getElementById("simWalkforward").onclick = async () => {
+      const btn = document.getElementById("simWalkforward");
+      const uni = document.getElementById("simBtUniverse").value || "60";
+      btn.disabled = true; btn.textContent = "⏳ Validating out-of-sample…";
+      setBtHtml("btWfResult", "_btWfHtml", `<div class="loading" style="margin-top:12px">Running a wide daily backtest (120 sessions) and splitting it into train/test folds to check whether each strategy — and the regime-adaptive selection — survives out-of-sample. Instant if the EOD history is already cached, else ~1-3 min cold. (The dashboard keeps refreshing meanwhile.)</div>`);
+      try {
+        const wf = await fetch("/api/sim/walkforward?days=120&universe=" + uni).then(r => r.json());
+        setBtHtml("btWfResult", "_btWfHtml", renderWalkforward(wf));
+      } catch (e) {
+        setBtHtml("btWfResult", "_btWfHtml", `<div class="chart-note">Walk-forward validation failed: ${e}</div>`);
+      }
+      btn.disabled = false; btn.textContent = "🧪 Walk-forward (out-of-sample)";
     };
     document.getElementById("fReset").onclick = () => {
       document.getElementById("fDir").value = "any";

@@ -49,9 +49,10 @@ NSE/
 ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (6 strategies)
-├── test_*.py          # 363 unit tests across 22 suites (see below)
+├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
+├── test_*.py          # 377 unit tests across 23 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
-│   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py
+│   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
 │   ├── test_quote.py / test_quote_more.py / test_book.py   # nse_quote math + parsers + depth
 │   ├── test_ideas.py / test_ideas_journal.py / test_strategies.py / test_paper.py
@@ -107,7 +108,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 363 unit tests (client/quote/paper/strategies/sim/backtests/db/app+routes/feeds/…)
+python -m pytest -q      # 377 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -449,6 +450,16 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🧪 Walk-forward out-of-sample validation (`walkforward.py`)** — the overfit
+  guard the Sim leaderboard was missing. A **pure** analysis (100 % covered) over the
+  daily backtest's trade list: a holdout train/test split gives every fixed strategy
+  an **in-sample vs OOS expectancy** + verdict (`robust` / `decaying` / `overfit` /
+  `no-edge` / `improving`); the headline **adaptive-selection test** learns the
+  best-per-regime playbook on train, follows it on test, and compares to the best
+  fixed strategy + a-priori design (`adds-value` / `no-better-than-fixed`); anchored
+  **walk-forward folds** pool re-learn→re-test so it's not one lucky cut.
+  `backtest_daily.run(_collect=True)` now exposes raw trades; **`/api/sim/walkforward`**
+  + Sim-tab **🧪** card (`renderWalkforward`). Suite **363 → 377**.
 - **🧭 Project rules + living context** — added `.cursor/rules/` (always-apply):
   `00-testing` (extensive testing first), `10-no-subagents` (never use the Task
   tool — Max Mode is admin-disabled so subagents fall back to Composer 2.5 Fast),
@@ -810,6 +821,24 @@ with no creds the app is unchanged.
     `window._sodHtml` and re-injected/re-bound each poll. The old live-ledger pick
     (`sim.strategy_of_the_day`) still shows, relabelled "⭐ Live forward-test
     leader" to disambiguate.
+  - **🧪 Walk-forward out-of-sample validation** (`walkforward.py`,
+    `/api/sim/walkforward`, "🧪 Walk-forward" button): the overfit guard on top of the
+    daily backtest. `backtest_daily.run(..., _collect=True)` returns the flat `trades`
+    list (each tagged `openedDate`/`regimeAtEntry`/`strategy`/`rMultiple`) + `dayRegime`;
+    `walkforward.analyze()` is then **pure** (100 % covered, no network). Three views:
+    (1) **holdout split** at `train_frac` (default 0.6) — earlier=train, later=OOS;
+    per fixed strategy → in-sample vs OOS expectancy + `_verdict` (`robust` if OOS ≥
+    60 % of IS, `decaying`, `overfit` = positive IS but negative OOS, `no-edge`,
+    `improving`, `insufficient`). (2) **adaptive-selection test** — a fixed strategy
+    has no fitted params, but the *which-strategy-per-regime* choice IS fit on train;
+    so `_best_per_regime(train)` learns the playbook, `_apply_playbook(test, …)` follows
+    it OOS, and `_adaptive_verdict` compares to the best single fixed strategy OOS +
+    the a-priori `regimeFit` map (`adds-value` / `no-better-than-fixed`). (3) **anchored
+    walk-forward folds** — `_split_folds` chunks the days, each fold re-learns on the
+    expanding train and re-tests on the next fold, pooled, so the verdict isn't hostage
+    to one arbitrary cut. UI `renderWalkforward` = adaptive-verdict banner + per-strategy
+    IS→OOS table + fold table. This is the anti-curve-fit sanity check for the whole
+    leaderboard — a strategy is only trustworthy if its OOS expectancy stays positive.
   - **Intrabar resolution** (`intrabar.py`): the sims used to decide target/stop
     against a single LTP per cycle (60s live, 5-min backtest), which misses wicks
     and detects exits late. `intrabar.resolve(trade, bars, risk, max_sessions)`

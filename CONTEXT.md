@@ -89,12 +89,13 @@ sim.py               Multi-strategy forward-tester (per-strategy sims + daily ro
 intrabar.py          Minute-candle trade resolver (target/stop/MFE/MAE) + resolve_point
 backtest_strategies.py  Offline backtester: replays archived context, resolves on OHLCV
 backtest_daily.py    Daily-bar historical backtest over real NSE EOD data
+walkforward.py       Walk-forward out-of-sample / overfit validation (pure over trades)
 db.py                SQLite store (snapshots/IV/context/sim_trades/ideas/alert_log/EOD/min_bars)
 snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQLite
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 363 across 22 suites (client/quote/paper/strategies/sim/backtests/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 377 across 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -142,6 +143,9 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
 - **`/api/depth?symbols=A,B,C`** — batch order-book imbalance (capped 30, pooled).
 - Live: `/api/live/config`, `/api/live/watch` (POST), `/api/live/seed/<sym>`, SSE stream.
 - Alerts: **`/api/alerts/status`** (no secrets), **`/api/alerts/test`** (POST).
+- Sim/research: `/api/sim/summary|daily|leaderboard|performance|analytics|regime`,
+  `/api/sim/backtest[_daily]`, `/api/sim/strategy_of_day`,
+  **`/api/sim/walkforward?days=120&universe=60&folds=4`** (out-of-sample validation).
 - Ops: `/api/health`, `/api/log/status|health|snapshot`, sim + ideas + paper routes.
 
 ## Data storage
@@ -164,7 +168,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **363 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **377 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -202,9 +206,13 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   rides the snapshot logger; header **🔔 Push** pill + status/test endpoints.
 
 **Selected next (user picked, sequenced):**
-- ⏭ **#3 Deepen the strategy engine** — leaning **walk-forward out-of-sample
-  validation** (rolling train/test, per-strategy/per-regime OOS expectancy +
-  overfit verdict); optionally new researched edges + sharper regime board.
+- ✅ **#3 Walk-forward out-of-sample validation (`walkforward.py`)** — holdout
+  train/test split + anchored folds over the daily backtest's trades; per-strategy
+  in-sample vs OOS expectancy with an overfit verdict (robust / decaying / overfit /
+  no-edge / improving), plus the headline **adaptive-selection test** (learn the
+  best-per-regime playbook on train, follow it on test, compare to best fixed +
+  a-priori design). `/api/sim/walkforward` + Sim-tab 🧪 card. Pure → 100 % covered.
+  Remaining engine ideas (new researched edges, sharper regime board) still open.
 - ⏭ **#4 Data resilience** — `jugaad-data`/`nsefeed` fallback for flaky endpoints
   + broaden the tradable universe beyond hot lists.
 
@@ -228,6 +236,28 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-16 — Walk-forward out-of-sample validation (`walkforward.py`; suite 363 → 377)
+- New **`walkforward.py`** — the credibility check the Sim leaderboard was missing.
+  It answers "does the edge survive out-of-sample, or is it curve-fit?" as a **pure**
+  function over the daily backtest's trade list (100 % covered):
+  - **Holdout split** (`train_frac`, default 0.6): earlier = train, later = OOS. Per
+    fixed strategy → in-sample vs OOS expectancy + verdict: `robust` (OOS ≥ 60 % of
+    IS), `decaying`, `overfit` (positive IS, negative OOS), `no-edge`, `improving`,
+    `insufficient`.
+  - **Adaptive-selection test** (the headline): a fixed strategy has no fitted params,
+    but the *which-strategy-per-regime* choice is fit on train. So we learn the
+    best-per-regime playbook on train, **follow it on test**, and compare to the best
+    single fixed strategy OOS + the a-priori regimeFit design. Verdict `adds-value` /
+    `no-better-than-fixed` — if switching doesn't beat a fixed strategy OOS, it was
+    curve-fit.
+  - **Anchored walk-forward folds**: re-learn on expanding train → re-test on the next
+    fold, pooled, so the verdict isn't hostage to one arbitrary cut.
+- `backtest_daily.run(..., _collect=True)` now optionally returns the flat `trades`
+  list + `dayRegime` map (omitted from the normal API payload to keep it lean).
+- **`/api/sim/walkforward`** route + Sim-tab **🧪 Walk-forward (out-of-sample)** button
+  → `renderWalkforward()` card (adaptive verdict banner + per-strategy IS→OOS table +
+  fold table). Tests: `test_walkforward.py` (13, pure) + 1 route test.
 
 ### 2026-07-16 — Route/endpoint tests (suite 340 → 363; `app.py` 51 % → 86 %)
 - Added `test_app_routes.py` (23): drives **every JSON endpoint** through the

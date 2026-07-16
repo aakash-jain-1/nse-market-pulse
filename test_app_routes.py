@@ -281,6 +281,16 @@ def test_sim_strategy_of_day():
     assert seen["days"] == 30 and seen["u"] == 25
 
 
+def test_sim_walkforward_arg_parsing():
+    import walkforward as wf
+    seen = {}
+    with _patch(wf, "run", lambda **k: seen.update(k) or {"ok": True}):
+        st, j = _json("/api/sim/walkforward?days=90&universe=50&maxHold=6&folds=5")
+    assert st == 200 and j == {"ok": True}
+    assert seen["days"] == 90 and seen["universe_size"] == 50
+    assert seen["max_hold"] == 6 and seen["folds"] == 5
+
+
 # ---------------------------------------------------------------------------
 # logger endpoints
 # ---------------------------------------------------------------------------

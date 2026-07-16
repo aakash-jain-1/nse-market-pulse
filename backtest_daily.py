@@ -629,17 +629,20 @@ def _scorecard(trades):
 
 
 def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
-        include_oi=True, force=False, resolve="daily"):
+        include_oi=True, force=False, resolve="daily", _collect=False):
     """Public entry — serialised so concurrent callers can't stampede NSE
-    (AUDIT.md M2). One backtest runs at a time; others queue on `_run_lock`."""
+    (AUDIT.md M2). One backtest runs at a time; others queue on `_run_lock`.
+
+    `_collect=True` also returns the flat `trades` list + `dayRegime` map (for the
+    walk-forward validator) — omitted from the normal API payload to keep it lean."""
     with _run_lock:
         return _run_impl(days=days, universe_size=universe_size, max_hold=max_hold,
                          chunks=chunks, chunk_days=chunk_days, include_oi=include_oi,
-                         force=force, resolve=resolve)
+                         force=force, resolve=resolve, _collect=_collect)
 
 
 def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
-              include_oi=True, force=False, resolve="daily"):
+              include_oi=True, force=False, resolve="daily", _collect=False):
     db.init()
     days = max(5, min(int(days), 120))
     universe_size = max(5, min(int(universe_size), 260))
@@ -728,7 +731,7 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
             regime_dist[r["label"]] = regime_dist.get(r["label"], 0) + 1
 
     bars_counts = [len(b) for b in hist.values()]
-    return {
+    result = {
         "mode": "daily",
         "resolve": resolve,
         "resolved": resolved,
@@ -751,6 +754,12 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
         "notCovered": NOT_COVERED,
         "generatedAt": _now(),
     }
+    if _collect:
+        # Raw material for walk-forward validation (walkforward.py): every trade
+        # tagged with openedDate + regimeAtEntry + rMultiple, plus the day→regime map.
+        result["trades"] = all_trades
+        result["dayRegime"] = day_regime
+    return result
 
 
 # ----------------------------------------------------------------------------

@@ -536,6 +536,19 @@ def api_sim_strategy_of_day():
     ))
 
 
+@app.route("/api/sim/walkforward")
+def api_sim_walkforward():
+    """Walk-forward out-of-sample validation: does each strategy's (and the
+    regime-adaptive selection's) edge survive out-of-sample, or is it curve-fit?"""
+    import walkforward as wf
+    return jsonify(wf.run(
+        days=int(request.args.get("days", 120)),
+        universe_size=int(request.args.get("universe", 60)),
+        max_hold=int(request.args.get("maxHold", 5)),
+        folds=int(request.args.get("folds", 4)),
+    ))
+
+
 @app.route("/api/sim/take", methods=["POST"])
 def api_sim_take():
     import sim

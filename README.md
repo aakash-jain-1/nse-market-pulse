@@ -238,7 +238,7 @@ flowchart TB
         direction TB
         R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}"]
         R2["/api/{recommendations,deepdive,quote,<br/>chart,optionchain,fno/universe}"]
-        R3["/api/sim/{strategies,summary,daily,leaderboard,<br/>performance,backtest,regime,take,auto,mode,reset}"]
+        R3["/api/sim/{strategies,summary,daily,leaderboard,performance,<br/>backtest,backtest_daily,walkforward,strategy_of_day,regime,take,auto,mode,reset}"]
         R4["/api/paper/{portfolio,order,option_order,<br/>futures_order,reset}"]
         R5["/api/log/{status,snapshot,backtest,iv,download}<br/>/api/iv/rank"]
     end
@@ -458,6 +458,19 @@ flowchart LR
     portfolio's expectancy to taking every trade — an honest read on whether "only
     trade your regime" adds edge. (On the recent choppy window it lifts the
     combined book from ≈−0.02R to ≈+0.05R.)
+- **🧪 Walk-forward out-of-sample validation** (`/api/sim/walkforward`,
+  `walkforward.py`, 🧪 button): the anti-curve-fit sanity check on top of the daily
+  backtest. It splits the history into **train / test**, and judges every strategy
+  only on data it was *not* picked on. For each fixed strategy you get **in-sample vs
+  out-of-sample expectancy** and a verdict — *robust* (edge persists), *decaying*,
+  *overfit* (great in-sample, loses money out-of-sample), *no-edge*, *improving*. The
+  headline is the **adaptive-selection test**: a single strategy has no tunable
+  parameters, but "which strategy to trust per regime" *is* fit on the train window —
+  so it learns the best-per-regime playbook on train, **follows it on the unseen test
+  data**, and checks whether that beats the best fixed strategy (*adds-value* vs
+  *no-better-than-fixed*). **Anchored walk-forward folds** repeat the learn→test across
+  the window so the verdict isn't one lucky cut. A strategy (or the leaderboard) is
+  only trustworthy if its out-of-sample expectancy stays positive.
 - **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
   entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
 
@@ -672,6 +685,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/sim/day?date=YYYY-MM-DD[&book=]` | One day's individual trades (closed that day + opened-that-day still open) — the Daily-P&L row drill-down |
 | `GET /api/sim/performance[?book=]` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
 | `GET /api/sim/strategy_of_day[?days=60&universe=60]` | Today's live regime + the historically best strategy for it (memoised daily-backtest leaderboard) |
+| `GET /api/sim/walkforward[?days=120&universe=60&folds=4&maxHold=5]` | Walk-forward out-of-sample validation: per-strategy in-sample vs OOS expectancy + overfit verdict, plus the regime-adaptive-selection test (does it beat a fixed strategy OOS?) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
 | `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar]` | Daily-bar historical backtest over real NSE EOD (6 strategies); SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves exits on real 1-min candles |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls (`take`/`reset` accept `{book}` — reset a specific book, or omit to wipe everything) |
@@ -697,13 +711,14 @@ nse-market-pulse/
 ├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
 ├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
 ├── backtest_daily.py        # Daily-bar historical backtest over real NSE EOD data
+├── walkforward.py          # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── notify.py               # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger
 ├── paper.py                # Paper-trading engine (equity/futures/options)
 ├── snapshot_logger.py      # Background logger (snapshots + IV + context + alerts) → SQLite
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 363 unit tests, 22 suites (client/quote/paper/strategies/sim/backtests/db/app+routes/feeds/…)
+├── test_*.py               # 377 unit tests, 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
