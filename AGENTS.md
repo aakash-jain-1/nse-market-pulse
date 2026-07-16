@@ -49,13 +49,14 @@ NSE/
 ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (6 strategies)
-├── test_*.py          # 340 unit tests across 21 suites (see below)
+├── test_*.py          # 363 unit tests across 22 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
 │   ├── test_quote.py / test_quote_more.py / test_book.py   # nse_quote math + parsers + depth
 │   ├── test_ideas.py / test_ideas_journal.py / test_strategies.py / test_paper.py
-│   └── test_app.py / test_db.py / test_logger.py / test_feeds.py / test_notify.py / test_fetch_cache.py
+│   ├── test_app.py (middleware) / test_app_routes.py (every endpoint via test client)
+│   └── test_db.py / test_logger.py / test_feeds.py / test_notify.py / test_fetch_cache.py
 ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
 ├── notify.py          # Off-screen alerts (Telegram/webhook) — rides the snapshot logger, opt-in
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context + alerts) → SQLite
@@ -106,7 +107,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 340 unit tests (client/quote/paper/strategies/sim/backtests/db/app/feeds/…)
+python -m pytest -q      # 363 unit tests (client/quote/paper/strategies/sim/backtests/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):

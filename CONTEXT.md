@@ -94,7 +94,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 340 across 21 suites (client/quote/paper/strategies/sim/backtests/db/app/feeds/notify/…)
+test_*.py            Unit tests — 363 across 22 suites (client/quote/paper/strategies/sim/backtests/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -164,18 +164,20 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **340 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **363 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
   math), `test_ideas.py` + `test_ideas_journal.py`, `test_fetch_cache.py`,
   `test_client.py` + `test_client_fetchers.py` (normalizers + raw-payload
   parsers), `test_quote.py` + `test_quote_more.py`, `test_paper.py`,
-  `test_strategies.py`, `test_app.py`, `test_db.py`, `test_logger.py`,
+  `test_strategies.py`, `test_app.py` (middleware) + `test_app_routes.py` (every
+  endpoint via the Flask test client), `test_db.py`, `test_logger.py`,
   `test_feeds.py`, `test_book.py`, `test_notify.py`.
 - Coverage: `python -m coverage run -m pytest && coverage report -m --omit="test_*.py"`
-  → **~69 % of source** (100 % pure math; the rest is network/thread/websocket
-  glue tested via stubs). `.coverage`/`htmlcov/` are gitignored.
+  → **~73 % of source** (100 % pure math, `app.py` routes 86 %; the rest is
+  startup/thread/websocket/SSE glue tested via stubs or left to integration).
+  `.coverage`/`htmlcov/` are gitignored.
 - Also: `py_compile` for Python, `node --check` on the extracted inline `<script>`,
   and `curl` smoke tests for endpoints.
 
@@ -226,6 +228,19 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-16 — Route/endpoint tests (suite 340 → 363; `app.py` 51 % → 86 %)
+- Added `test_app_routes.py` (23): drives **every JSON endpoint** through the
+  Flask test client with backends stubbed — boards, per-symbol quote/chart/
+  futures/deepdive/option-chain, `/api/ohlc` + `/api/depth` arg parsing, ideas
+  journal, alerts, live feed (config/watch/snapshot/seed), paper orders
+  (equity/option/futures), the full sim read+write surface (+ `book=` arg),
+  backtest arg normalization, logger endpoints + CSV download (404 + send_file),
+  and the pure helpers (`_select_live_feed`, `_lan_ip`, `_envflag`).
+- `test_app.py` stays focused on middleware (CSRF/token/headers/error contract);
+  `test_app_routes.py` owns the route table. Modules imported *inside* handlers
+  (`sim`, `ideas_journal`, `notify`, backtests) are stubbed by patching the cached
+  module's attributes. Source total ~69 % → **~73 %**.
 
 ### 2026-07-16 — Full test-coverage sweep (suite 98 → 340, source ~54 % → ~69 %)
 - New suites for the previously thin modules:
