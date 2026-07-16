@@ -48,6 +48,7 @@ NSE/
 ├── test_sim.py        # Unit tests: sim sizing / horizon / exit / scorecard math
 ├── test_backtest.py   # Unit tests: daily + strategy backtest exit & aggregation
 ├── test_ideas.py      # Unit tests: intrabar idea-verdict pass (L7)
+├── test_take.py       # Unit tests: end-to-end sim.take() dedupe/regime (temp DB)
 ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
 ├── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
@@ -95,7 +96,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 48 unit tests: intrabar + sim + backtest + ideas math
+python -m pytest -q      # 56 unit tests: intrabar + sim + backtest + ideas + take()
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -453,11 +454,14 @@ with no creds the app is unchanged.
   thread** (never blocks the poll); coarse LTP stays as the labelled fallback for
   tokenless symbols. Covered by `test_ideas.py`.
 - **🧪 Test suite for the financial math (audit L8)** — `test_sim.py` +
-  `test_backtest.py` + `test_ideas.py` join `test_intrabar.py`: **48 tests**
-  (`python -m pytest -q`) covering risk-based sizing (+ notional cap / no-stop
-  fallback), %-move, the business-day hold horizon, the coarse exit path incl. the
-  M4 no-price expiry, the STOP-first daily tie-break + MFE/MAE, scorecard
-  R/expectancy/win-rate, and the L7 intrabar idea verdicts (tie/fallback/throttle).
+  `test_backtest.py` + `test_ideas.py` + `test_take.py` join `test_intrabar.py`:
+  **56 tests** (`python -m pytest -q`) covering risk-based sizing (+ notional cap /
+  no-stop fallback), %-move, the business-day hold horizon, the coarse exit path
+  incl. the M4 no-price expiry, the STOP-first daily tie-break + MFE/MAE, scorecard
+  R/expectancy/win-rate, the L7 intrabar idea verdicts (tie/fallback/throttle), and
+  the end-to-end `take()` ingest — dedupe (symbol×direction×strategy×day×book,
+  surviving a same-day close), regime tagging, F&O-book filtering, `open`-mode
+  once-per-day gating and the conviction limit — on a throwaway temp DB (no network).
   These lock in the exact numbers so a future refactor can't silently drift them.
 - **🔍 Deep code audit → [`AUDIT.md`](AUDIT.md)** — whole-repo read-through
   (security, concurrency, financial-logic correctness, DB/persistence, feeds,

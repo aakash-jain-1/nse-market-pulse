@@ -73,8 +73,8 @@ throws `ReferenceError: host is not defined` before it ever fetches). *(M1)*
 ## 1a. Remediation status (2026-07-16)
 
 All P0/P1/P2 items from §5 were implemented (verified: every module imports,
-**48/48 unit tests pass** — `test_intrabar.py` + `test_sim.py` + `test_backtest.py`
-+ `test_ideas.py` — and a Flask test-client run confirms CSRF/CSP/health). Summary:
+**56/56 unit tests pass** — `test_intrabar.py` + `test_sim.py` + `test_backtest.py`
++ `test_ideas.py` + `test_take.py` — and a Flask test-client run confirms CSRF/CSP/health). Summary:
 
 | ID | Status | What changed |
 |----|--------|--------------|
@@ -96,7 +96,7 @@ All P0/P1/P2 items from §5 were implemented (verified: every module imports,
 | L5 | ✅ Fixed | `_load_config()` in both feeds caches by file mtime — no per-second disk read from the SSE status poll. |
 | L6 | ✅ Fixed | `sim._sessions_elapsed` counts business days (not just logged days), so trades expire on schedule even if the app was offline. |
 | L7 | ✅ Fixed | Idea verdicts now resolve against real 1-min candles (`ideas_journal.resolve_outcomes_intrabar`, STOP-first) — done load-consciously: throttled (~3 min), market-hours gated, token-gated + 30s-cached, batched (6 workers), fired off the poll thread, coarse LTP kept as fallback. |
-| L8 | ✅ Fixed | Test suite added: `test_sim.py` (sizing, %-move, business-day horizon, coarse exit + M4 expiry, scorecard R/expectancy), `test_backtest.py` (daily stop-first tie-break + MFE/MAE, coarse resolve, `_scorecard`/`_median`/`_equity`) and `test_ideas.py` (intrabar verdict/tie/fallback/throttle). 48 tests total. |
+| L8 | ✅ Fixed | Test suite added: `test_sim.py` (sizing, %-move, business-day horizon, coarse exit + M4 expiry, scorecard R/expectancy), `test_backtest.py` (daily stop-first tie-break + MFE/MAE, coarse resolve, `_scorecard`/`_median`/`_equity`), `test_ideas.py` (intrabar verdict/tie/fallback/throttle) and `test_take.py` (end-to-end `take()` dedupe/regime/book/mode/limit on a temp DB). 56 tests total. |
 | L9 | ✅ Noted | `requirements.txt` documents the no-hash/no-lock choice + how to harden for deployment. |
 
 Legend: ✅ fixed · ◑ partially addressed / mitigated · ⚠ deliberately deferred (with reason).
@@ -125,7 +125,7 @@ Legend: ✅ fixed · ◑ partially addressed / mitigated · ⚠ deliberately def
 | L5 | Low | Perf | `is_configured()` hits disk every call; SSE calls `public_status()` every second per client → per-second disk I/O |
 | L6 | Low | Sim logic | Multi-day horizon counts only sessions the app logged; offline days under-count → late expiries |
 | L7 | ✅ Low | Sim logic | ~~Idea outcomes use coarse hot-list LTP~~ → intrabar-accurate first-touch via `resolve_outcomes_intrabar` (throttled, gated, batched); coarse LTP kept as fallback |
-| L8 | ✅ Low | Tests | ~~Only `test_intrabar.py` exists~~ → added `test_sim.py` + `test_backtest.py` + `test_ideas.py`; 48 tests cover sizing/exit/scorecard/idea-verdict math |
+| L8 | ✅ Low | Tests | ~~Only `test_intrabar.py` exists~~ → added `test_sim.py` + `test_backtest.py` + `test_ideas.py` + `test_take.py`; 56 tests cover sizing/exit/scorecard/idea-verdict + `take()` dedupe/regime math |
 | L9 | Low | Supply chain | `requirements.txt` has no hashes / no lock file |
 
 ---
@@ -341,11 +341,14 @@ and no-stop fallback, `_move_pct`, the business-day `_sessions_elapsed`, the
 coarse `_refresh_trade` exit path **including the M4 no-price expiry**, and
 `_scorecard` R/expectancy/win-rate) and `test_backtest.py` (`backtest_daily._resolve`
 stop-first tie-break + MFE/MAE + expiry for LONG/SHORT, `backtest_strategies._resolve`,
-and `_scorecard`/`_median`/`_equity`), plus `test_ideas.py` for the L7 intrabar
-verdicts. **48 tests pass** (`python -m pytest -q`). Remaining follow-up: end-to-end
-tests for `take()` dedupe + regime tagging (need a temp DB fixture); the pure
-exit/aggregation/verdict math — the part most likely to silently corrupt a
-scorecard — is now covered.
+and `_scorecard`/`_median`/`_equity`), `test_ideas.py` for the L7 intrabar verdicts,
+and `test_take.py` — the end-to-end `take()` follow-up — which drives the real
+ingest path against a throwaway SQLite DB + JSON state (fake `strat`, no network)
+to lock in dedupe (per symbol×direction×strategy×day×book, surviving a same-day
+close), regime tagging, F&O-book filtering/separation, `open`-mode once-per-day
+gating vs manual, and the conviction `limit`. **56 tests pass** (`python -m pytest
+-q`). The exit/aggregation/verdict math AND the ingest/dedupe logic — the parts
+most likely to silently corrupt a scorecard — are now covered.
 
 ---
 
