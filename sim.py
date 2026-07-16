@@ -272,11 +272,21 @@ def _sessions_elapsed(state, opened_date):
     return days or 1
 
 
-def _refresh_trade(state, t):
-    """Reprice one OPEN trade; close on target/stop, or time-expire at horizon."""
+_UNSET = object()
+
+
+def _refresh_trade(state, t, px=_UNSET):
+    """Reprice one OPEN trade; close on target/stop, or time-expire at horizon.
+
+    `px` may be a price pre-fetched OUTSIDE _lock by update() (AUDIT2 N1) so the
+    sim's critical section never blocks on network I/O. Leave it UNSET to fetch
+    inline via _price() (used by tests and any direct caller); pass None
+    explicitly to signal 'no live price available'.
+    """
     if t["status"] != "OPEN":
         return
-    px = _price(t["symbol"])
+    if px is _UNSET:
+        px = _price(t["symbol"])
     if px is None:
         # No live price — the symbol has cooled off the hot lists. Don't let the
         # trade hang OPEN forever (AUDIT.md M4): still enforce the max-hold
@@ -288,6 +298,7 @@ def _refresh_trade(state, t):
             t["status"] = "EXPIRED"
             t["exitPrice"] = round(last, 2)
             t["closedAt"] = _now()
+            t["closedDay"] = t["closedAt"][:10]   # AUDIT2 N6: stamp like intrabar
             t["pnl"] = round(t["qty"] * (last - t["entry"]) *
                              (1 if t["direction"] == "LONG" else -1), 2)
             t["pnlPct"] = round(_move_pct(t, last), 2)
@@ -310,6 +321,7 @@ def _refresh_trade(state, t):
         t["status"] = hit
         t["exitPrice"] = round(exit_px, 2)
         t["closedAt"] = _now()
+        t["closedDay"] = t["closedAt"][:10]   # AUDIT2 N6: stamp like intrabar
         t["ltp"] = round(exit_px, 2)
         px = exit_px
 
@@ -330,37 +342,39 @@ def _baked_epoch(ts_str):
     return int(dt.replace(tzinfo=timezone.utc).timestamp())
 
 
-def _intrabar_catchup(state, open_trades):
+def _intrabar_fetch(open_trades):
     """
+    Network half of the minute-candle catch-up (throttled to INTRABAR_INTERVAL).
+
     Between the coarse 60s LTP samples a stop/target can be pierced by a wick and
-    missed. Every few minutes we re-check still-OPEN trades against real 1-min
-    candles and close any that actually hit their level intrabar. Only CLOSES are
-    applied here (open trades keep their live LTP mark); LTP remains the fallback
-    for symbols with no charting token.
+    missed. Every few minutes we pull real 1-min candles for every still-OPEN
+    symbol so the apply half can close any that actually hit their level intrabar.
+
+    Returns {symbol: bars}, or None when it isn't time yet / nothing is open.
+    Runs OUTSIDE _lock (AUDIT2 N1) so the sim's critical section never blocks on
+    this 6-worker fan-out to NSE.
     """
     global _last_intrabar
     now = time.time()
     if now - _last_intrabar < INTRABAR_INTERVAL:
-        return
-    _last_intrabar = now
-
-    open_trades = [t for t in open_trades if t["status"] == "OPEN"]
-    if not open_trades:
-        return
+        return None
+    ot = [t for t in open_trades if t["status"] == "OPEN"]
+    if not ot:
+        return None
     try:
         import concurrent.futures as cf
         import nse_quote
-        import intrabar
     except Exception:
-        return
+        return None
+    # Only consume the throttle window once we're actually about to fetch.
+    _last_intrabar = now
 
     first = {}
-    for t in open_trades:
+    for t in ot:
         s = t["symbol"]
         if s not in first or t["openedAt"] < first[s]:
             first[s] = t["openedAt"]
     to = nse_quote._baked_now()
-    max_sessions = state.get("maxSessions", DEFAULT_MAX_SESSIONS)
 
     def _one(s):
         try:
@@ -371,9 +385,22 @@ def _intrabar_catchup(state, open_trades):
             return s, []
 
     with cf.ThreadPoolExecutor(max_workers=6) as ex:
-        candles = dict(ex.map(_one, sorted(first)))
+        return dict(ex.map(_one, sorted(first)))
 
+
+def _intrabar_apply(state, open_trades, candles):
+    """
+    In-memory half of the catch-up: resolve still-OPEN trades against the
+    pre-fetched `candles` (from _intrabar_fetch). Only CLOSES are applied here
+    (open trades keep their live LTP mark); LTP remains the fallback for symbols
+    with no charting token. Runs INSIDE _lock — no network I/O (AUDIT2 N1).
+    """
+    if not candles:
+        return
+    max_sessions = state.get("maxSessions", DEFAULT_MAX_SESSIONS)
     for t in open_trades:
+        if t["status"] != "OPEN":
+            continue
         bars = candles.get(t["symbol"])
         if not bars:
             continue
@@ -397,14 +424,25 @@ def _intrabar_catchup(state, open_trades):
 
 
 def update(ctx=None):
-    """Re-price and resolve every OPEN trade; persist changes to the DB ledger."""
+    """Re-price and resolve every OPEN trade; persist changes to the DB ledger.
+
+    All network I/O — per-symbol price resolution and the minute-candle catch-up
+    fan-out — is done OUTSIDE _lock (AUDIT2 N1). The lock only guards the pure
+    in-memory reprice/resolve + the DB write, so a slow NSE call can no longer
+    serialize concurrent sim readers/writers.
+    """
+    seed = db.sim_open_trades()
+    # Resolve every open symbol's price (may hit NSE for off-hot-list names) and
+    # fetch the catch-up candles up front, lock-free.
+    prices = {s: _price(s) for s in {t["symbol"] for t in seed}}
+    candles = _intrabar_fetch(seed)
     with _lock:
         state = _load()
-        open_trades = db.sim_open_trades()
-        for t in open_trades:
-            _refresh_trade(state, t)
-        _intrabar_catchup(state, open_trades)
-        db.sim_insert_trades(open_trades)   # REPLACE-updates the changed rows
+        open_trades = db.sim_open_trades()   # re-read fresh so we never resurrect
+        for t in open_trades:                # a trade another thread just closed
+            _refresh_trade(state, t, prices.get(t["symbol"]))
+        _intrabar_apply(state, open_trades, candles)
+        db.sim_insert_trades(open_trades)    # REPLACE-updates the changed rows
         return state
 
 

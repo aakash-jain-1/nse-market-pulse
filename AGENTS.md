@@ -63,7 +63,8 @@ NSE/
 ├── requirements.txt
 ├── README.md
 ├── AGENTS.md          # <- this file
-├── AUDIT.md           # Deep code audit: findings, severities, fix roadmap
+├── AUDIT.md           # Deep code audit (round 1): findings, severities, fixes
+├── AUDIT2.md          # Deep audit round 2: financial-correctness deep-dive + concurrency
 ├── .gitignore
 ├── paper_state.json   # (gitignored) local virtual-portfolio state
 ├── angel_config.json  # (gitignored) Angel One creds (api_key/client_code/mpin/totp_secret)
@@ -764,8 +765,10 @@ with no creds the app is unchanged.
     target (mirror for SHORT); a bar that straddles both is assumed to hit the
     STOP first (conservative). Tracks true intrabar MFE/MAE and mins-to-exit;
     returns None when a symbol has no candles (renamed ticker / index) so callers
-    fall back to LTP. The live sim runs a bounded catch-up sweep (`_intrabar_catchup`,
-    every ~180s) to close trades whose stop/target was pierced between LTP samples.
+    fall back to LTP. The live sim runs a bounded catch-up sweep every ~180s to
+    close trades whose stop/target was pierced between LTP samples — split into
+    `_intrabar_fetch` (the 6-worker candle fan-out, run lock-free) +
+    `_intrabar_apply` (in-memory resolve, under the sim lock) per AUDIT2 N1.
   - **EPOCH GOTCHA:** `charting.nseindia.com` bakes IST wall-clock into the epoch
     as if it were UTC — for BOTH returned candle `time` AND the fromDate/toDate
     query bounds. Build query epochs from the IST wall clock treated as UTC

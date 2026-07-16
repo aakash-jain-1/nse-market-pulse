@@ -4,8 +4,12 @@
 > **Auditor:** AI agent (inline, whole-repo read)
 > **Commit basis:** working tree at audit time (branch `main`)
 > **Scope:** every tracked Python module, the frontend template, config &
-> dependency manifests. Static read-through + data-flow/threading/финancial-logic
+> dependency manifests. Static read-through + data-flow/threading/financial-logic
 > reasoning. No code was changed by this audit.
+>
+> **Round 2 (2026-07-16):** a second full re-sweep — deeper on financial
+> correctness + concurrency — is in [`AUDIT2.md`](AUDIT2.md). It verified the
+> money/backtest math is sound (no look-ahead) and found 1 Medium + a few Lows.
 
 ---
 

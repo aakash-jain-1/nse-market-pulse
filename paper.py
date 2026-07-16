@@ -14,9 +14,13 @@ import json
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import nse_client as nse
+
+# NSE trades in IST; stamp order timestamps in IST so they line up with the sim,
+# ideas journal, snapshots and DB rows rather than the host's local clock (N5).
+IST = timezone(timedelta(hours=5, minutes=30))
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "paper_state.json")
 STARTING_CASH = 1_000_000.0  # Rs 10 lakh virtual capital
@@ -26,7 +30,7 @@ _lock = threading.Lock()
 
 
 def _now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _default_state():
@@ -273,7 +277,8 @@ def place_futures_order(symbol, side, lots):
             # Realize P&L on the closed units and free proportional margin.
             direction = 1 if old_qty > 0 else -1
             realized = (price - pos["avgPrice"]) * closing * direction
-            margin_freed = pos["margin"] * (closing / abs(old_qty))
+            # .get: legacy future positions predate margin tracking (AUDIT2 N4).
+            margin_freed = pos.get("margin", 0.0) * (closing / abs(old_qty))
 
         if opening:
             margin_needed = opening * price * FUT_MARGIN_RATE
