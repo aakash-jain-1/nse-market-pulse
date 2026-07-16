@@ -29,15 +29,21 @@ import json
 import os
 import sqlite3
 import threading
+import time
+from datetime import datetime, timedelta, timezone
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_FILE = os.path.join(DATA_DIR, "market.db")
 
 _init_lock = threading.Lock()
-# serializes EOD-cache writes: the daily backtest hits these from 6 worker
-# threads, so we funnel writes through one lock to avoid "database is locked".
+# Serializes ALL writers (AUDIT.md L4). WAL lets readers run concurrently, but
+# funnelling writes through one process-level lock avoids "database is locked"
+# retries when the daily backtest's 6 workers, the capture loop and the sim all
+# write at once.
 _write_lock = threading.Lock()
 _initialized = False
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 SNAPSHOT_COLS = [
     "ts", "view", "rank", "symbol", "ltp", "pChange",
@@ -186,7 +192,7 @@ def init():
 def insert_snapshots(rows):
     if not rows:
         return 0
-    with _conn() as c:
+    with _write_lock, _conn() as c:
         c.executemany(
             f"INSERT INTO snapshots ({','.join(SNAPSHOT_COLS)}) "
             f"VALUES ({','.join('?' * len(SNAPSHOT_COLS))})",
@@ -227,7 +233,7 @@ def export_snapshots_csv(path):
 def insert_iv(rows):
     if not rows:
         return 0
-    with _conn() as c:
+    with _write_lock, _conn() as c:
         c.executemany(
             f"INSERT INTO iv_log ({','.join(IV_COLS)}) "
             f"VALUES ({','.join('?' * len(IV_COLS))})",
@@ -255,7 +261,7 @@ def iv_stats():
 # ----------------------------------------------------------------------------
 def insert_context(ts, day, regime, nifty_pct, payload):
     blob = gzip.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    with _conn() as c:
+    with _write_lock, _conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO context_log (ts, day, regime, niftyPct, payload) "
             "VALUES (?,?,?,?,?)", (ts, day, regime, nifty_pct, blob))
@@ -343,7 +349,7 @@ def sim_insert_trades(trades):
     """Insert or update (by id) a batch of trade dicts."""
     if not trades:
         return 0
-    with _conn() as c:
+    with _write_lock, _conn() as c:
         c.executemany(
             f"INSERT OR REPLACE INTO sim_trades ({','.join(SIM_TRADE_COLS)}) "
             f"VALUES ({','.join('?' * len(SIM_TRADE_COLS))})",
@@ -399,7 +405,7 @@ def sim_trade_count(book=None):
 
 
 def sim_clear(book=None):
-    with _conn() as c:
+    with _write_lock, _conn() as c:
         if book is None:
             c.execute("DELETE FROM sim_trades")
         else:
@@ -614,6 +620,54 @@ def ideas_stats():
         r = c.execute("SELECT COUNT(*) n, COUNT(DISTINCT day) d, "
                       "MIN(day) a, MAX(day) z FROM ideas").fetchone()
     return {"ideas": r["n"] or 0, "days": r["d"] or 0, "first": r["a"], "last": r["z"]}
+
+
+# ----------------------------------------------------------------------------
+# Retention — keep market.db from growing without bound (AUDIT.md M6)
+# ----------------------------------------------------------------------------
+def retention(snapshots_days=90, iv_days=120, context_days=60,
+              min_bars_days=45, vacuum=False):
+    """Prune the high-volume, *reproducible* time-series so the DB stays bounded.
+
+    Deliberately KEPT forever: the durable ledgers (`sim_trades`, `ideas` — your
+    real performance history) and the immutable EOD cache (`eod_bars`/`eod_oi` —
+    past bars never change and re-fetching is what we're avoiding). Only the
+    re-derivable logs are trimmed. Pass a window of 0/None to skip that table.
+
+    `min_bars.t` is NSE's IST-baked-as-UTC epoch; comparing to a real-UTC cutoff
+    is off by ~5.5h, which is immaterial at a multi-day horizon. Returns a dict of
+    rows deleted per table. VACUUM (off by default) reclaims file space but locks
+    the DB, so run it manually/rarely.
+    """
+    init()
+    now = datetime.now(IST)
+
+    def _iso(n):
+        return (now - timedelta(days=n)).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _day(n):
+        return (now - timedelta(days=n)).strftime("%Y-%m-%d")
+
+    deleted = {}
+    with _write_lock, _conn() as c:
+        if snapshots_days:
+            deleted["snapshots"] = c.execute(
+                "DELETE FROM snapshots WHERE ts < ?", (_iso(snapshots_days),)).rowcount
+        if iv_days:
+            deleted["iv_log"] = c.execute(
+                "DELETE FROM iv_log WHERE ts < ?", (_iso(iv_days),)).rowcount
+        if context_days:
+            deleted["context_log"] = c.execute(
+                "DELETE FROM context_log WHERE day < ?", (_day(context_days),)).rowcount
+        if min_bars_days:
+            cutoff_ms = int((time.time() - min_bars_days * 86400) * 1000)
+            deleted["min_bars"] = c.execute(
+                "DELETE FROM min_bars WHERE t < ?", (cutoff_ms,)).rowcount
+    if vacuum:
+        with _write_lock, _conn() as c:
+            c.execute("VACUUM")
+        deleted["vacuum"] = True
+    return deleted
 
 
 # ----------------------------------------------------------------------------

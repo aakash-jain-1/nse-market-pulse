@@ -11,8 +11,8 @@ RISK = 2000.0
 
 
 def _bar(y, mo, d, hh, mm, o, h, l, c, v=1000):
-    # Build ms so that candle_dt (utcfromtimestamp) round-trips to this wall clock
-    # exactly the way NSE bakes IST into the epoch as UTC.
+    # Build ms so that candle_dt (tz-aware UTC read) round-trips to this wall
+    # clock exactly the way NSE bakes IST into the epoch as UTC.
     ms = int(datetime(y, mo, d, hh, mm, tzinfo=timezone.utc).timestamp() * 1000)
     return {"t": ms, "o": o, "h": h, "l": l, "c": c, "v": v}
 
@@ -121,6 +121,34 @@ def test_mfe_mae_tracked():
     intrabar.resolve(t, bars, RISK, max_sessions=1)
     assert t["mfePct"] == 3.0
     assert t["maePct"] == -1.5
+
+
+def test_resolve_point_long():
+    # single-price coarse resolver shared by the live sim + context backtest
+    assert intrabar.resolve_point("LONG", 100, 98, 104, 104.5) == ("TARGET", 104)
+    assert intrabar.resolve_point("LONG", 100, 98, 104, 97.0) == ("STOP", 98)
+    assert intrabar.resolve_point("LONG", 100, 98, 104, 101.0) == (None, None)
+
+
+def test_resolve_point_short():
+    assert intrabar.resolve_point("SHORT", 100, 102, 96, 95.0) == ("TARGET", 96)
+    assert intrabar.resolve_point("SHORT", 100, 102, 96, 103.0) == ("STOP", 102)
+    assert intrabar.resolve_point("SHORT", 100, 102, 96, 99.0) == (None, None)
+
+
+def test_resolve_point_mutually_exclusive():
+    # A single price can never be beyond BOTH levels (they straddle entry), so the
+    # tie-break is unreachable and target/stop order can't change the outcome.
+    for px in (90, 95, 100, 105, 110):
+        s_stop = intrabar.resolve_point("LONG", 100, 98, 104, px, tie="stop")
+        s_tgt = intrabar.resolve_point("LONG", 100, 98, 104, px, tie="target")
+        assert s_stop == s_tgt
+
+
+def test_resolve_point_missing_levels():
+    assert intrabar.resolve_point("LONG", 100, None, 104, 104.5) == ("TARGET", 104)
+    assert intrabar.resolve_point("LONG", 100, 98, None, 97.0) == ("STOP", 98)
+    assert intrabar.resolve_point("LONG", 100, None, None, 200.0) == (None, None)
 
 
 def _main():

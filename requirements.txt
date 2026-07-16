@@ -1,3 +1,6 @@
+# Versions are pinned for reproducibility. This is a local research tool, so we
+# don't ship hashes / a lock file (AUDIT.md L9); add pip-tools + --require-hashes
+# if you ever deploy this beyond your own machine. Core deps:
 Flask==3.1.3
 requests==2.34.2
 tabulate==0.10.0

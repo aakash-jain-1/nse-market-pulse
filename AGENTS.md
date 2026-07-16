@@ -47,6 +47,7 @@ NSE/
 ├── test_intrabar.py   # Unit tests for the intrabar resolver
 ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context) → SQLite
+├── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
 ├── templates/
 │   └── index.html     # Entire dashboard UI (HTML + CSS + JS inline)
@@ -57,6 +58,7 @@ NSE/
 ├── requirements.txt
 ├── README.md
 ├── AGENTS.md          # <- this file
+├── AUDIT.md           # Deep code audit: findings, severities, fix roadmap
 ├── .gitignore
 ├── paper_state.json   # (gitignored) local virtual-portfolio state
 ├── angel_config.json  # (gitignored) Angel One creds (api_key/client_code/mpin/totp_secret)
@@ -97,8 +99,14 @@ python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed
 `python db_inspect.py <table> [N]` (last N rows + schema),
 `python db_inspect.py sql "SELECT ..."` (arbitrary read-only query).
 
-The Flask app runs in debug mode, so it auto-reloads on `.py` changes and
-re-reads `templates/index.html` on every request (no restart needed for UI edits).
+The Flask app **auto-reloads** on `.py` changes and re-reads
+`templates/index.html` on every request (no restart needed for UI edits). Since
+the security audit the **interactive debugger is OFF by default** (it was an
+RCE surface on the LAN) — set `FLASK_DEBUG=1` only for local dev if you want the
+traceback console. Other env knobs: `HOST=127.0.0.1` (loopback-only),
+`FLASK_RELOAD=0` (disable auto-restart), `NSE_TOKEN=<secret>` (require a token on
+every request — open the app once with `?token=<secret>` to set the cookie).
+Health/liveness is at `GET /api/health`. See `AUDIT.md` for the full posture.
 
 ### Phone / LAN access
 The server binds `0.0.0.0` by default, so any device on the same Wi-Fi can open
@@ -123,6 +131,14 @@ compact under `@media (max-width: 640px)`.
   browser and hijacks `127.0.0.1:5000`. That's why we run on **port 5055**.
   If port 5000 shows the wrong app: hard-refresh (Ctrl+Shift+R) or unregister
   the service worker (F12 → Application → Service Workers → Unregister).
+- **AI agents: do NOT spawn subagents for this project.** The owner's Cursor is on
+  a team plan where **Max Mode is disabled by the admin**, so the Task/subagent
+  tool silently falls back to **Composer 2.5 Fast** regardless of the main chat
+  model (Opus 4.8) — subagents cannot inherit Opus here. Do deep / quality-
+  sensitive work (audits, multi-file refactors, complex debugging) **inline in the
+  main chat**, sequentially, one module at a time. (Cursor's subagent-model control
+  lives at Settings → Agents → Subagents → "Explore subagent model", and Opus
+  needs Max Mode — both blocked by the admin, so this is not fixable client-side.)
 
 ## Architecture notes
 
@@ -405,6 +421,49 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🛠 Audit findings implemented (all P0/P1/P2)** — see the dated **Remediation
+  status** table in [`AUDIT.md`](AUDIT.md#1a-remediation-status-2026-07-16). Highlights:
+  - **Security:** debugger off by default (`FLASK_DEBUG` opt-in), generic error
+    handler, **CSRF same-origin check** on all writes, optional **`NSE_TOKEN`**
+    gate, CSP + security headers, LAN warning at startup. LAN + auto-reload
+    preserved (non-breaking).
+  - **Robustness:** `logging` → `logs/app.log` + consolidated **`/api/health`**;
+    NSE session rebuilt outside the lock; single-flight on `backtest_daily.run`
+    and the futures sweep; `db.retention()` prunes reproducible logs at startup;
+    all DB writers now hold `_write_lock`.
+  - **Correctness:** one shared `intrabar.resolve_point()` for the coarse exit
+    paths (stop-first); sim trades expire even when price is unavailable (no
+    immortal `OPEN`); business-day hold horizon (survives app-offline sessions).
+  - **Fixed the broken "⏮ Backtest history" button** (`host is not defined`).
+  - Feeds now expose only coarse error categories; `escapeHtml()` + input
+    sanitisation on the user-typed sinks; capped `nse_quote._cache`; config files
+    cached by mtime; tz-aware UTC in `intrabar`. Deferred: intrabar-accurate idea
+    verdicts (L7, extra live load) and full scorecard aggregation tests (L8).
+  - Verified: all modules import, 13/13 intrabar tests pass, Flask test-client
+    confirms CSRF(403)/CSP/health. **No behavioural regressions to the sims.**
+- **🔍 Deep code audit → [`AUDIT.md`](AUDIT.md)** — whole-repo read-through
+  (security, concurrency, financial-logic correctness, DB/persistence, feeds,
+  frontend). Read it before hardening work. Severity is stated *in context*
+  (loopback = mostly Low; the `0.0.0.0` default flips several to High). Top items
+  for a future session, in priority order:
+  - **H1/H2 (deploy):** `debug=True` + `host=0.0.0.0` + no-auth/no-CSRF → Werkzeug
+    debugger/RCE + source disclosure on the LAN, and any device/website can reset
+    ledgers or place paper trades. Default `DEBUG` off + `HOST=127.0.0.1`.
+  - **M1 (bug):** `templates/index.html:4053` — dead `host.innerHTML` line throws
+    `ReferenceError: host is not defined`, so the "⏮ Backtest history" button is
+    stuck disabled. Delete that one line (the next line already renders it).
+  - **M4 (sim):** trades on symbols that leave the hot list skip MTM **and**
+    expiry (`sim.py:259-261`) → can hang `OPEN`; evaluate expiry in the
+    `px is None` branch.
+  - **M5 (observability):** pervasive `except Exception: pass`, no `logging` →
+    silent blank data. Add logging + a `/api/health` off the existing heartbeats.
+  - **M2/M3 (load):** session rebuild holds its lock across network I/O; heavy
+    backtests have no single-flight → NSE stampede.
+  - **M9 (correctness):** three divergent exit engines (live coarse checks
+    target-before-stop; intrabar/daily are stop-first). Unify via one
+    `resolve_exit()`.
+  - Full list (M6/M7/M8 + L1–L9) and the prioritised P0/P1/P2 roadmap are in
+    `AUDIT.md`. No source was changed by the audit.
 - **🔔 New-idea alerts (any tab)** — an always-on client poller (`ideaAlertTick`,
   20s, market-hours gated) pings the moment a *new* idea appears: in-app toast
   (click → detail) + desktop Notification + beep. Seeds silently on the first

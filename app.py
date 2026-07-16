@@ -13,10 +13,14 @@ service worker from another local app (a BSE announcements PWA) caches that
 origin and hijacks requests. A fresh port sidesteps that stale cache.
 """
 
+import hmac
+import logging
 import os
 import time
+from logging.handlers import RotatingFileHandler
+from urllib.parse import urlparse
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, g, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 
 import angel_feed
@@ -27,6 +31,117 @@ import paper
 import snapshot_logger as snaplog
 
 app = Flask(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Runtime config & security posture (see AUDIT.md — H1/H2).
+# ---------------------------------------------------------------------------
+def _envflag(name, default="0"):
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Werkzeug's interactive debugger is effectively a remote code-execution console,
+# so it must NEVER be on for a network-bound server. OFF by default; opt in with
+# FLASK_DEBUG=1 for local development only.
+DEBUG = _envflag("FLASK_DEBUG")
+# The reloader (auto-restart on .py edits) is safe and convenient — on by default,
+# disable with FLASK_RELOAD=0. Debug implies the reloader.
+RELOAD = DEBUG or _envflag("FLASK_RELOAD", "1")
+PORT = int(os.environ.get("PORT", "5055"))
+# Bind to all interfaces so phones/tablets on the same Wi-Fi can reach the
+# dashboard. Set HOST=127.0.0.1 to keep it strictly loopback.
+HOST = os.environ.get("HOST", "0.0.0.0")
+# Optional shared secret. When NSE_TOKEN is set, every request must present it
+# (X-Access-Token header, nse_token cookie, or ?token=… once, which sets the
+# cookie). Unset = open (unchanged behaviour) — set it if you expose the app on
+# an untrusted network.
+ACCESS_TOKEN = (os.environ.get("NSE_TOKEN") or "").strip()
+_IS_SERVING = (not RELOAD) or os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+
+# Templates re-read on every request even with the debugger off, so UI edits to
+# index.html show on refresh without a restart.
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+
+def _setup_logging():
+    """Root logging: console (warnings) + rotating file (info) in ./logs.
+
+    Replaces the app's previous silent-failure posture (AUDIT.md M5). Third-party
+    libraries stay at WARNING; our own modules log at INFO.
+    """
+    if getattr(_setup_logging, "_done", False):
+        return
+    _setup_logging._done = True
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)
+    console = logging.StreamHandler()
+    console.setLevel(logging.WARNING)
+    console.setFormatter(fmt)
+    root.addHandler(console)
+    # One process owns the file to avoid two handlers rotating the same file.
+    if _IS_SERVING:
+        try:
+            os.makedirs("logs", exist_ok=True)
+            fh = RotatingFileHandler(os.path.join("logs", "app.log"),
+                                     maxBytes=2_000_000, backupCount=5,
+                                     encoding="utf-8")
+            fh.setLevel(logging.INFO)
+            fh.setFormatter(fmt)
+            root.addHandler(fh)
+        except Exception:
+            pass  # never let logging setup crash the app
+    for name in ("app", "nse_client", "nse_quote", "sim", "strategies",
+                 "snapshot_logger", "backtest_daily", "backtest_strategies",
+                 "angel_feed", "dhan_feed", "db", "ideas_journal", "paper"):
+        logging.getLogger(name).setLevel(logging.INFO)
+
+
+_setup_logging()
+log = logging.getLogger("app")
+
+
+@app.before_request
+def _security_guard():
+    """CSRF (same-origin on writes) + optional shared-token gate. See AUDIT.md H2."""
+    # 1) CSRF: a state-changing request must originate from our own page. This
+    #    blocks a malicious website in your browser from POSTing to the app.
+    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        origin = request.headers.get("Origin") or request.headers.get("Referer")
+        if origin:
+            if urlparse(origin).netloc != request.host:
+                return jsonify({"error": "cross-origin request blocked"}), 403
+    # 2) Optional shared-token gate (only active when NSE_TOKEN is set).
+    if ACCESS_TOKEN:
+        q = request.args.get("token") or ""
+        supplied = (request.headers.get("X-Access-Token")
+                    or request.cookies.get("nse_token") or q)
+        if not hmac.compare_digest(str(supplied), ACCESS_TOKEN):
+            return jsonify({"error": "unauthorized"}), 401
+        if q and hmac.compare_digest(str(q), ACCESS_TOKEN):
+            g._set_token_cookie = True
+
+
+@app.after_request
+def _security_headers(resp):
+    # Set the auth cookie once when a valid ?token= was supplied via URL.
+    if getattr(g, "_set_token_cookie", False):
+        resp.set_cookie("nse_token", ACCESS_TOKEN, httponly=True, samesite="Strict")
+    # Defense-in-depth headers. The UI is inline JS/CSS + inline handlers, so
+    # script/style must allow 'unsafe-inline'; we still lock down external
+    # sources, framing, objects and outbound connections.
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    return resp
 
 
 # Live realtime feed provider (see angel_feed.py / dhan_feed.py). Angel One's
@@ -461,6 +576,36 @@ def api_log_health():
     return jsonify(snaplog.health())
 
 
+@app.route("/api/health")
+def api_health():
+    """Consolidated liveness for monitoring: capture loop + feed + DB + posture.
+
+    Lets you tell "blank data because market is closed" from "capture stalled"
+    or "NSE session dead" without reading logs (AUDIT.md M5).
+    """
+    import db
+    h = snaplog.health()
+    try:
+        dbsize = os.path.getsize(db.DB_FILE) if os.path.exists(db.DB_FILE) else 0
+    except Exception:
+        dbsize = 0
+    feed = live_feed.public_status()
+    # Healthy during market hours if the loop is ticking; idle outside is fine.
+    ok = bool(h.get("healthy") or not h.get("marketHours"))
+    return jsonify({
+        "ok": ok,
+        "time": int(time.time() * 1000),
+        "logger": h,
+        "feed": {"provider": feed.get("provider"),
+                 "connected": feed.get("connected"),
+                 "configured": feed.get("configured")},
+        "db": {"path": db.DB_FILE, "bytes": dbsize,
+               "mb": round(dbsize / 1_048_576, 1)},
+        "posture": {"debug": DEBUG, "host": HOST,
+                    "authRequired": bool(ACCESS_TOKEN)},
+    })
+
+
 @app.route("/api/log/snapshot", methods=["POST"])
 def api_log_snapshot():
     n = snaplog.capture_snapshot()
@@ -508,14 +653,10 @@ def handle_error(e):
     # 500 in the console.
     if isinstance(e, HTTPException):
         return jsonify({"error": e.description}), e.code
-    return jsonify({"error": str(e)}), 500
-
-
-DEBUG = True
-PORT = int(os.environ.get("PORT", "5055"))
-# Bind to all interfaces so phones/tablets on the same Wi-Fi can reach the
-# dashboard. Override with HOST=127.0.0.1 to keep it local-only.
-HOST = os.environ.get("HOST", "0.0.0.0")
+    # Log the real cause server-side; never leak internals to the client
+    # (AUDIT.md H1 — str(e) can expose paths/state).
+    log.exception("Unhandled error on %s %s", request.method, request.path)
+    return jsonify({"error": "Internal server error"}), 500
 
 
 def _lan_ip():
@@ -534,15 +675,28 @@ def _lan_ip():
 
 
 if __name__ == "__main__":
-    # In debug mode Flask spawns a reloader parent + a worker child. Only the
-    # worker (which actually serves) sets WERKZEUG_RUN_MAIN, so start the
-    # background logger there to avoid two loggers writing the same file.
-    if not DEBUG or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+    # With the reloader on, Flask spawns a watcher parent + a worker child. Only
+    # the worker (which actually serves) sets WERKZEUG_RUN_MAIN, so start the
+    # background threads there to avoid two loggers writing the same files.
+    if _IS_SERVING:
         # Sims run automatically from startup — force auto ON regardless of any
         # persisted state, so it never waits for the user to flip the toggle.
         import sim
         sim.set_auto(True)
         snaplog.start()
+        # Prune the reproducible time-series once per startup so market.db stays
+        # bounded (AUDIT.md M6). Durable ledgers + the EOD cache are kept. Daemon
+        # thread so a large first sweep never delays the dashboard coming up.
+        import db as _db
+        import threading as _th
+        def _retain():
+            try:
+                deleted = _db.retention()
+                if any(deleted.values()):
+                    log.info("DB retention pruned: %s", deleted)
+            except Exception:
+                log.warning("DB retention failed", exc_info=True)
+        _th.Thread(target=_retain, daemon=True).start()
         # Live realtime feed (Angel One or Dhan). No-op unless credentials + SDK
         # are present, so the app runs unchanged for users who haven't set it up.
         live_feed.start()
@@ -563,7 +717,17 @@ if __name__ == "__main__":
             print(f"   Network:  http://{ip}:{PORT}   <-- open this on your phone")
             print("   (phone must be on the same Wi-Fi; allow Python through")
             print("    the Windows firewall if prompted)")
+        if HOST != "127.0.0.1" and not ACCESS_TOKEN:
+            print("   ⚠  Reachable on your LAN with NO access token. Anyone on")
+            print("      this network can use every endpoint. To lock it down set")
+            print("      NSE_TOKEN=<secret> (then open the app with ?token=<secret>),")
+            print("      or bind loopback-only with HOST=127.0.0.1.")
+        if DEBUG:
+            print("   ⚠  FLASK_DEBUG=1 — interactive debugger ENABLED (dev only).")
         print("=" * 60 + "\n")
     # threaded so a long request (e.g. a full-universe daily backtest, ~2-3 min)
-    # doesn't block the dashboard's auto-refresh polling.
-    app.run(debug=DEBUG, host=HOST, port=PORT, threaded=True)
+    # doesn't block the dashboard's auto-refresh polling. The interactive
+    # debugger stays OFF unless FLASK_DEBUG=1 (AUDIT.md H1); the reloader is
+    # independent so .py edits still auto-restart during development.
+    app.run(host=HOST, port=PORT, threaded=True,
+            debug=DEBUG, use_reloader=RELOAD, use_debugger=DEBUG)

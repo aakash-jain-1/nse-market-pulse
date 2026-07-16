@@ -18,13 +18,16 @@ the caller can fall back to its LTP path (e.g. renamed tickers / indices with no
 charting token).
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def candle_dt(ms):
     """NSE bakes IST wall-clock into the epoch as if it were UTC; reading the
-    UTC components back gives the correct IST time regardless of local tz."""
-    return datetime.utcfromtimestamp(ms / 1000.0)
+    UTC components back gives the correct IST time regardless of local tz.
+
+    Uses a tz-aware UTC conversion (utcfromtimestamp is deprecated in 3.12+,
+    AUDIT.md L3) then drops tzinfo to keep the historical naive-IST contract."""
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).replace(tzinfo=None)
 
 
 def _parse_ts(s):
@@ -41,6 +44,34 @@ def _parse_ts(s):
 
 def _move_pct(direction, entry, px):
     return (px - entry) / entry * 100 if direction == "LONG" else (entry - px) / entry * 100
+
+
+def resolve_point(direction, entry, stop, target, px, tie="stop"):
+    """Resolve a trade against a SINGLE coarse price sample (live LTP / EOD close).
+
+    Returns (status, exit_px) with status "TARGET"/"STOP", or (None, None) for no
+    hit. This is the coarse-path counterpart of resolve(): every engine's
+    single-price fallback (live sim tick, context backtest) should go through here
+    so they share ONE exit convention (AUDIT.md M9).
+
+    A single price can't be beyond both the target AND the stop at once — they sit
+    on opposite sides of entry — so `tie` is effectively unreachable here; it
+    exists only to mirror resolve()'s stop-first rule for total consistency. Time
+    expiry stays the caller's responsibility (it needs the session horizon).
+    """
+    if direction == "LONG":
+        tgt_hit = target is not None and px >= target
+        stop_hit = stop is not None and px <= stop
+    else:
+        tgt_hit = target is not None and px <= target
+        stop_hit = stop is not None and px >= stop
+    if tgt_hit and stop_hit:
+        return ("STOP", stop) if tie == "stop" else ("TARGET", target)
+    if tgt_hit:
+        return "TARGET", target
+    if stop_hit:
+        return "STOP", stop
+    return None, None
 
 
 def resolve(trade, bars, risk_per_trade, max_sessions=None, tie="stop"):

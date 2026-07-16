@@ -76,6 +76,11 @@ _SOD_TTL_S = 6 * 3600
 _sod_cache = {"key": None, "ts": 0.0, "data": None}
 _sod_lock = threading.Lock()
 
+# Serialise heavy backtests: a full-universe run fans ~200+ symbols out over NSE,
+# so two concurrent cold runs would stampede it (bot-block / DoS). One at a time;
+# extra callers queue behind this lock (AUDIT.md M2).
+_run_lock = threading.Lock()
+
 NOT_COVERED = [
     {"id": "vwap", "name": "VWAP Trend",
      "reason": "Intraday cumulative VWAP has no daily-bar equivalent."},
@@ -360,9 +365,10 @@ def _signals(f):
 def _resolve(direction, entry, stop_px, tgt_px, bars, i, max_hold):
     """
     Walk subsequent daily bars; return (status, exitPrice, exitIdx, mfePct, maePct).
-    A bar that straddles both stop and target is a STOP (conservative). Time-expire
-    at close. MFE/MAE are the best/worst excursions from entry over the hold
-    (daily-granularity here; minute mode recomputes them from real intraday wicks).
+    A bar that straddles both stop and target is a STOP (conservative) — the same
+    stop-first tie-break as intrabar.resolve() (AUDIT.md M9). Time-expire at close.
+    MFE/MAE are the best/worst excursions from entry over the hold (daily-
+    granularity here; minute mode recomputes them from real intraday wicks).
     """
     last = len(bars) - 1
     end = min(i + max_hold, last)
@@ -624,6 +630,16 @@ def _scorecard(trades):
 
 def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
         include_oi=True, force=False, resolve="daily"):
+    """Public entry — serialised so concurrent callers can't stampede NSE
+    (AUDIT.md M2). One backtest runs at a time; others queue on `_run_lock`."""
+    with _run_lock:
+        return _run_impl(days=days, universe_size=universe_size, max_hold=max_hold,
+                         chunks=chunks, chunk_days=chunk_days, include_oi=include_oi,
+                         force=force, resolve=resolve)
+
+
+def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
+              include_oi=True, force=False, resolve="daily"):
     db.init()
     days = max(5, min(int(days), 120))
     universe_size = max(5, min(int(universe_size), 260))

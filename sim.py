@@ -39,6 +39,7 @@ import time
 from datetime import datetime, timezone, timedelta
 
 import db
+import intrabar
 import nse_client as nse
 import strategies as strat
 
@@ -247,9 +248,28 @@ def _move_pct(t, px):
 
 
 def _sessions_elapsed(state, opened_date):
-    """Distinct trading sessions (daily-log dates) from entry through today."""
-    today = _today()
-    return len([d for d in state.get("daily", {}) if opened_date <= d <= today]) or 1
+    """Trading sessions (business days) from entry date through today, inclusive.
+
+    Counts weekdays rather than only the days the app happened to log (AUDIT.md
+    L6): the old daily-log count under-counted whenever the app was offline for a
+    session, so multi-day trades could linger past their horizon. Holidays are
+    counted as sessions — a minor over-count that at worst expires a trade one
+    session early in a holiday-heavy week, far better than never expiring.
+    """
+    try:
+        start = datetime.strptime(str(opened_date)[:10], "%Y-%m-%d").date()
+        end = datetime.strptime(_today(), "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return 1
+    if end < start:
+        return 1
+    days = 0
+    d = start
+    while d <= end:
+        if d.weekday() < 5:      # Mon-Fri
+            days += 1
+        d += timedelta(days=1)
+    return days or 1
 
 
 def _refresh_trade(state, t):
@@ -258,24 +278,30 @@ def _refresh_trade(state, t):
         return
     px = _price(t["symbol"])
     if px is None:
+        # No live price — the symbol has cooled off the hot lists. Don't let the
+        # trade hang OPEN forever (AUDIT.md M4): still enforce the max-hold
+        # horizon, closing at the last known mark. The intrabar catch-up will
+        # supersede this with a candle-accurate exit if the symbol has a token.
+        if _sessions_elapsed(state, t["openedDate"]) > state.get(
+                "maxSessions", DEFAULT_MAX_SESSIONS):
+            last = t.get("ltp") or t["entry"]
+            t["status"] = "EXPIRED"
+            t["exitPrice"] = round(last, 2)
+            t["closedAt"] = _now()
+            t["pnl"] = round(t["qty"] * (last - t["entry"]) *
+                             (1 if t["direction"] == "LONG" else -1), 2)
+            t["pnlPct"] = round(_move_pct(t, last), 2)
+            t["rMultiple"] = round(t["pnl"] / t.get("risk", RISK_PER_TRADE), 2)
         return
     t["ltp"] = round(px, 2)
     fav = _move_pct(t, px)
     t["mfePct"] = round(max(t["mfePct"], fav), 2)
     t["maePct"] = round(min(t["maePct"], fav), 2)
 
-    hit = None
-    tgt, stop = t.get("target"), t.get("stop")
-    if t["direction"] == "LONG":
-        if tgt and px >= tgt:
-            hit, exit_px = "TARGET", tgt
-        elif stop and px <= stop:
-            hit, exit_px = "STOP", stop
-    else:
-        if tgt and px <= tgt:
-            hit, exit_px = "TARGET", tgt
-        elif stop and px >= stop:
-            hit, exit_px = "STOP", stop
+    # Coarse single-price resolution via the shared helper (AUDIT.md M9); the
+    # intrabar catch-up later supersedes this with candle-accurate exits.
+    hit, exit_px = intrabar.resolve_point(
+        t["direction"], t["entry"], t.get("stop"), t.get("target"), px)
 
     if not hit and _sessions_elapsed(state, t["openedDate"]) > state.get("maxSessions", DEFAULT_MAX_SESSIONS):
         hit, exit_px = "EXPIRED", px

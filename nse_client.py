@@ -10,11 +10,14 @@ cookies, then reuse that session for the API calls. Sessions expire, so we
 lazily rebuild them on failure.
 """
 
+import logging
 import threading
 import time
 from datetime import datetime
 
 import requests
+
+log = logging.getLogger("nse_client")
 
 BASE = "https://www.nseindia.com"
 
@@ -55,12 +58,37 @@ def _build_session():
 
 
 def get_session(force=False):
+    """Return a cookie-warmed session, rebuilding lazily.
+
+    The rebuild (2 blocking NSE GETs, up to ~30s) happens OUTSIDE `_lock` so a
+    slow warm-up can't serialize every other request thread (AUDIT.md M3). The
+    lock is held only for the quick pointer read/swap.
+    """
     global _session, _session_ts
     with _lock:
-        expired = (time.time() - _session_ts) > _SESSION_TTL
-        if force or _session is None or expired:
-            _session = _build_session()
-            _session_ts = time.time()
+        cur, ts = _session, _session_ts
+    if not force and cur is not None and (time.time() - ts) <= _SESSION_TTL:
+        return cur
+
+    try:
+        fresh = _build_session()
+    except Exception:
+        log.warning("NSE session rebuild failed", exc_info=True)
+        with _lock:
+            if _session is not None:
+                return _session   # fall back to the stale session
+        raise
+
+    with _lock:
+        # Another thread may have rebuilt while we warmed up. If theirs is very
+        # recent, keep it and discard our duplicate warm-up (avoids a stampede
+        # when many threads hit a dead session at once).
+        just_rebuilt = _session is not None and (time.time() - _session_ts) < 5
+        still_valid = _session is not None and (time.time() - _session_ts) <= _SESSION_TTL
+        if just_rebuilt or (not force and still_valid):
+            return _session
+        _session = fresh
+        _session_ts = time.time()
         return _session
 
 
@@ -696,7 +724,7 @@ _reco_cache = {"ts": 0.0, "data": None}
 _RECO_TTL = 12  # share one scanner sweep across the Ideas tab + the new-idea alert poll
 
 
-def get_recommendations(fno_only=False, limit=10):
+def get_recommendations(fno_only=False, limit=None):
     """
     Ranked LONG / SHORT trade ideas derived from the live signal aggregate.
     Each idea carries a conviction score, plain-English reasons and a simple
@@ -705,6 +733,9 @@ def get_recommendations(fno_only=False, limit=10):
     The (unfiltered) enriched set is cached briefly so the dashboard's Ideas tab
     and the always-on new-idea alert poll don't each trigger a full scanner
     sweep; the F&O toggle only filters the already-computed view.
+
+    `limit` (per side) is applied only to the returned view; the journal always
+    records the full qualifying set. Default None = return everything.
     """
     now = time.time()
     c = _reco_cache
@@ -731,7 +762,8 @@ def get_recommendations(fno_only=False, limit=10):
             longs, shorts = ideas_journal.enrich(longs, shorts,
                                                  price_fn=lambda s: pmap.get(s))
         except Exception:
-            longs, shorts = longs[:limit], shorts[:limit]
+            log.warning("ideas_journal.enrich failed; serving unenriched ideas",
+                        exc_info=True)
 
         c["data"] = {"longs": longs, "shorts": shorts,
                      "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -742,6 +774,8 @@ def get_recommendations(fno_only=False, limit=10):
     if fno_only:
         longs = [i for i in longs if i.get("fno")]
         shorts = [i for i in shorts if i.get("fno")]
+    if limit:
+        longs, shorts = longs[:limit], shorts[:limit]
     return {
         "longs": longs,
         "shorts": shorts,
@@ -1113,6 +1147,7 @@ def _analyze_stock(symbol, last, stats, deriv, options):
 
 _all_fut_cache = {"ts": 0.0, "rows": None}
 _ALL_FUT_TTL = 90  # seconds; a full sweep is expensive so cache aggressively
+_all_fut_lock = threading.Lock()  # single-flight: coalesce concurrent cold sweeps
 
 
 def get_all_futures(force=False):
@@ -1127,28 +1162,35 @@ def get_all_futures(force=False):
             and (time.time() - _all_fut_cache["ts"]) < _ALL_FUT_TTL):
         return _all_fut_cache["rows"]
 
-    from concurrent.futures import ThreadPoolExecutor
-    import nse_quote
+    # Single-flight: only one thread runs the ~215-symbol sweep; concurrent
+    # callers wait and then get the just-filled cache (AUDIT.md M2).
+    with _all_fut_lock:
+        if (not force and _all_fut_cache["rows"] is not None
+                and (time.time() - _all_fut_cache["ts"]) < _ALL_FUT_TTL):
+            return _all_fut_cache["rows"]
 
-    uni = get_fno_universe()
-    symbols = (uni.get("indices") or []) + (uni.get("stocks") or [])
+        from concurrent.futures import ThreadPoolExecutor
+        import nse_quote
 
-    def one(sym):
-        try:
-            return nse_quote.get_near_future(sym)
-        except Exception:
-            return None
+        uni = get_fno_universe()
+        symbols = (uni.get("indices") or []) + (uni.get("stocks") or [])
 
-    rows = []
-    # Modest concurrency: enough to finish in a few seconds, gentle on NSE.
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        for r in pool.map(one, symbols):
-            if r and r.get("ltp") is not None:
-                rows.append(r)
+        def one(sym):
+            try:
+                return nse_quote.get_near_future(sym)
+            except Exception:
+                return None
 
-    rows.sort(key=lambda x: (x.get("volume") or 0), reverse=True)
-    _all_fut_cache.update(ts=time.time(), rows=rows)
-    return rows
+        rows = []
+        # Modest concurrency: enough to finish in a few seconds, gentle on NSE.
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for r in pool.map(one, symbols):
+                if r and r.get("ltp") is not None:
+                    rows.append(r)
+
+        rows.sort(key=lambda x: (x.get("volume") or 0), reverse=True)
+        _all_fut_cache.update(ts=time.time(), rows=rows)
+        return rows
 
 
 def get_demand_score(limit=25):

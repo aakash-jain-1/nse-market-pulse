@@ -52,18 +52,32 @@ PROVIDER = "dhan"
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+_config_cache = {"mtime": None, "data": None}
+
+
 def _load_config():
     """(client_id, access_token) from env first, then dhan_config.json."""
     cid = os.environ.get("DHAN_CLIENT_ID")
     tok = os.environ.get("DHAN_ACCESS_TOKEN")
     if cid and tok:
         return cid.strip(), tok.strip()
+    # Cache parsed JSON by mtime so per-second SSE status polls don't re-read the
+    # file each tick (AUDIT.md L5).
+    try:
+        mtime = os.path.getmtime(CONFIG_JSON)
+    except OSError:
+        mtime = None
+    c = _config_cache
+    if c["data"] is not None and c["mtime"] == mtime:
+        return c["data"]
     try:
         with open(CONFIG_JSON, encoding="utf-8") as f:
             d = json.load(f)
-        return (d.get("client_id") or "").strip(), (d.get("access_token") or "").strip()
+        data = ((d.get("client_id") or "").strip(), (d.get("access_token") or "").strip())
     except Exception:
-        return None, None
+        data = (None, None)
+    _config_cache.update(mtime=mtime, data=data)
+    return data
 
 
 def is_configured():
@@ -429,6 +443,27 @@ def stop():
             pass
 
 
+def _coarse_error(err):
+    """Coarse, secret-free error category for the UI (AUDIT.md M7). The status is
+    served unauthenticated and raw broker/HTTP errors can embed tokens/URLs, so
+    never expose the raw text — full detail stays in the server log."""
+    if not err:
+        return None
+    s = str(err).lower()
+    if any(k in s for k in ("401", "403", "unauthor", "forbidden", "denied",
+                            "token", "jwt", "session", "login", "credential")):
+        return "auth_failed"
+    if any(k in s for k in ("429", "rate", "too many")):
+        return "rate_limited"
+    if any(k in s for k in ("timeout", "timed out", "connection", "refused",
+                            "reset", "unreachable", "getaddrinfo", "socket",
+                            "ssl", "network", "dns")):
+        return "network"
+    if any(k in s for k in ("subscri", "not active", "data api", "plan", "806")):
+        return "data_plan"
+    return "error"
+
+
 def public_status():
     """Config + connection health for the UI (safe to expose; no secrets)."""
     with _lock:
@@ -447,7 +482,7 @@ def public_status():
         "lastMsgAt": _status["lastMsgAt"],
         "msgs": _status["msgs"],
         "restarts": _status["restarts"],
-        "error": _status["error"],
+        "error": _coarse_error(_status["error"]),
         "errorAt": _status["errorAt"],
         "instruments": scrip_count(),
         "watching": watching,

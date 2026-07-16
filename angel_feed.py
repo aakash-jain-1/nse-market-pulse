@@ -59,6 +59,9 @@ PAISE = 100.0
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+_config_cache = {"mtime": None, "data": None}
+
+
 def _load_config():
     """dict(api_key, client_code, mpin, totp_secret) from env first, then json."""
     env = {
@@ -69,17 +72,28 @@ def _load_config():
     }
     if all(env.values()):
         return {k: (v or "").strip() for k, v in env.items()}
+    # Cache the parsed JSON keyed on file mtime, so the per-second SSE status
+    # poll doesn't re-read + re-parse the file every tick (AUDIT.md L5).
+    try:
+        mtime = os.path.getmtime(CONFIG_JSON)
+    except OSError:
+        mtime = None
+    c = _config_cache
+    if c["data"] is not None and c["mtime"] == mtime:
+        return c["data"]
     try:
         with open(CONFIG_JSON, encoding="utf-8") as f:
             d = json.load(f)
-        return {
+        data = {
             "api_key": (d.get("api_key") or "").strip(),
             "client_code": (d.get("client_code") or "").strip(),
             "mpin": (d.get("mpin") or d.get("pin") or "").strip(),
             "totp_secret": (d.get("totp_secret") or d.get("totp") or "").strip(),
         }
     except Exception:
-        return {"api_key": "", "client_code": "", "mpin": "", "totp_secret": ""}
+        data = {"api_key": "", "client_code": "", "mpin": "", "totp_secret": ""}
+    _config_cache.update(mtime=mtime, data=data)
+    return data
 
 
 def is_configured():
@@ -511,6 +525,31 @@ def stop():
             pass
 
 
+def _coarse_error(err):
+    """Map a raw exception string to a coarse, secret-free category for the UI.
+
+    The status is served on an unauthenticated endpoint, and broker/HTTP errors
+    can embed tokens, JWTs or request URLs — so we never surface the raw text
+    (AUDIT.md M7). Full detail is in the server log.
+    """
+    if not err:
+        return None
+    s = str(err).lower()
+    if any(k in s for k in ("401", "403", "unauthor", "forbidden", "denied",
+                            "token", "jwt", "session", "login", "totp", "otp",
+                            "credential", "api_key", "apikey")):
+        return "auth_failed"
+    if any(k in s for k in ("429", "rate", "too many")):
+        return "rate_limited"
+    if any(k in s for k in ("timeout", "timed out", "connection", "refused",
+                            "reset", "unreachable", "getaddrinfo", "socket",
+                            "ssl", "network", "dns")):
+        return "network"
+    if any(k in s for k in ("subscri", "not active", "data api", "plan", "806")):
+        return "data_plan"
+    return "error"
+
+
 def public_status():
     """Config + connection health for the UI (safe to expose; no secrets)."""
     with _lock:
@@ -529,7 +568,7 @@ def public_status():
         "lastMsgAt": _status["lastMsgAt"],
         "msgs": _status["msgs"],
         "restarts": _status["restarts"],
-        "error": _status["error"],
+        "error": _coarse_error(_status["error"]),
         "errorAt": _status["errorAt"],
         "instruments": scrip_count(),
         "watching": watching,

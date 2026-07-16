@@ -61,19 +61,12 @@ def _move_pct(direction, entry, px):
 
 
 def _resolve(t, px, sessions):
-    """Close t if target/stop hit or horizon exceeded; return True if closed."""
-    tgt, stop = t["target"], t["stop"]
-    hit = exit_px = None
-    if t["direction"] == "LONG":
-        if tgt and px >= tgt:
-            hit, exit_px = "TARGET", tgt
-        elif stop and px <= stop:
-            hit, exit_px = "STOP", stop
-    else:
-        if tgt and px <= tgt:
-            hit, exit_px = "TARGET", tgt
-        elif stop and px >= stop:
-            hit, exit_px = "STOP", stop
+    """Close t if target/stop hit or horizon exceeded; return True if closed.
+
+    Coarse single-price path shared with the live sim via intrabar.resolve_point
+    (AUDIT.md M9)."""
+    hit, exit_px = intrabar.resolve_point(
+        t["direction"], t["entry"], t["stop"], t["target"], px)
     if not hit and sessions > t["maxSessions"]:
         hit, exit_px = "EXPIRED", px
     if hit:

@@ -683,8 +683,10 @@ nse-market-pulse/
 ├── dhan_config.example.json  # Template for Dhan creds → copy to dhan_config.json
 ├── data/                   # (gitignored) market.db + any legacy CSVs
 ├── requirements.txt
+├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
 ├── README.md
 ├── AGENTS.md               # Context/spec for AI agents & future sessions
+├── AUDIT.md                # Deep code audit — findings, severities, roadmap
 └── *.json                  # (gitignored) sim_state.json, paper_state.json, angel_config.json, dhan_config.json
 ```
 
@@ -735,6 +737,10 @@ raw field names.
 - The core app needs **no API key**; **no secrets in the repo** (`.gitignore`
   covers `.env`, `*.db`, state JSON, CSVs, `logs/`, and the broker configs
   `angel_config.json` / `dhan_config.json`).
+- **Security posture:** ships with Flask `debug=True` and binds `0.0.0.0` with no
+  auth — fine for **loopback / trusted-LAN** use, but see **[`AUDIT.md`](AUDIT.md)**
+  before exposing it anywhere. `AUDIT.md` is the deep code audit (known issues,
+  severities, and a prioritised fix roadmap).
 
 ---
 

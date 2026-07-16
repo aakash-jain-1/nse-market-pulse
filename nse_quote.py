@@ -73,6 +73,21 @@ _cache = {}          # key -> (ts, data)
 _warmed = set()      # symbols we've visited the quote page for this session
 _QUOTE_TTL = 12      # seconds
 _CHART_TTL = 30
+_CACHE_MAX = 2000    # cap entries so wide backtests (many OHLC windows) can't grow it without bound (AUDIT.md L2)
+
+
+def _cache_put(key, data):
+    """Store (ts, data) with a size cap: evict stale entries first, then the
+    oldest, so the process memory stays bounded during heavy backtests."""
+    _cache[key] = (time.time(), data)
+    if len(_cache) <= _CACHE_MAX:
+        return
+    now = time.time()
+    for k in [k for k, (ts, _) in _cache.items() if now - ts > _CHART_TTL]:
+        _cache.pop(k, None)
+    if len(_cache) > _CACHE_MAX:
+        for k in sorted(_cache, key=lambda k: _cache[k][0])[:len(_cache) - _CACHE_MAX * 9 // 10]:
+            _cache.pop(k, None)
 
 
 def _num(x):
@@ -165,7 +180,7 @@ def get_quote(symbol, series="EQ"):
         "lastUpdateTime": resp.get("lastUpdateTime"),
         "depth": {"bids": bids, "asks": asks},
     }
-    _cache[key] = (time.time(), out)
+    _cache_put(key, out)
     return out
 
 
@@ -189,7 +204,7 @@ def get_chart(symbol, days="1D"):
         "prevClose": _num(data.get("closePrice")),
         "points": points,
     }
-    _cache[key] = (time.time(), out)
+    _cache_put(key, out)
     return out
 
 
@@ -324,7 +339,7 @@ def get_ohlc(symbol, interval=1, chart_type="I", days=None,
             })
     except Exception as e:
         out["error"] = str(e)
-    _cache[key] = (time.time(), out)
+    _cache_put(key, out)
     return out
 
 
@@ -419,7 +434,7 @@ def get_symbol_futures(symbol):
     futs.sort(key=lambda x: (nse._days_to_expiry(x["expiry"]) or 9999))
     out = {"symbol": symbol, "underlying": underlying, "futures": futs,
            "lotSize": nse.get_lot_size(symbol)}
-    _cache[key] = (time.time(), out)
+    _cache_put(key, out)
     return out
 
 
@@ -558,7 +573,7 @@ def get_option_chain(symbol, expiry=None):
         "resistance": _top("ce"),
         "lotSize": nse.get_lot_size(symbol),
     }
-    _cache[key] = (time.time(), out)
+    _cache_put(key, out)
     return out
 
 

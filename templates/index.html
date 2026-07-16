@@ -818,6 +818,11 @@
     const fmtNum = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");
     const fmtPrice = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
     const fmtCr = (n) => n == null ? "—" : "₹" + (n/1e7).toLocaleString("en-IN",{maximumFractionDigits:1}) + " Cr";
+    // Escape anything interpolated into innerHTML that could be user- or
+    // feed-controlled (symbols, free text) to close DOM-injection sinks
+    // (AUDIT.md M8). Use for text AND for values placed inside "..." attributes.
+    const escapeHtml = (v) => v == null ? "" : String(v).replace(/[&<>"']/g,
+      c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
     const pctCell = (p) => {
       if (p == null) return "<td>—</td>";
       const cls = p >= 0 ? "pos" : "neg";
@@ -3089,8 +3094,9 @@
         const chgPct = (rec.ltp != null && base) ? ((rec.ltp - base) / base * 100) : null;
         const cls = chgPct == null ? "" : (chgPct >= 0 ? "pos" : "neg");
         const sel = sym === window._liveFocus ? " sel" : "";
-        return `<div class="lw-row${sel}" data-sym="${sym}">
-          <span class="lw-sym">${sym}</span>
+        const esym = escapeHtml(sym);
+        return `<div class="lw-row${sel}" data-sym="${esym}">
+          <span class="lw-sym">${esym}</span>
           <span class="lw-ltp"><span class="${cls}">${rec.ltp != null ? fmtPrice(rec.ltp) : "—"}</span>${
             chgPct == null ? "" : `<span class="${cls}" style="font-size:11px"> ${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%</span>`}</span>
           <span class="lw-x" title="Remove">×</span>
@@ -3174,7 +3180,9 @@
 
     async function liveAddSymbol() {
       const inp = document.getElementById("liveAdd");
-      const sym = (inp.value || "").toUpperCase().trim();
+      // NSE tickers are letters/digits with the odd &, - or . (e.g. M&M, BAJAJ-AUTO).
+      // Strip anything else so no markup can enter the watch set (AUDIT.md M8).
+      const sym = (inp.value || "").toUpperCase().trim().replace(/[^A-Z0-9&.\-]/g, "");
       if (!sym) return;
       inp.value = "";
       window._liveWatch = window._liveWatch || [];
@@ -3531,10 +3539,10 @@
     }
 
     async function loadDeepDive(sym) {
-      sym = (sym || document.getElementById("ddInput").value || "").toUpperCase().trim();
+      sym = (sym || document.getElementById("ddInput").value || "").toUpperCase().trim().replace(/[^A-Z0-9&.\-]/g, "");
       if (!sym) return;
       const box = document.getElementById("ddContent");
-      box.innerHTML = `<div class="loading">Digging into ${sym} — history, delivery, F&amp;O & options…</div>`;
+      box.innerHTML = `<div class="loading">Digging into ${escapeHtml(sym)} — history, delivery, F&amp;O & options…</div>`;
       try {
         const d = await (await fetch("/api/deepdive/" + encodeURIComponent(sym))).json();
         if (d.error) { box.innerHTML = `<div class="loading err">${d.error}</div>`; return; }
@@ -3699,10 +3707,10 @@
       }
     }
     async function loadOptionChain(sym, expiry) {
-      sym = (sym || document.getElementById("ocInput").value || "").toUpperCase().trim();
+      sym = (sym || document.getElementById("ocInput").value || "").toUpperCase().trim().replace(/[^A-Z0-9&.\-]/g, "");
       if (!sym) return;
       document.getElementById("ocSym").textContent = sym;
-      document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Loading ${sym} option chain…</div>`;
+      document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Loading ${escapeHtml(sym)} option chain…</div>`;
       document.getElementById("ocSummary").innerHTML = "";
       document.getElementById("ocLevels").innerHTML = "";
       document.getElementById("ocCharts").innerHTML = "";
@@ -4050,7 +4058,6 @@
     document.getElementById("simBacktest").onclick = async () => {
       const btn = document.getElementById("simBacktest");
       btn.disabled = true; btn.textContent = "⏳ Replaying…";
-      host.innerHTML = `<div class="loading">Replaying all strategies over archived context…</div>`;
       setBtHtml("btResult", "_btHtml", `<div class="loading" style="margin-top:12px">Replaying archived context…</div>`);
       try {
         const mode = document.getElementById("simMode").value || "continuous";
