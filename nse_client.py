@@ -121,6 +121,11 @@ def _fetch(path, ttl=_FETCH_TTL):
     """Fetch JSON, transparently rebuilding the session once on failure.
 
     Results are cached per `path` for `ttl` seconds (ttl=0 forces a live fetch).
+
+    CONTRACT (AUDIT2 N7): the cached object is SHARED — concurrent callers get the
+    same dict/list back. Callers MUST treat the result as READ-ONLY; mutating it
+    would corrupt the cache and every other caller's view. Copy first if you need
+    to mutate (all current getters only read).
     """
     if ttl:
         hit = _fetch_cache.get(path)      # atomic read; benign if a racer refetches

@@ -14,7 +14,9 @@ part that would quietly make every conclusion wrong — was read line-by-line an
 is **sound**. Round 1's security posture is intact. This round found **1 Medium**
 (a lock held across network I/O, same anti-pattern as R1's M3) and a handful of
 **Low** hygiene/robustness/consistency items plus one product caveat. The Medium
-(N1) and the N4/N5/N6 Low bundle are now **fixed** (see §4); N2/N3/N7 deferred.
+(N1) and every Low (N2/N4/N5/N6/N7) are now **fixed/noted** (see §4); **N3** (a
+cost/slippage model) was reviewed and **accepted as a documented caveat** — all
+findings closed.
 
 ---
 
@@ -63,7 +65,7 @@ slow NSE call can no longer serialize concurrent sim readers/writers. Under the
 lock it re-reads open trades fresh so a trade another thread just closed is never
 resurrected.
 
-### N2 — Idea resolver spawns a thread on every `enrich()` · **Low** (hygiene)
+### N2 — Idea resolver spawns a thread on every `enrich()` · **Low** (hygiene) · ✅ FIXED
 **Where:** `ideas_journal.enrich()` (`ideas_journal.py:236`) does
 `threading.Thread(target=resolve_outcomes_intrabar, daemon=True).start()` on
 **every** call (~every 12 s while Ideas/alerts poll), even though the resolver
@@ -74,7 +76,13 @@ this is needless churn.
 spawning (only spawn when a pass is actually due), or run one long-lived ticker
 thread.
 
-### N3 — No transaction costs / slippage / gap fills · **Low** (correctness caveat, by design)
+**Done:** added `_intrabar_due()` (a lock-free `INTRABAR_INTERVAL` + `_market_ish()`
+check) and gated the `enrich()` spawn on it, so a thread is only created when a
+pass could actually run. The authoritative race-safe throttle still lives inside
+`resolve_outcomes_intrabar()`, so a benign unlocked-read race at worst spawns one
+extra thread that then loses that throttle.
+
+### N3 — No transaction costs / slippage / gap fills · **Low** (correctness caveat, by design) · ✅ ACCEPTED (won't-fix)
 **Where:** every engine (`paper.py`, `sim._refresh_trade`, `backtest_daily`,
 `backtest_strategies`) fills at the exact close/stop/target. No brokerage, STT,
 slippage, or gap-through (a bar that gaps past the stop still exits *at* the stop).
@@ -84,6 +92,11 @@ slippage, or gap-through (a bar that gaps past the stop still exits *at* the sto
 
 **Fix (optional/product):** a configurable per-trade cost + slippage bps knob;
 fill gap-through exits at the bar open, not the level.
+
+**Decision (2026-07-16):** accepted as a documented caveat, not implemented. The
+tool exists to *rank* strategies by regime, and this bias hits every strategy
+alike so the ranking stays valid; only absolute P&L reads optimistic. Revisit if
+absolute-return realism ever becomes a goal.
 
 ### N4 — `place_futures_order` reads `pos["margin"]` directly · **Low** (robustness) · ✅ FIXED
 **Where:** `paper.py:276` (`margin_freed = pos["margin"] * …`). A futures position
@@ -117,12 +130,15 @@ consumers use a `closedDay → closedAt[:10] → openedDate` fallback
 the target/stop/expiry hit) now set `t["closedDay"] = t["closedAt"][:10]`, so the
 column is always populated — no more relying on the consumer-side fallback.
 
-### N7 — `_fetch` cache returns shared objects / fill staleness · **Info**
+### N7 — `_fetch` cache returns shared objects / fill staleness · **Info** · ✅ NOTED
 The 15 s `_fetch` cache hands the **same dict** to concurrent callers — safe today
 because every getter treats the response as read-only, but a future mutating
 caller would corrupt the cache (worth a one-line contract note). It also lifts
 worst-case paper-fill price staleness to ~20–35 s (its own 20 s `_price_cache`
 plus up to 15 s underneath) — within the pre-existing tolerance.
+
+**Done:** documented the read-only contract in `_fetch()`'s docstring (mutate a
+copy, never the returned object). Staleness left as-is — within tolerance.
 
 ---
 
@@ -132,8 +148,9 @@ plus up to 15 s underneath) — within the pre-existing tolerance.
   finding with a real runtime effect. ✅ done
 - **Quick hygiene (bundle):** **N4, N5, N6** — a few lines each, zero risk. ✅ done
 - **Consider (product):** **N3** cost/slippage model if you ever want the
-  *absolute* P&L to be trustworthy, not just the ranking.
-- **N2, N7:** nice-to-have / note-only.
+  *absolute* P&L to be trustworthy, not just the ranking. ✅ accepted as caveat
+  (won't-fix for now)
+- **N2, N7:** nice-to-have / note-only. ✅ done
 
 Nothing here blocks anything. The instrument is trustworthy for its stated job
 (ranking strategies by regime); the caveats are about *absolute* realism and a
@@ -146,14 +163,14 @@ periodic few-second latency blip, not about silently wrong results.
 | ID | Sev | Status | Notes |
 |----|-----|--------|-------|
 | N1 | Medium | ✅ Fixed | `update()` fetches prices + candles lock-free; `_intrabar_catchup` split into `_intrabar_fetch`/`_intrabar_apply`; lock now guards only in-memory reprice + DB write. |
-| N2 | Low | ⏳ Open | Idea resolver still spawns a thread per `enrich()` — cheap churn, deferred. |
-| N3 | Low | ⏳ Open (by design) | No transaction cost / slippage model; relative ranking unaffected. |
+| N2 | Low | ✅ Fixed | `_intrabar_due()` gate — `enrich()` only spawns the resolver thread when a pass is actually due. |
+| N3 | Low | ✅ Accepted (won't-fix) | Cost/slippage model declined — bias hits all strategies alike, so the relative ranking (the tool's purpose) stays valid. |
 | N4 | Low | ✅ Fixed | `pos.get("margin", 0.0)` for the one direct access in `place_futures_order`. |
 | N5 | Low | ✅ Fixed | `paper._now()` stamps IST. |
 | N6 | Low | ✅ Fixed | Coarse `_refresh_trade` closes now set `closedDay`. |
-| N7 | Info | ⏳ Note | `_fetch` cache shares read-only dicts (contract note); fill staleness within tolerance. |
+| N7 | Info | ✅ Noted | Read-only contract documented in `_fetch()`; fill staleness within tolerance. |
 
 Full suite green after the changes: **62 passed**. N1's new split is exercised
 live (`update()` resolved 533 open trades' prices + candles outside the lock).
-Remaining open items (N2, N3, N7) are deferred hygiene / product caveats with no
-correctness impact.
+**All findings are now closed** — N1/N2/N4/N5/N6 fixed, N7 documented, N3
+accepted as a caveat (won't-fix).

@@ -139,6 +139,18 @@ def _firstseen_baked_epoch(first_seen):
     return nse_quote._baked_epoch(dt)
 
 
+def _intrabar_due():
+    """Cheap, lock-free 'could an intrabar pass run right now?' check (AUDIT2 N2).
+
+    Used by enrich() to avoid spawning a resolver thread on every ~12s poll when
+    it would immediately no-op (throttled / off-hours). The read of _last_intrabar
+    is intentionally unlocked — a benign race at worst spawns one extra thread
+    that then loses the authoritative lock-guarded throttle inside the resolver,
+    or skips a spawn the next poll picks up 12s later.
+    """
+    return (time.time() - _last_intrabar) >= INTRABAR_INTERVAL and _market_ish()
+
+
 def resolve_outcomes_intrabar():
     """Candle-accurate first-touch verdicts for today's UNRESOLVED ideas (L7).
 
@@ -232,9 +244,12 @@ def enrich(fresh_longs, fresh_shorts, price_fn=None):
     _migrate_json_once()
     # Kick the candle-accurate outcome pass in the background (throttled + market-
     # hours gated internally) so it never blocks this poll (AUDIT.md L7). Its
-    # verdicts land in the DB and are picked up by this + subsequent reads.
+    # verdicts land in the DB and are picked up by this + subsequent reads. Only
+    # spawn when a pass is actually due (AUDIT2 N2) — otherwise this fired a thread
+    # on every ~12s poll just to immediately no-op.
     try:
-        threading.Thread(target=resolve_outcomes_intrabar, daemon=True).start()
+        if _intrabar_due():
+            threading.Thread(target=resolve_outcomes_intrabar, daemon=True).start()
     except Exception:
         pass
     with _lock:
