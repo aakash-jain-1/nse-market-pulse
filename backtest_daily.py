@@ -450,32 +450,45 @@ def _features(bars):
     return feats
 
 
+def _conv(x, lo, hi):
+    """Scale a raw signal magnitude into a 0-100 **conviction** (clamped). None or a
+    degenerate range → a neutral 50, so an un-scored signal never dominates ranking.
+    This is entry-time information only (no look-ahead) — how strong the trigger was."""
+    if x is None or hi <= lo:
+        return 50.0
+    return round(max(0.0, min(1.0, (abs(x) - lo) / (hi - lo))) * 100, 1)
+
+
 def _signals(f):
     """
-    Close-independent signals (strategy_id, direction) for the as-of close of a
-    day. High-proximity and volume-breakout also depend on the raw close vs level,
-    so they're generated in the caller where the close is in hand.
+    Close-independent signals (strategy_id, direction, conviction) for the as-of
+    close of a day. Conviction (0-100) scales with the trigger's own magnitude so a
+    finite book can prefer the strongest signals. High-proximity and volume-breakout
+    also depend on the raw close vs level, so they're generated in the caller where
+    the close is in hand.
     """
     out = []
     ret1, vm, rp = f["ret1"], f["volMult"], f["rngPos"]
-    # Momentum
+    # Momentum — strength = size of the move + how much it out-volumed average
     if vm is not None:
+        mom = round(0.6 * _conv(ret1, 2, 8) + 0.4 * _conv(vm, 1.5, 5), 1)
         if ret1 >= 2 and vm >= 1.5 and rp >= 0.6:
-            out.append(("momentum", "LONG"))
+            out.append(("momentum", "LONG", mom))
         elif ret1 <= -2 and vm >= 1.5 and rp <= 0.4:
-            out.append(("momentum", "SHORT"))
-    # Mean-reversion (fade the 1-day extreme)
+            out.append(("momentum", "SHORT", mom))
+    # Mean-reversion (fade the 1-day extreme) — bigger extreme = stronger fade
     if ret1 <= -4:
-        out.append(("meanrev", "LONG"))
+        out.append(("meanrev", "LONG", _conv(ret1, 4, 12)))
     elif ret1 >= 5:
-        out.append(("meanrev", "SHORT"))
-    # Delivery% accumulation/distribution
+        out.append(("meanrev", "SHORT", _conv(ret1, 5, 12)))
+    # Delivery% accumulation/distribution — higher delivery + a real move
     dp = f["delivPct"]
     if dp is not None and dp >= 60:
+        dlv = round(0.6 * _conv(dp, 60, 90) + 0.4 * _conv(ret1, 0.5, 5), 1)
         if ret1 >= 0.5:
-            out.append(("delivery", "LONG"))
+            out.append(("delivery", "LONG", dlv))
         elif ret1 <= -0.5:
-            out.append(("delivery", "SHORT"))
+            out.append(("delivery", "SHORT", dlv))
     return out
 
 
@@ -513,7 +526,7 @@ def _resolve(direction, entry, stop_px, tgt_px, bars, i, max_hold):
     return "OPEN", None, None, mfe, mae
 
 
-def _trade(sid, direction, bars, feats, i, max_hold):
+def _trade(sid, direction, bars, feats, i, max_hold, score=None):
     meta = STRAT_MAP[sid]
     entry = bars[i]["close"]
     if not entry:
@@ -530,6 +543,8 @@ def _trade(sid, direction, bars, feats, i, max_hold):
         "symbol": bars[i].get("symbol"), "strategy": sid, "direction": direction,
         "entry": round(entry, 2), "stop": round(stop_px, 2), "target": round(tgt_px, 2),
         "qty": qty, "notional": notional, "status": status,
+        # entry-time conviction (0-100) so a finite-capital book can pick the strongest
+        "score": round(score, 1) if score is not None else None,
         "openedDate": bars[i]["d"], "openIdx": i,
         "mfePct": round(mfe, 2), "maePct": round(mae, 2), "minsToExit": None,
     }
@@ -562,17 +577,20 @@ def _backtest_symbol(bars, oi_map, cutoff_iso, max_hold, day_regime=None):
             continue
         c = b["close"]
         sigs = list(_signals(f))
-        # close-dependent signals (need the actual close vs levels)
+        # close-dependent signals (need the actual close vs levels); each carries a
+        # 0-100 conviction from its own trigger magnitude (no look-ahead).
         if i >= 60 and f["hh"] and f["ll"] and c:
             if c >= 0.97 * f["hh"] and f["ret1"] >= 0:
-                sigs.append(("high52w", "LONG"))
+                sigs.append(("high52w", "LONG", _conv((c / f["hh"] - 0.97) * 100, 0, 4)))
             elif c <= 1.03 * f["ll"] and f["ret1"] <= 0:
-                sigs.append(("high52w", "SHORT"))
+                sigs.append(("high52w", "SHORT", _conv((1.03 - c / f["ll"]) * 100, 0, 4)))
         if f["volMult"] and f["volMult"] >= 2 and f["hi20"] and f["lo20"] and c:
             if c > f["hi20"]:
-                sigs.append(("vol_breakout", "LONG"))
+                sigs.append(("vol_breakout", "LONG", round(
+                    0.7 * _conv(f["volMult"], 2, 6) + 0.3 * _conv((c / f["hi20"] - 1) * 100, 0, 5), 1)))
             elif c < f["lo20"]:
-                sigs.append(("vol_breakout", "SHORT"))
+                sigs.append(("vol_breakout", "SHORT", round(
+                    0.7 * _conv(f["volMult"], 2, 6) + 0.3 * _conv((1 - c / f["lo20"]) * 100, 0, 5), 1)))
         # OI Smart-Money: a meaningful OI build (>= OI_MIN_PCT) on above-average
         # volume with a real directional close = smart-money buildup (not noise).
         if oi_map:
@@ -580,27 +598,30 @@ def _backtest_symbol(bars, oi_map, cutoff_iso, max_hold, day_regime=None):
             vm = f["volMult"]
             if (oi_pct is not None and oi_pct >= OI_MIN_PCT
                     and vm is not None and vm >= OI_MIN_VOL_MULT):
+                oisc = round(0.6 * _conv(oi_pct, OI_MIN_PCT, 40)
+                             + 0.4 * _conv(vm, OI_MIN_VOL_MULT, 4), 1)
                 if f["ret1"] >= OI_MIN_RET:
-                    sigs.append(("oi_smart", "LONG"))
+                    sigs.append(("oi_smart", "LONG", oisc))
                 elif f["ret1"] <= -OI_MIN_RET:
-                    sigs.append(("oi_smart", "SHORT"))
+                    sigs.append(("oi_smart", "SHORT", oisc))
         # Gap-and-Go / Fade: today's open vs the prior close, tilted by regime.
         op, pcl = b.get("open"), b.get("prevClose")
         if op and pcl and c and op > 0 and pcl > 0:
             gap = (op / pcl - 1) * 100
             if abs(gap) >= 1.5:
+                gsc = _conv(gap, 1.5, 6)
                 fade = ((day_regime or {}).get(b["d"]) or {}).get("label") in (
                     "Range", "Recovery", "Pullback")
                 if not fade:                       # gap-and-go (close holds the open)
                     if gap > 0 and c >= op:
-                        sigs.append(("gap", "LONG"))
+                        sigs.append(("gap", "LONG", gsc))
                     elif gap < 0 and c <= op:
-                        sigs.append(("gap", "SHORT"))
+                        sigs.append(("gap", "SHORT", gsc))
                 else:                              # gap-fade (close rejects the open)
                     if gap > 0 and c < op:
-                        sigs.append(("gap", "SHORT"))
+                        sigs.append(("gap", "SHORT", gsc))
                     elif gap < 0 and c > op:
-                        sigs.append(("gap", "LONG"))
+                        sigs.append(("gap", "LONG", gsc))
         # Volatility Squeeze (NR7): the prior session is the tightest range in 7 and
         # today's close breaks that range.
         if i >= 7 and c:
@@ -612,9 +633,9 @@ def _backtest_symbol(bars, oi_map, cutoff_iso, max_hold, day_regime=None):
                 pr = ph - pl
                 if pr > 0 and pr <= min(window):
                     if c > ph:
-                        sigs.append(("squeeze", "LONG"))
+                        sigs.append(("squeeze", "LONG", _conv((c - ph) / pr * 100, 0, 60)))
                     elif c < pl:
-                        sigs.append(("squeeze", "SHORT"))
+                        sigs.append(("squeeze", "SHORT", _conv((pl - c) / pr * 100, 0, 60)))
         # Relative Strength vs the equal-weight market over 5 sessions.
         if i >= 5 and c and day_regime:
             c5 = bars[i - 5].get("close")
@@ -630,13 +651,13 @@ def _backtest_symbol(bars, oi_map, cutoff_iso, max_hold, day_regime=None):
                 if ok:
                     rs = stock5 - mkt5
                     if rs >= 3 and stock5 > 0:
-                        sigs.append(("rel_strength", "LONG"))
+                        sigs.append(("rel_strength", "LONG", _conv(rs, 3, 12)))
                     elif rs <= -3 and stock5 < 0:
-                        sigs.append(("rel_strength", "SHORT"))
-        for sid, direction in sigs:
+                        sigs.append(("rel_strength", "SHORT", _conv(rs, 3, 12)))
+        for sid, direction, score in sigs:
             if busy.get(sid, -1) >= i:
                 continue   # already in a trade for this strategy on this name
-            t = _trade(sid, direction, bars, feats, i, max_hold)
+            t = _trade(sid, direction, bars, feats, i, max_hold, score)
             if not t:
                 continue
             trades.append(t)

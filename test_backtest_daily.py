@@ -87,12 +87,38 @@ def test_features_second_bar():
 
 
 def test_signals_momentum_and_delivery():
+    # _signals now returns (id, direction, conviction) triples — check the (id, dir)
+    # pairs plus that each conviction is a sane 0-100 number.
+    def pairs(sigs):
+        return {(s, d) for s, d, _ in sigs}
     f = {"ret1": 4.5, "volMult": 2.0, "rngPos": 0.8, "delivPct": 70}
-    assert set(bd._signals(f)) == {("momentum", "LONG"), ("delivery", "LONG")}
+    sig = bd._signals(f)
+    assert pairs(sig) == {("momentum", "LONG"), ("delivery", "LONG")}
+    assert all(0 <= sc <= 100 for _, _, sc in sig)
     f2 = {"ret1": -5.0, "volMult": None, "rngPos": 0.2, "delivPct": None}
-    assert bd._signals(f2) == [("meanrev", "LONG")]      # fade the drop, no vm→no momentum
+    assert pairs(bd._signals(f2)) == {("meanrev", "LONG")}   # fade drop, no vm→no momentum
     f3 = {"ret1": 6.0, "volMult": None, "rngPos": 0.5, "delivPct": None}
-    assert ("meanrev", "SHORT") in bd._signals(f3)
+    assert ("meanrev", "SHORT") in pairs(bd._signals(f3))
+
+
+def test_conv_scales_and_clamps():
+    assert bd._conv(None, 0, 10) == 50.0            # missing → neutral
+    assert bd._conv(5, 10, 10) == 50.0              # degenerate range → neutral
+    assert bd._conv(0, 0, 10) == 0.0                # at floor
+    assert bd._conv(10, 0, 10) == 100.0             # at ceiling
+    assert bd._conv(20, 0, 10) == 100.0             # clamped above
+    assert bd._conv(5, 0, 10) == 50.0               # midpoint
+    assert bd._conv(-8, 0, 10) == 80.0              # uses magnitude (abs)
+
+
+def test_trade_carries_score():
+    bars = [{"d": "2026-07-0%d" % (k + 1), "symbol": "ACME", "open": 100, "high": 100,
+             "low": 100, "close": 100, "prevClose": 100, "volume": 1000} for k in range(6)]
+    bars[3]["high"] = 130            # let the long hit target so it closes
+    t = bd._trade("momentum", "LONG", bars, None, 0, 5, 87.5)
+    assert t["score"] == 87.5
+    t2 = bd._trade("momentum", "LONG", bars, None, 0, 5)   # score optional
+    assert t2["score"] is None
 
 
 # ---------------------------------------------------------------------------

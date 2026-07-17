@@ -101,7 +101,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 612 across 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 615 across 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -244,7 +244,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **612 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **615 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -356,8 +356,9 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   trades through a REAL book (finite capital, concurrent-position cap, risk/equal
   sizing) → equity curve + CAGR / max-DD / Sharpe / profit-factor, overall + per
   strategy. Turns per-trade R into "could I actually have traded this?". Pure
-  `simulate()`; `run()` sources trades from `bd.run(_collect=True)`. *Still open:*
-  conviction-ranked same-day selection + daily mark-to-market (currently cost-basis).
+  `simulate()`; `run()` sources trades from `bd.run(_collect=True)`; same-day signal
+  contention is **conviction-ranked** (every `bd` trade carries an entry-time
+  `score`). *Still open:* daily mark-to-market (currently cost-basis).
 
 **Open (older roadmap, in AGENTS.md):**
 - Route paper-trading fills / `get_price` through the broker feed; extend Live tab
@@ -381,6 +382,27 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Conviction-ranked portfolio selection (suite 612 → 615)
+- **Why:** the fresh portfolio backtest exposed the real problem — with 5 slots the book
+  took an **arbitrary 74 of 5,712** signals (neutral strategy/symbol order), and lost
+  (−2.5%, Sharpe −0.98). Which signals you pick matters more than the raw per-signal edge.
+- **What:** every `backtest_daily` trade now carries an entry-time **conviction `score`
+  (0-100)** scaled from its *own* trigger magnitude (momentum: move × volume; meanrev:
+  size of the extreme; delivery: delivery% + move; high52w: distance into the top band;
+  vol_breakout: volume × breakout distance; oi_smart: OI% × volume; gap: gap size;
+  squeeze: break beyond the NR7 range; rel_strength: RS vs market). All **entry-time only
+  — no look-ahead**. New `_conv(x, lo, hi)` clamps a raw magnitude to 0-100 (None →
+  neutral 50). `_signals` now returns `(id, dir, score)` triples; `_trade` stores `score`.
+  `portfolio_backtest.run()` passes `rank_key="score"`, so same-day contention takes the
+  **strongest** signals.
+- **Result (same EOD universe, 5 slots):** flips from **−2.5% → +2.2%**, CAGR −9.9% →
+  **+9.1%**, Sharpe −0.98 → **+0.76**, max-DD 7.2% → **4.6%**, PF 0.87 → **1.08**;
+  `oi_smart` surfaces as the standout (+18.7%). Same slots, same signals — just picking
+  the best ones. Proves the feature's thesis.
+- **Tests:** +3 (suite **612 → 615**): `_conv` scale/clamp/abs, `_trade` carries score
+  (+ optional), and a portfolio `run()` test that the book takes the higher-conviction of
+  two contending same-day signals. Lint clean.
 
 ### 2026-07-17 — Portfolio-level backtest (`portfolio_backtest.py`, suite 595 → 612)
 - **Why:** `backtest_daily` reports per-trade **expectancy in R** — great for "does this

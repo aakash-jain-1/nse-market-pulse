@@ -289,8 +289,11 @@ def run(days=60, universe_size=40, source="live", start_capital=1_000_000.0,
     bt = bd.run(**kw)
 
     trades = bt.get("trades") or []
+    # Rank same-day signal contention by each trade's entry-time conviction (bd attaches
+    # `score`) so a finite book picks the STRONGEST signals, not an arbitrary first-N.
     sim_kw = dict(start_capital=start_capital, max_positions=max_positions,
-                  risk_pct=risk_pct, sizing=sizing, max_alloc_pct=max_alloc_pct)
+                  risk_pct=risk_pct, sizing=sizing, max_alloc_pct=max_alloc_pct,
+                  rank_key="score")
     overall = simulate(trades, **sim_kw)
 
     out = {

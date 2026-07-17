@@ -548,8 +548,12 @@ flowchart LR
   best R). Runs on the Live curated universe or the whole **`source=eod`** bhavcopy
   history. It's brutally honest: on the full EOD universe a strategy set firing ~5,700
   signals collapses to ~74 actual trades with 5 slots — the reality per-trade R hides.
-  *(Open positions are marked at cost, so the curve steps on exits; shorts model margin
-  as full notional.)*
+  When more signals fire than free slots, the book takes the **highest-conviction** ones:
+  every trade carries an entry-time score (0-100) from its own trigger magnitude (move ×
+  volume, breakout distance, OI%, gap size, relative strength…), no look-ahead. That one
+  change flips the same-slots EOD book from **−2.5% to +2.2%** (Sharpe −0.98 → +0.76) —
+  *which* signals you take matters more than the raw per-signal edge. *(Open positions
+  are marked at cost, so the curve steps on exits; shorts model margin as full notional.)*
 - **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
   entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
 - **🗄 EOD data resilience & full-market coverage** (`bhavcopy.py`, `/api/eod/*`,
@@ -818,14 +822,14 @@ nse-market-pulse/
 ├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
 ├── backtest_daily.py        # Daily-bar historical backtest — source=live (curated NSE) or source=eod (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py          # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── portfolio_backtest.py   # Portfolio-level backtest — replay bd trades through a real book (finite capital, max concurrent, sizing) → equity curve + CAGR/DD/Sharpe
+├── portfolio_backtest.py   # Portfolio-level backtest — replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
 ├── notify.py               # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger
 ├── paper.py                # Paper-trading engine (equity + long/short options + long/short futures)
 ├── snapshot_logger.py      # Background logger (snapshots + IV + context + alerts) → SQLite
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 612 unit tests, 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/…)
+├── test_*.py               # 615 unit tests, 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

@@ -189,6 +189,25 @@ def test_run_wires_backtest_and_per_strategy():
     assert out["perStrategy"][0]["name"] == "Multi-Signal Momentum"
 
 
+def test_run_ranks_same_day_by_conviction_score():
+    """run() passes rank_key='score', so when signals contend for one slot the book
+    takes the higher-conviction trade (bd attaches `score` to every trade)."""
+    fake = {
+        "days": 30, "universeWithData": 2, "universeAvailable": 2, "range": {},
+        "trades": [
+            _t(sym="MEH", strat="gap", score=12, exit_px=90, stop=95, status="STOP",
+               opened="2026-07-01", closed="2026-07-05"),
+            _t(sym="STRONG", strat="momentum", score=95, exit_px=110, stop=95,
+               status="TARGET", opened="2026-07-01", closed="2026-07-05"),
+        ],
+    }
+    with _patch(pb.bd, "run", lambda **k: fake):
+        out = pb.run(max_positions=1)
+    o = out["overall"]
+    assert o["tradesTaken"] == 1 and o["tradesSkippedSlot"] == 1
+    assert o["endCapital"] > o["startCapital"]     # took STRONG (the winner), not MEH
+
+
 def test_run_handles_no_trades():
     with _patch(pb.bd, "run", lambda **k: {"message": "No EOD history ingested yet"}):
         out = pb.run(source="eod")
