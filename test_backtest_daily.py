@@ -15,8 +15,13 @@ Run: python test_backtest_daily.py   (also works under pytest)
 """
 
 import contextlib
+import gc
+import os
+import shutil
+import tempfile
 
 import backtest_daily as bd
+import db
 import strategies as strat
 
 
@@ -228,6 +233,58 @@ def test_regime_map():
 
 
 # ---------------------------------------------------------------------------
+# volatility axis (realized-vol proxy) — orthogonal to the regime label
+# ---------------------------------------------------------------------------
+def test_stdev():
+    assert bd._stdev([]) is None
+    assert bd._stdev([5]) is None              # needs >=2 points
+    assert bd._stdev([1, None]) is None        # only 1 real point after filtering None
+    assert bd._stdev([3, None, 3]) == 0.0      # two identical real points → 0
+    assert abs(bd._stdev([2, 4, 4, 4, 5, 5, 7, 9]) - 2.13809) < 1e-4  # sample stdev
+
+
+def test_vol_state_pct_buckets():
+    ranked = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert bd._vol_state_pct(1, ranked) == "Calm"        # 0th pct
+    assert bd._vol_state_pct(5, ranked) == "Normal"      # 40th pct
+    assert bd._vol_state_pct(10, ranked) == "Elevated"   # 90th pct
+    assert bd._vol_state_pct(None, ranked) is None
+    assert bd._vol_state_pct(5, []) is None
+
+
+def test_regime_map_has_vol_axis():
+    # rising then choppy so realized vol is defined on the later days
+    closes = [100, 101, 103, 100, 104, 99, 105]
+    hist = {"X": [{"d": f"d{i}", "close": c} for i, c in enumerate(closes)]}
+    rm = bd._regime_map(hist)
+    days = sorted(rm)
+    # every mapped day still carries a directional label
+    assert all(rm[d]["label"] for d in days)
+    # volState + realVol appear once >=2 daily moves exist in the window
+    assert any(rm[d]["volState"] in bd._VOL_ORDER for d in days)
+    assert any(rm[d]["realVol"] is not None for d in days)
+
+
+def _closedv(strategy, status, r, pct, vol="Calm"):
+    t = _closed(strategy, status, r, pct)
+    t["volAtEntry"] = vol
+    return t
+
+
+def test_vol_leaderboard_buckets_by_volatility():
+    trades = [_closedv("momentum", "TARGET", 2.0, 6.0, "Elevated"),
+              _closedv("momentum", "TARGET", 2.0, 6.0, "Elevated"),
+              _closedv("momentum", "STOP", -1.0, -3.0, "Elevated"),
+              _closedv("meanrev", "TARGET", 1.0, 3.0, "Calm")]
+    lb = bd._vol_leaderboard(trades)
+    # rows keyed by volState, ordered Calm..Normal..Elevated (present buckets only)
+    assert [r["volState"] for r in lb["rows"]] == ["Calm", "Elevated"]
+    ev = next(r for r in lb["rows"] if r["volState"] == "Elevated")
+    assert ev["best"] == "momentum" and ev["cells"]["momentum"]["closed"] == 3
+    assert ev["cells"]["momentum"]["expectancyR"] == 1.0
+
+
+# ---------------------------------------------------------------------------
 # leaderboard / gate / scorecard
 # ---------------------------------------------------------------------------
 def _closed(strategy, status, r, pct, regime="Trend-Up"):
@@ -347,6 +404,36 @@ def test_prefer_robust_all_untrusted_keeps_top():
     ranked = [{"id": "a", "expectancyR": 1.0}, {"id": "b", "expectancyR": 0.5}]
     chosen, skipped = bd._prefer_robust(ranked, {"a": "overfit", "b": "no-edge"})
     assert chosen["id"] == "a" and skipped is None      # nothing trusted → keep top
+
+
+# ---------------------------------------------------------------------------
+# run() wiring — vol leaderboard + volAtEntry tagging (hermetic: temp DB + stubs)
+# ---------------------------------------------------------------------------
+def test_run_includes_vol_axis():
+    firing = [_bar("2026-07-01", 100, 101, 99, 1000, prev=100),
+              _bar("2026-07-02", 100, 101, 99, 1000, prev=100),
+              _bar("2026-07-03", 104.5, 105.5, 100, 1800, prev=100),
+              _bar("2026-07-04", 111, 112, 105, 1500, prev=104.5)]
+    tmp = tempfile.mkdtemp(prefix="nse_bd_vol_")
+    saved = (db.DATA_DIR, db.DB_FILE, db._initialized)
+    db.DATA_DIR = tmp
+    db.DB_FILE = os.path.join(tmp, "market.db")
+    db._initialized = False
+    try:
+        with _patch(bd, "_universe", lambda n: ["X"]), \
+             _patch(bd, "_cached_bars", lambda *a, **k: (firing, True)), \
+             _patch(bd, "_near_expiry", lambda: None):
+            out = bd.run(days=5, universe_size=5, include_oi=False,
+                         resolve="daily", _collect=True)
+    finally:
+        db.DATA_DIR, db.DB_FILE, db._initialized = saved[0], saved[1], False
+        gc.collect()
+        shutil.rmtree(tmp, ignore_errors=True)
+    assert set(out["volLeaderboard"]) == {"order", "rows"}
+    assert "volDist" in out
+    # the momentum setup fires, and every collected trade is tagged (value may be None)
+    assert out["trades"] and all("volAtEntry" in t for t in out["trades"])
+    assert any(t["strategy"] == "momentum" for t in out["trades"])
 
 
 def _main():

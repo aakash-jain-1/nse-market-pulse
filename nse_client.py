@@ -217,15 +217,17 @@ _INDEX_TTL = 30  # seconds
 def get_index_snapshot():
     """
     Live snapshot of the headline indices from NSE's /api/allIndices, normalized
-    to {NIFTY|BANKNIFTY|FINNIFTY: {last, pChange, prevClose, advances, declines,
-    unchanged}}. Each index row carries its constituents' advance/decline breadth
-    — a cheap, reliable market-regime signal. Cached ~30s.
+    to {NIFTY|BANKNIFTY|FINNIFTY|INDIAVIX: {last, pChange, prevClose, advances,
+    declines, unchanged, yearHigh, yearLow}}. Each equity index row carries its
+    constituents' advance/decline breadth — a cheap, reliable market-regime
+    signal — while INDIA VIX adds the volatility axis (its yearHigh/yearLow let
+    the regime engine compute a 52-week vol percentile). Cached ~30s.
     """
     if _index_cache["data"] and (time.time() - _index_cache["ts"]) < _INDEX_TTL:
         return _index_cache["data"]
     out = {}
     want = {"NIFTY 50": "NIFTY", "NIFTY BANK": "BANKNIFTY",
-            "NIFTY FIN SERVICE": "FINNIFTY"}
+            "NIFTY FIN SERVICE": "FINNIFTY", "INDIA VIX": "INDIAVIX"}
     try:
         data = _fetch("/api/allIndices")
         for r in data.get("data", []):
@@ -240,6 +242,8 @@ def get_index_snapshot():
                 "advances": _num(r.get("advances")),
                 "declines": _num(r.get("declines")),
                 "unchanged": _num(r.get("unchanged")),
+                "yearHigh": _num(r.get("yearHigh")),
+                "yearLow": _num(r.get("yearLow")),
             }
     except Exception:
         pass

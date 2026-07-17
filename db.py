@@ -57,11 +57,12 @@ SIM_TRADE_COLS = [
     "id", "book", "strategy", "symbol", "direction", "conviction", "rating", "reasons",
     "fno", "entry", "stop", "target", "stopPct", "targetPct", "rr", "qty",
     "notional", "risk", "status", "ltp", "mfePct", "maePct", "pnl", "pnlPct",
-    "rMultiple", "openedAt", "openedDate", "regimeAtEntry", "exitPrice",
-    "closedAt", "closedDay", "minsToExit",
+    "rMultiple", "openedAt", "openedDate", "regimeAtEntry", "volAtEntry",
+    "exitPrice", "closedAt", "closedDay", "minsToExit",
 ]
 _SIM_TEXT = {"id", "book", "strategy", "symbol", "direction", "rating", "status",
-             "openedAt", "openedDate", "regimeAtEntry", "closedAt", "closedDay"}
+             "openedAt", "openedDate", "regimeAtEntry", "volAtEntry",
+             "closedAt", "closedDay"}
 EOD_BAR_COLS = [
     "symbol", "d", "date", "iso", "open", "high", "low", "close",
     "prevClose", "vwap", "volume", "value", "trades", "delivQty", "delivPct",
@@ -130,14 +131,19 @@ def init():
                     status TEXT, ltp REAL, mfePct REAL, maePct REAL,
                     pnl REAL, pnlPct REAL, rMultiple REAL,
                     openedAt TEXT, openedDate TEXT, regimeAtEntry TEXT,
-                    exitPrice REAL, closedAt TEXT, closedDay TEXT, minsToExit INTEGER
+                    volAtEntry TEXT, exitPrice REAL, closedAt TEXT,
+                    closedDay TEXT, minsToExit INTEGER
                 )""")
             # Migrate pre-existing ledgers: add the `book` column (all legacy trades
-            # belong to the all-market 'cash' book) so the F&O book is additive.
+            # belong to the all-market 'cash' book) so the F&O book is additive,
+            # and the `volAtEntry` column (volatility regime at entry; NULL for
+            # trades opened before the volatility-aware regime board shipped).
             cols = {r[1] for r in c.execute("PRAGMA table_info(sim_trades)")}
             if "book" not in cols:
                 c.execute("ALTER TABLE sim_trades ADD COLUMN book TEXT DEFAULT 'cash'")
                 c.execute("UPDATE sim_trades SET book='cash' WHERE book IS NULL")
+            if "volAtEntry" not in cols:
+                c.execute("ALTER TABLE sim_trades ADD COLUMN volAtEntry TEXT")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_status ON sim_trades(status)")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_strat_day ON sim_trades(strategy, openedDate)")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_regime ON sim_trades(regimeAtEntry, strategy)")

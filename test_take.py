@@ -85,6 +85,20 @@ def test_take_regime_tagging():
         assert db.sim_all_trades()[0]["regimeAtEntry"] == "High Vol"
 
 
+def test_take_vol_tagging():
+    # volState from the regime is persisted per trade (volatility-aware board).
+    with _TempSim(lambda sid, ctx: [_idea("CCC")]):
+        sim.take(ctx={"regime": {"label": "Trend-Up", "volState": "Elevated"}})
+        assert db.sim_all_trades()[0]["volAtEntry"] == "Elevated"
+
+
+def test_take_vol_tagging_absent_is_none():
+    # Backward compatible: a regime with no volState leaves volAtEntry NULL.
+    with _TempSim(lambda sid, ctx: [_idea("DDD")]):
+        sim.take(ctx=_ctx("Range"))
+        assert db.sim_all_trades()[0]["volAtEntry"] is None
+
+
 def test_dedupe_survives_close():
     # Continuous mode must not instantly re-enter a setup the moment it closes:
     # dedupe is against everything opened TODAY, any status.

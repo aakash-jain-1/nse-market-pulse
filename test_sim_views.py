@@ -168,6 +168,15 @@ def test_current_regime_from_index():
     assert r["label"] == "Trend-Up" and r["niftyPct"] == 1.0
 
 
+def test_current_regime_surfaces_volatility():
+    idx = {"NIFTY": {"pChange": 1.0, "advances": 100, "declines": 50},
+           "INDIAVIX": {"last": 20.0, "yearLow": 10.0, "yearHigh": 30.0}}
+    with _temp_sim(), _patch(sim.nse, "get_index_snapshot", lambda: idx):
+        r = sim.current_regime()
+    assert r["label"] == "Trend-Up"          # direction unaffected by the vol axis
+    assert r["vix"] == 20.0 and r["volState"] == "Elevated" and r["vixPctile"] == 50.0
+
+
 # ---------------------------------------------------------------------------
 # settings + reset
 # ---------------------------------------------------------------------------

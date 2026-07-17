@@ -165,6 +165,22 @@ def test_get_index_snapshot_maps_names():
     assert out["NIFTY"]["pChange"] == 0.8 and out["NIFTY"]["advances"] == 30.0
 
 
+def test_get_index_snapshot_includes_india_vix():
+    payload = {"data": [
+        {"index": "NIFTY 50", "last": "22000", "percentChange": "0.8",
+         "previousClose": "21800", "advances": "30", "declines": "20"},
+        {"index": "INDIA VIX", "last": "13.27", "percentChange": "3.02",
+         "previousClose": "12.88", "yearHigh": "28.91", "yearLow": "8.72"},
+    ]}
+    with _reset_cache("_index_cache"), _patch(nse, "_fetch", lambda path, **k: payload):
+        out = nse.get_index_snapshot()
+    assert set(out) == {"NIFTY", "INDIAVIX"}
+    vx = out["INDIAVIX"]
+    assert vx["last"] == 13.27 and vx["yearHigh"] == 28.91 and vx["yearLow"] == 8.72
+    # equity indices also carry the (harmless) yearHigh/yearLow keys now
+    assert "yearHigh" in out["NIFTY"]
+
+
 def test_get_oi_spurts_pct_and_signal():
     payload = {"data": [{"symbol": "A", "latestOI": "1200", "prevOI": "1000",
                          "changeInOI": "200", "underlyingValue": "100", "volume": "50"}]}

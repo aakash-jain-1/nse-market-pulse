@@ -51,7 +51,7 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (9 strategies)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 456 unit tests across 24 suites (see below)
+├── test_*.py          # 470 unit tests across 24 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_bhavcopy.py                             # EOD UDiFF parsers + fetch walk-back + price/lot fallback
@@ -462,6 +462,21 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🌊 Volatility-aware regime board (India VIX axis)** — the regime engine was
+  momentum-only (NIFTY %, breadth, prior-day move; VIX never fetched, PCR unused).
+  Added an **orthogonal volatility axis** kept *separate* from the 6 directional
+  labels so per-regime sample sizes / leaderboard / walk-forward keys stay stable:
+  `get_index_snapshot` now pulls **INDIA VIX** (+ `yearHigh`/`yearLow`);
+  `detect_regime` emits `vix`/`vixPctile`/`volState` (**Calm** <13 / **Normal**
+  13–18 / **Elevated** ≥18). The daily backtest mirrors it with a VIX-free
+  realized-vol proxy (`_stdev` → rolling stdev of the median move, percentile-
+  bucketed) so `_regime_map` days carry `realVol`/`volState`; every sim + backtest
+  trade is tagged **`volAtEntry`** (new additive `sim_trades` column) and a
+  **volatility × strategy** leaderboard (`_vol_leaderboard`, result `volLeaderboard`/
+  `volDist`) shows which edges hold up in calm vs elevated tape. UI: 🌊 VIX badge on
+  the regime banner + Strategy-of-the-Day card and a vol leaderboard heat matrix.
+  *Instrumentation, not selection yet* — the axis is surfaced/attributed now so
+  vol-conditioned selection can be data-driven later. Tests +14 (suite **456 → 470**).
 - **✍️ Paper option writing / short-selling (`paper.py`)** — options only did
   buy-to-open / sell-to-**close** (a user hit "Cannot sell… you hold 0 lots"). Now
   `place_option_order` uses signed qty like futures: `SELL` opens a **written short**
@@ -746,7 +761,13 @@ with no creds the app is unchanged.
   - **Regime detector** (`detect_regime`): tags each day Trend-Up / Trend-Down /
     Recovery / Pullback / Range / Mixed from NIFTY %change + advance-decline
     breadth (`nse.get_index_snapshot()` → `/api/allIndices`, cached 30s) + the
-    prior session's move.
+    prior session's move. Plus an **orthogonal volatility axis** from **India VIX**
+    (also on `/api/allIndices`): `volState` = **Calm** <13 / **Normal** 13–18 /
+    **Elevated** ≥18, with a 52-week `vixPctile` from the index's year hi/lo. The
+    directional label is unchanged (vol is a *tint*, not a 7th label — this keeps
+    per-regime sample sizes and the leaderboard/walk-forward keys stable). Every
+    trade is tagged `volAtEntry` (live sim + backtest) so vol-conditioned selection
+    can later be learned from data.
   - **Per-strategy sims** (`sim.py` v2; trades in SQLite `sim_trades`, settings +
     daily rollup in `sim_state.json`): `take()` snapshots each strategy's ideas
     (risk-based sizing via `size_position()`: each trade risks a fixed ₹2,000 to
@@ -870,7 +891,14 @@ with no creds the app is unchanged.
     / Recovery / Range / Pullback / Mixed / Trend-Down). Every trade gets
     `regimeAtEntry` = the label of its `openedDate`. `_regime_leaderboard(all_trades)`
     → regime × strategy matrix of expectancy R / win% / count with the best strategy
-    per regime (≥3 samples) — pure attribution, NO look-ahead. `_gated(by_strat)`
+    per regime (≥3 samples) — pure attribution, NO look-ahead.
+    **Volatility axis:** since there's no historical India-VIX feed here, `_regime_map`
+    also computes a VIX-free proxy — `_stdev` of the median-move series over a
+    10-session window (`_annotate_vol`), bucketed by its percentile within the tested
+    window into `volState` Calm/Normal/Elevated (mirrors the live board's semantics).
+    Each trade also carries `volAtEntry`, and `_vol_leaderboard` (built via the shared
+    `_leaderboard(attr, field, order)` that also backs `_regime_leaderboard`) gives a
+    vol × strategy matrix — result fields `volLeaderboard` / `volDist`. `_gated(by_strat)`
     applies an **a-priori** gate: keep only trades whose entry regime is in the
     strategy's `strategies.STRATEGY_MAP[sid]["regimeFit"]` (designed by trading
     logic, not fit to this window) and reports per-strategy all-vs-in-fit plus the

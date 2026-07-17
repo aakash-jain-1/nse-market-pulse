@@ -96,7 +96,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 456 across 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 470 across 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -184,7 +184,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **456 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **470 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -230,7 +230,12 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   no-edge / improving), plus the headline **adaptive-selection test** (learn the
   best-per-regime playbook on train, follow it on test, compare to best fixed +
   a-priori design). `/api/sim/walkforward` + Sim-tab 🧪 card. Pure → 100 % covered.
-  Remaining engine ideas (new researched edges, sharper regime board) still open.
+- ✅ **Engine sharpening — volatility-aware regime board** — added an India-VIX
+  volatility axis (`volState` Calm/Normal/Elevated + 52-wk percentile) orthogonal
+  to the 6 directional labels, mirrored by a realized-vol proxy in the backtest;
+  every sim + backtest trade now tagged `volAtEntry`, plus a vol × strategy
+  leaderboard. *Still open:* vol-*conditioned* selection (data-driven, once samples
+  build), more researched edges.
 - ✅ **#4 Data resilience + broaden universe (`bhavcopy.py`)** — native EOD UDiFF
   bhavcopy ingest from NSE's static archive (no anti-bot gate). Prices ANY listed
   symbol (last-resort in `get_price`, works off-hours + when the live API is down),
@@ -262,6 +267,36 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Volatility-aware regime board (India VIX axis, suite 456 → 470)
+- **Why:** the regime engine was **momentum-only** — NIFTY %, breadth, prior-day
+  move — with no volatility dimension (VIX was never fetched; PCR captured but
+  unused). A Trend-Up on a sleepy 11-VIX tape ≠ a Trend-Up on a 22-VIX tape.
+- **What:** added an orthogonal **volatility axis** kept *separate* from the 6
+  directional labels (so per-regime sample sizes / leaderboard / walk-forward keys
+  stay stable — `volState` is a tint, not a new label).
+  - `nse_client.get_index_snapshot` now also pulls **INDIA VIX** from
+    `/api/allIndices` (+ `yearHigh`/`yearLow` on every index for a 52-wk percentile).
+  - `strategies.detect_regime` → new `vix`, `vixPctile`, `volState`
+    (**Calm** <13 / **Normal** 13–18 / **Elevated** ≥18) + richer note. Helpers
+    `_vol_state`, `_vix_pctile`. Directional label logic **unchanged**.
+  - `backtest_daily`: a VIX-free realized-vol proxy (`_stdev` → 10-session rolling
+    stdev of the median move) bucketed by within-window percentile
+    (`_vol_state_pct`/`_annotate_vol`) so `_regime_map` days now carry
+    `realVol`/`volState`. Every backtest trade is tagged `volAtEntry`. New
+    `_vol_leaderboard` (vol × strategy expectancy) via a refactored shared
+    `_leaderboard(attr, field, order)`; result gains `volLeaderboard`/`volDist`.
+  - `sim.take` tags each live trade's `volAtEntry` (new **DB column** on
+    `sim_trades`, additive migration; NULL for legacy rows). `current_regime`
+    surfaces the vol axis for free.
+  - UI: 🌊 VIX badge on the Sim regime banner + Strategy-of-the-Day card, and a
+    **Volatility leaderboard** heat matrix under the regime leaderboard.
+- **Instrumentation, not yet selection:** `volAtEntry` is now recorded on every
+  sim + backtest trade so vol-*conditioned* strategy selection can later be
+  **data-driven**. Today the axis is surfaced/attributed; selection still keys on
+  the directional label. Next: prefer vol-appropriate families once samples build.
+- **Tests +14** (`test_strategies` +4, `test_client` +1, `test_backtest_daily` +5,
+  `test_take` +2, `test_sim_views` +1, `test_db` +1). Suite **456 → 470**, green.
 
 ### 2026-07-17 — Paper: option WRITING / short-selling (`paper.py`, suite 452 → 456)
 - **Report:** "Cannot sell 1 lot of HCLTECH 1220CE… you hold 0 lot(s). Why? I can sell

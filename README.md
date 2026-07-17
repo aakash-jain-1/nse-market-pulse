@@ -252,7 +252,7 @@ flowchart TB
         NC["nse_client.py<br/>• warmed requests.Session (TTL 300s)<br/>• hot lists → normalized dicts<br/>• get_scanner / _build_idea / get_demand_score<br/>• get_price (symbol→LTP map)"]
         NQ["nse_quote.py<br/>• NextApi gateway<br/>• quote / depth / intraday chart<br/>• option chain + Black-Scholes Greeks"]
         BC["bhavcopy.py<br/>• EOD UDiFF bhavcopy (static archive)<br/>• resilient price / lot fallback<br/>• ingest → eod_bars/eod_oi"]
-        ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime()<br/>• 17 generators"]
+        ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime() (+ India-VIX volState)<br/>• 17 generators"]
         SM["sim.py<br/>• per-strategy ledgers<br/>• take/update/summary<br/>• daily rollup + regime leaderboard"]
         BK["backtest_strategies.py<br/>• virtual-clock replay<br/>• scorecards + equity curves"]
         PP["paper.py<br/>• equity/futures/option fills<br/>• MTM P&L"]
@@ -413,9 +413,11 @@ flowchart LR
   "which strategy wins on a recovery day vs a trend-up day", and picks a
   **live forward-test leader** for the current regime from the sim ledger.
 - **🎯 Strategy of the Day** (`/api/sim/strategy_of_day`): reads today's **live
-  regime** and surfaces the strategy with the best **historical** expectancy on
-  that kind of day, drawn from the ~60-session daily-backtest leaderboard (far
-  richer evidence than the young forward-test ledger). **Walk-forward overlay:**
+  regime** — direction *and* a **🌊 volatility read from India VIX** (Calm /
+  Normal / Elevated + 52-wk percentile, shown as a badge on the card and the Sim
+  regime banner) — and surfaces the strategy with the best **historical**
+  expectancy on that kind of day, drawn from the ~60-session daily-backtest
+  leaderboard (far richer evidence than the young forward-test ledger). **Walk-forward overlay:**
   the pick now *prefers a walk-forward-robust* strategy and **skips one flagged
   overfit** out-of-sample — every candidate carries a colour-coded `WF:` verdict
   (robust / improving / decaying / overfit / no-edge), and when a higher in-sample
@@ -483,6 +485,13 @@ flowchart LR
     portfolio's expectancy to taking every trade — an honest read on whether "only
     trade your regime" adds edge. (On the recent choppy window it lifts the
     combined book from ≈−0.02R to ≈+0.05R.)
+  - **🌊 Volatility leaderboard**: the same attribution sliced along an
+    **orthogonal volatility axis** (Calm / Normal / Elevated) instead of direction.
+    Since there's no historical India-VIX feed offline, the backtest uses a
+    VIX-free proxy — the rolling realized volatility of the median move, bucketed by
+    percentile within the window — and tags each trade `volAtEntry`. Read it next to
+    the regime board to see e.g. mean-reversion shining in **Calm** and breakouts in
+    **Elevated** tape. (Live, the axis comes straight from **India VIX**.)
 - **🧪 Walk-forward out-of-sample validation** (`/api/sim/walkforward`,
   `walkforward.py`, 🧪 button): the anti-curve-fit sanity check on top of the daily
   backtest. It splits the history into **train / test**, and judges every strategy
@@ -759,7 +768,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 456 unit tests, 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/…)
+├── test_*.py               # 470 unit tests, 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

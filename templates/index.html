@@ -1950,6 +1950,20 @@
                          "Unknown": "neutral" };
     const REGIME_ICON = { "Trend-Up": "📈", "Recovery": "🔄", "Trend-Down": "📉",
                           "Pullback": "🔻", "Range": "↔️", "Mixed": "🌀", "Unknown": "❔" };
+    // Volatility axis (India VIX live / realized-vol in backtest). Colour is a
+    // caution cue, not direction: Calm = green (mean-reversion/range friendly),
+    // Elevated = red (breakout/trend friendly, wider stops).
+    const VOL_CLS = { Calm: "up", Normal: "neutral", Elevated: "down" };
+
+    function volBadge(r, small) {
+      if (!r || !r.volState) return "";
+      const cls = VOL_CLS[r.volState] || "neutral";
+      const vix = r.vix != null ? " " + r.vix : "";
+      const p = r.vixPctile != null ? " · p" + Math.round(r.vixPctile) : "";
+      const sz = small ? "font-size:10px;padding:1px 6px;" : "";
+      const tip = `India VIX ${r.vix != null ? r.vix : "?"} — volatility regime${p ? " (52-wk percentile" + p + ")" : ""}. Calm favours mean-reversion/range setups; Elevated favours breakouts/trend with wider stops.`;
+      return `<span class="rgm-badge ${cls}" style="${sz}" title="${tip}">🌊 VIX${vix} · ${r.volState}${small ? "" : p}</span>`;
+    }
 
     function renderSimBanner(r) {
       if (!r) return "";
@@ -1957,6 +1971,7 @@
       const ico = REGIME_ICON[r.label] || "";
       return `<div class="rgm">
         <div class="rgm-badge ${cls}">${ico} ${r.label}</div>
+        ${volBadge(r)}
         <div class="rgm-note">${r.note || ""}</div>
       </div>`;
     }
@@ -2495,7 +2510,7 @@
         body = `<div class="pick-reason" style="color:var(--muted)">Today looks like <b>${rg.label}</b> — no clear historical pick (thin sample, no designed fit).</div>`;
       }
       return `<div class="pick sod"${p ? ` data-strat="${p.id}"` : ""}${p ? ` title="Open this strategy's trades"` : ""}>
-        <div class="pick-lab">🎯 Strategy of the Day <span style="color:var(--muted);font-weight:400">· ${basisNote}</span></div>
+        <div class="pick-lab">🎯 Strategy of the Day ${volBadge(rg, true)} <span style="color:var(--muted);font-weight:400">· ${basisNote}</span></div>
         <div class="pick-body">${body}</div></div>`;
     }
 
@@ -2920,9 +2935,35 @@
         <td class="${(pf.expectancyR||0)>=0?'pos':'neg'}">${pf.expectancyR==null?"—":_sgn(pf.expectancyR)+pf.expectancyR+"R"}</td>
         <td class="${(pfImp||0)>=0?'pos':'neg'}">${pfImp==null?"—":_sgn(pfImp)+pfImp.toFixed(2)+"R"}</td></tr>`;
 
+      // Parallel matrix along the orthogonal volatility axis (Calm/Normal/Elevated).
+      const volLb = bt.volLeaderboard, volDist = bt.volDist || {};
+      let volSection = "";
+      if (volLb && (volLb.rows || []).length) {
+        const vHead = `<tr><th class="day">Volatility</th>` +
+          ids.map(id => `<th>${shortName(id)}<br><span style="color:var(--muted);font-weight:400;font-size:10px">${id}</span></th>`).join("") + `</tr>`;
+        const vBody = (volLb.rows || []).map(r => {
+          const cls = VOL_CLS[r.volState] || "neutral";
+          const days = volDist[r.volState] != null ? ` <span style="color:var(--muted);font-size:10px">${volDist[r.volState]}d</span>` : "";
+          const rgCell = `<td class="day"><span class="rgm-badge ${cls}" style="font-size:11px">🌊 ${r.volState || "?"}</span>${days}</td>`;
+          const cells = ids.map(id => {
+            const c = r.cells[id];
+            if (!c) return `<td><span class="cell" style="${heatColor(null)}">—</span></td>`;
+            const star = r.best === id ? "⭐ " : "";
+            const border = r.best === id ? "box-shadow:0 0 0 1.5px var(--accent) inset;" : "";
+            const label = `${star}${_sgn(c.expectancyR)}${c.expectancyR}R<br><span style="opacity:.7;font-size:10px">${c.winRate}% · ${c.closed}t</span>`;
+            return `<td><span class="cell" style="${heatColor(c.avgPnlPct, 'pnl')}${border}">${label}</span></td>`;
+          }).join("");
+          return `<tr>${rgCell}${cells}</tr>`;
+        }).join("");
+        volSection = `<h3 class="reco-colhead" style="margin-top:16px">🌊 Volatility leaderboard — which strategy works in calm vs elevated vol</h3>
+          <table class="tbl heat"><thead>${vHead}</thead><tbody>${vBody}</tbody></table>
+          <div class="chart-note">The same attribution, sliced by the <b>volatility</b> axis instead of direction. Vol regime is a VIX-free proxy — the rolling realized volatility of the median move, bucketed by percentile within the window (Calm / Normal / Elevated). Read it alongside the regime board: e.g. mean-reversion often shines in <b>Calm</b>, breakouts in <b>Elevated</b>.</div>`;
+      }
+
       return `<h3 class="reco-colhead" style="margin-top:18px">🧭 Regime leaderboard — which strategy works on which kind of day</h3>
         <table class="tbl heat"><thead>${head}</thead><tbody>${body}</tbody></table>
         <div class="chart-note">Each cell = that strategy's <b>expectancy (avg R/trade)</b> on days of that regime (win% · #trades). ⭐ = best in the regime (≥3 trades). Regime is an <b>equal-weight F&amp;O proxy</b> — median 1-day move + advance/decline breadth, classified with the live detector's thresholds; the <b>Nd</b> next to each label is how many days in the window were that regime.</div>
+        ${volSection}
         <h3 class="reco-colhead" style="margin-top:16px">Regime-gated — trade each strategy only on its designed regime</h3>
         <table class="tbl"><thead><tr>
           <th>Strategy</th><th title="The strategy's designed regimes (a-priori, from strategies.regimeFit — NOT fit to this window)">Designed for</th>

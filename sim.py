@@ -193,7 +193,7 @@ def current_regime():
 # ----------------------------------------------------------------------------
 # Trades
 # ----------------------------------------------------------------------------
-def _open_trade(idea, strategy_id, regime_label, book="cash"):
+def _open_trade(idea, strategy_id, regime_label, book="cash", vol_label=None):
     entry = idea.get("entry") or idea.get("ltp")
     if not entry:
         return None
@@ -234,6 +234,7 @@ def _open_trade(idea, strategy_id, regime_label, book="cash"):
         "openedAt": _now(),
         "openedDate": _today(),
         "regimeAtEntry": regime_label,
+        "volAtEntry": vol_label,
         "exitPrice": None,
         "closedAt": None,
         "closedDay": None,
@@ -458,7 +459,9 @@ def take(strategy_ids=None, ctx=None, auto=False, limit=10, book="cash"):
     so cash-vs-F&O performance is directly comparable (same risk-based sizing).
     """
     ctx = ctx or build_ctx()
-    regime_label = (ctx.get("regime") or {}).get("label", "?")
+    regime = ctx.get("regime") or {}
+    regime_label = regime.get("label", "?")
+    vol_label = regime.get("volState")
     with _lock:
         state = _load()
         ids = strategy_ids or [s["id"] for s in strat.STRATEGIES]
@@ -490,7 +493,7 @@ def take(strategy_ids=None, ctx=None, auto=False, limit=10, book="cash"):
                 key = (idea["symbol"], idea["direction"])
                 if key in taken_keys:
                     continue
-                tr = _open_trade(idea, sid, regime_label, book)
+                tr = _open_trade(idea, sid, regime_label, book, vol_label)
                 if tr:
                     new_trades.append(tr)
                     taken_keys.add(key)

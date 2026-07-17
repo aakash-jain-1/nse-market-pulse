@@ -124,6 +124,47 @@ def test_regime_note_contains_breadth():
 
 
 # ---------------------------------------------------------------------------
+# volatility axis (India VIX) — orthogonal to the directional label
+# ---------------------------------------------------------------------------
+def _idx_vix(nifty_pct, vix, lo=8.0, hi=30.0, adv=100, dec=50):
+    ix = _idx(nifty_pct, adv=adv, dec=dec)
+    ix["index"]["INDIAVIX"] = {"last": vix, "yearLow": lo, "yearHigh": hi}
+    return ix
+
+
+def test_vol_state_bands():
+    assert S._vol_state(11.0) == "Calm"
+    assert S._vol_state(13.0) == "Normal"      # boundary is inclusive of Normal
+    assert S._vol_state(15.0) == "Normal"
+    assert S._vol_state(18.0) == "Elevated"    # >=18 elevated
+    assert S._vol_state(24.0) == "Elevated"
+    assert S._vol_state(None) is None
+
+
+def test_vix_pctile_math_and_guards():
+    assert S._vix_pctile(20.0, 10.0, 30.0) == 50.0
+    assert S._vix_pctile(10.0, 10.0, 30.0) == 0.0
+    assert S._vix_pctile(40.0, 10.0, 30.0) == 100.0   # clamped
+    assert S._vix_pctile(20.0, None, 30.0) is None
+    assert S._vix_pctile(20.0, 30.0, 30.0) is None     # hi<=lo guard
+    assert S._vix_pctile(None, 10.0, 30.0) is None
+
+
+def test_detect_regime_carries_vol_axis():
+    r = S.detect_regime(_idx_vix(1.0, 12.0))
+    assert r["label"] == "Trend-Up"            # direction unchanged by vol
+    assert r["vix"] == 12.0 and r["volState"] == "Calm"
+    assert r["vixPctile"] == round((12.0 - 8.0) / (30.0 - 8.0) * 100, 1)
+    assert "VIX 12.00" in r["note"] and "Calm" in r["note"]
+
+
+def test_detect_regime_vol_absent_is_none():
+    r = S.detect_regime(_idx(1.0, adv=100, dec=50))
+    assert r["vix"] is None and r["volState"] is None and r["vixPctile"] is None
+    assert "VIX" not in r["note"]              # no VIX bits when unavailable
+
+
+# ---------------------------------------------------------------------------
 # gen_momentum (delegates to nse._build_idea)
 # ---------------------------------------------------------------------------
 def test_gen_momentum_passthrough_and_filter():

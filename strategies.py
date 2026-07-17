@@ -217,17 +217,52 @@ def build_context(fno_only=False):
     return ctx
 
 
+# India-VIX volatility bands. These are the conventional NSE readings: a sub-13
+# print is a calm/complacent tape, 13-18 is the normal working range, and 18+ is
+# elevated/fearful (spikes toward 20+ around events). Kept as a SEPARATE axis
+# from the directional label so per-regime sample sizes (and the leaderboard /
+# walk-forward keys) stay stable — volState is an extra tint, not a new label.
+_VIX_CALM = 13.0
+_VIX_ELEVATED = 18.0
+
+
+def _vol_state(vix):
+    """India VIX level -> coarse volatility regime (Calm / Normal / Elevated)."""
+    if vix is None:
+        return None
+    if vix < _VIX_CALM:
+        return "Calm"
+    if vix < _VIX_ELEVATED:
+        return "Normal"
+    return "Elevated"
+
+
+def _vix_pctile(vix, lo, hi):
+    """Where today's VIX sits in its own 52-week range (0-100). Robust to the
+    fact that 'high' VIX drifts over time — a percentile self-calibrates."""
+    if vix is None or lo is None or hi is None or hi <= lo:
+        return None
+    return round(max(0.0, min(1.0, (vix - lo) / (hi - lo))) * 100, 1)
+
+
 def detect_regime(ctx, prior_day_move=None):
     """
     Classify today's market regime from the index snapshot + breadth (+ the
-    prior session's move for 'Recovery'). Cheap: only needs ctx['index'].
+    prior session's move for 'Recovery'), plus a volatility axis from India VIX.
+    Cheap: only needs ctx['index']. The directional `label` is unchanged (6
+    buckets); `volState`/`vix`/`vixPctile` add an orthogonal volatility read
+    used by the board and, later, for vol-conditioned strategy selection.
     """
     idx = (ctx.get("index") or {}).get("NIFTY") or {}
     bank = (ctx.get("index") or {}).get("BANKNIFTY") or {}
+    vixrow = (ctx.get("index") or {}).get("INDIAVIX") or {}
     today = idx.get("pChange")
     adv = idx.get("advances") or 0
     dec = idx.get("declines") or 0
     pcr = ctx.get("niftyPcr")
+    vix = vixrow.get("last")
+    vix_pctile = _vix_pctile(vix, vixrow.get("yearLow"), vixrow.get("yearHigh"))
+    vol_state = _vol_state(vix)
 
     if today is None:
         label = "Unknown"
@@ -251,6 +286,9 @@ def detect_regime(ctx, prior_day_move=None):
         bits.append(f"prev {prior_day_move:+.2f}%")
     if adv or dec:
         bits.append(f"breadth {int(adv)}:{int(dec)}")
+    if vix is not None:
+        vp = f" p{vix_pctile:.0f}" if vix_pctile is not None else ""
+        bits.append(f"VIX {vix:.2f}{vp} {vol_state}")
     if pcr is not None:
         bits.append(f"PCR {pcr}")
 
@@ -262,6 +300,9 @@ def detect_regime(ctx, prior_day_move=None):
         "breadthAdv": adv,
         "breadthDec": dec,
         "pcr": pcr,
+        "vix": vix,
+        "vixPctile": vix_pctile,
+        "volState": vol_state,
         "note": " · ".join(bits),
     }
 

@@ -550,14 +550,30 @@ def _median(xs):
     return xs[len(xs) // 2] if xs else None
 
 
+def _stdev(xs):
+    xs = [x for x in xs if x is not None]
+    if len(xs) < 2:
+        return None
+    m = sum(xs) / len(xs)
+    return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
+
+
 # ----------------------------------------------------------------------------
 # Market regime per trading day. We have no historical NIFTY feed here, so we
 # build an equal-weight proxy from the SAME universe we already fetched: the
 # median 1-day move + advance/decline breadth, classified with the identical
 # thresholds as the live detector (strategies.detect_regime) so the labels line
 # up. Every trade is then tagged with the regime of its ENTRY day.
+#
+# Volatility axis: we have no historical India-VIX feed here either, so we use a
+# VIX-free proxy — the rolling realized volatility of that median-move series
+# (10-session stdev) — and bucket each day by its PERCENTILE within the tested
+# window (self-calibrating: Calm/Normal/Elevated). This mirrors the live
+# detect_regime volState so vol-conditioned attribution lines up across both.
 # ----------------------------------------------------------------------------
 _REGIME_ORDER = ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"]
+_VOL_ORDER = ["Calm", "Normal", "Elevated"]
+_VOL_WIN = 10
 
 
 def _classify_regime(today, adv, dec, prior):
@@ -576,18 +592,46 @@ def _classify_regime(today, adv, dec, prior):
     return "Mixed"
 
 
+def _vol_state_pct(rv, ranked):
+    """Bucket a rolling-realized-vol reading by its percentile within the tested
+    window: bottom third Calm, top third Elevated, middle Normal."""
+    if rv is None or not ranked:
+        return None
+    below = sum(1 for x in ranked if x < rv)
+    pct = below / len(ranked)
+    return "Calm" if pct < 0.34 else "Elevated" if pct > 0.66 else "Normal"
+
+
+def _annotate_vol(out, days, mkts):
+    """Attach realVol (10-session rolling stdev of the median move) + volState
+    (within-window percentile bucket) to each day of the regime map, in place."""
+    vols = {}
+    seq = [mkts.get(d) for d in days]
+    for i, d in enumerate(days):
+        window = seq[max(0, i - _VOL_WIN + 1): i + 1]
+        vols[d] = _stdev(window)
+    ranked = sorted(v for v in vols.values() if v is not None)
+    for d in days:
+        rv = vols[d]
+        out[d]["realVol"] = round(rv, 2) if rv is not None else None
+        out[d]["volState"] = _vol_state_pct(rv, ranked)
+
+
 def _regime_map(hist):
-    """date -> {label, mktPct, adv, dec, priorPct} via an equal-weight proxy."""
+    """date -> {label, mktPct, adv, dec, priorPct, realVol, volState} via an
+    equal-weight proxy (see module note above)."""
     rets = {}
     for bars in hist.values():
         for i in range(1, len(bars)):
             pc, c = bars[i - 1]["close"], bars[i]["close"]
             if pc and c:
                 rets.setdefault(bars[i]["d"], []).append((c / pc - 1) * 100)
-    out, prior = {}, None
-    for d in sorted(rets):
+    out, prior, mkts = {}, None, {}
+    days = sorted(rets)
+    for d in days:
         vals = rets[d]
         mkt = _median(vals)
+        mkts[d] = mkt
         adv = sum(1 for r in vals if r > 0)
         dec = sum(1 for r in vals if r < 0)
         out[d] = {"label": _classify_regime(mkt, adv, dec, prior),
@@ -595,38 +639,41 @@ def _regime_map(hist):
                   "adv": adv, "dec": dec,
                   "priorPct": round(prior, 2) if prior is not None else None}
         prior = mkt
+    _annotate_vol(out, days, mkts)
     return out
 
 
-def _regime_leaderboard(trades):
-    """Matrix regime × strategy → expectancy/win%/count; best strategy per regime
-    (by expectancy R, needs >=3 samples). Pure attribution — no look-ahead."""
+def _leaderboard(trades, attr, field, order):
+    """Matrix bucket × strategy → expectancy/win%/count; best strategy per bucket
+    (by expectancy R, needs >=3 samples). Pure attribution — no look-ahead.
+    `attr` is the trade field to bucket on (regimeAtEntry / volAtEntry); `field`
+    is the per-row label key; `order` is the preferred bucket ordering."""
     ids = [s["id"] for s in STRATS]
-    agg, regimes = {}, set()
+    agg, buckets = {}, set()
     for t in trades:
         if t["status"] == "OPEN":
             continue
-        rg = t.get("regimeAtEntry") or "?"
-        regimes.add(rg)
-        a = agg.setdefault((rg, t["strategy"]),
+        bk = t.get(attr) or "?"
+        buckets.add(bk)
+        a = agg.setdefault((bk, t["strategy"]),
                            {"closed": 0, "wins": 0, "r": 0.0, "pctSum": 0.0})
         a["closed"] += 1
         if t["status"] == "TARGET":
             a["wins"] += 1
         a["r"] += t.get("rMultiple") or 0.0
         a["pctSum"] += t.get("pnlPct") or 0.0
-    ordered = ([r for r in _REGIME_ORDER if r in regimes] +
-               sorted(r for r in regimes if r not in _REGIME_ORDER))
+    ordered = ([b for b in order if b in buckets] +
+               sorted(b for b in buckets if b not in order))
     rows = []
-    for rg in ordered:
-        cells, best_sid, best_val, n_rg = {}, None, None, 0
+    for bk in ordered:
+        cells, best_sid, best_val, n_bk = {}, None, None, 0
         for sid in ids:
-            a = agg.get((rg, sid))
+            a = agg.get((bk, sid))
             if not a or not a["closed"]:
                 cells[sid] = None
                 continue
             n = a["closed"]
-            n_rg += n
+            n_bk += n
             exp = a["r"] / n
             cells[sid] = {"closed": n,
                           "winRate": round(a["wins"] / n * 100, 1),
@@ -635,8 +682,20 @@ def _regime_leaderboard(trades):
                           "totalR": round(a["r"], 2)}
             if n >= 3 and (best_val is None or exp > best_val):
                 best_val, best_sid = exp, sid
-        rows.append({"regime": rg, "best": best_sid, "closed": n_rg, "cells": cells})
+        rows.append({field: bk, "best": best_sid, "closed": n_bk, "cells": cells})
     return {"order": ids, "rows": rows}
+
+
+def _regime_leaderboard(trades):
+    """Regime × strategy expectancy matrix (best strategy per market regime)."""
+    return _leaderboard(trades, "regimeAtEntry", "regime", _REGIME_ORDER)
+
+
+def _vol_leaderboard(trades):
+    """Volatility-bucket × strategy expectancy matrix — which edges hold up in
+    Calm vs Normal vs Elevated tape. Complements the regime leaderboard along
+    the orthogonal volatility axis (India VIX live / realized-vol in backtest)."""
+    return _leaderboard(trades, "volAtEntry", "volState", _VOL_ORDER)
 
 
 def _regime_fit(sid):
@@ -749,7 +808,9 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
     first_iso = last_iso
     for sym, bars in hist.items():
         for t in _backtest_symbol(bars, ois.get(sym, {}), cutoff_iso, max_hold, day_regime):
-            t["regimeAtEntry"] = (day_regime.get(t["openedDate"]) or {}).get("label", "?")
+            dr = day_regime.get(t["openedDate"]) or {}
+            t["regimeAtEntry"] = dr.get("label", "?")
+            t["volAtEntry"] = dr.get("volState")
             by_strat[t["strategy"]].append(t)
             if t["openedDate"] < first_iso:
                 first_iso = t["openedDate"]
@@ -790,11 +851,15 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
               reverse=True)
 
     regime_lb = _regime_leaderboard(all_trades)
+    vol_lb = _vol_leaderboard(all_trades)
     gated = _gated(by_strat)
-    regime_dist = {}
+    regime_dist, vol_dist = {}, {}
     for d, r in day_regime.items():
         if d >= cutoff_iso:
             regime_dist[r["label"]] = regime_dist.get(r["label"], 0) + 1
+            vs = r.get("volState")
+            if vs:
+                vol_dist[vs] = vol_dist.get(vs, 0) + 1
 
     bars_counts = [len(b) for b in hist.values()]
     result = {
@@ -815,7 +880,9 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
         "strategies": rows,
         "totals": _scorecard(all_trades),
         "regimeLeaderboard": regime_lb,
+        "volLeaderboard": vol_lb,
         "regimeDist": regime_dist,
+        "volDist": vol_dist,
         "gated": gated,
         "notCovered": NOT_COVERED,
         "generatedAt": _now(),

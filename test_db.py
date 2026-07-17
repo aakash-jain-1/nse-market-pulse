@@ -148,6 +148,15 @@ def test_sim_insert_and_roundtrip():
         assert t["book"] == "cash" and t["entry"] == 100.0
 
 
+def test_sim_vol_at_entry_roundtrip():
+    with _temp_db():
+        db.sim_insert_trades([_trade("1", regimeAtEntry="Trend-Up", volAtEntry="Elevated"),
+                              _trade("2")])                    # no volAtEntry supplied
+        rows = {t["id"]: t for t in db.sim_all_trades()}
+        assert rows["1"]["volAtEntry"] == "Elevated"
+        assert rows["2"]["volAtEntry"] is None                # column present, NULL default
+
+
 def test_sim_book_default_when_missing():
     with _temp_db():
         tr = _trade("1")
