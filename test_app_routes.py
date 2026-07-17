@@ -292,6 +292,41 @@ def test_sim_walkforward_arg_parsing():
 
 
 # ---------------------------------------------------------------------------
+# EOD bhavcopy endpoints
+# ---------------------------------------------------------------------------
+def test_eod_status_price_quote():
+    import bhavcopy
+    seen = {}
+    with _patches(
+        (bhavcopy, "status", lambda refresh=False: seen.update(refresh=refresh)
+            or {"cmDate": "2026-07-16", "equities": 3, "cached": True}),
+        (bhavcopy, "eod_close", lambda s: 123.4),
+        (bhavcopy, "eod_quote", lambda s: {"symbol": s.upper(), "close": 123.4}),
+    ):
+        st, j = _json("/api/eod/status")
+        assert st == 200 and j["cmDate"] == "2026-07-16" and seen["refresh"] is False
+        _json("/api/eod/status?refresh=1")
+        assert seen["refresh"] is True
+        st, j = _json("/api/eod/price/reliance")
+        assert st == 200 and j == {"symbol": "RELIANCE", "close": 123.4,
+                                   "date": "2026-07-16"}
+        st, j = _json("/api/eod/quote/tcs")
+        assert st == 200 and j["symbol"] == "TCS"
+
+
+def test_eod_refresh_post():
+    import bhavcopy
+    seen = {}
+    with _patch(bhavcopy, "ingest_db",
+                lambda date=None: seen.update(date=date) or {"bars": 3166, "oi": 215}):
+        r = client.post("/api/eod/refresh", json={})
+        assert r.status_code == 200 and r.get_json()["bars"] == 3166
+        assert seen["date"] is None
+        client.post("/api/eod/refresh", json={"date": "2026-07-15"})
+        assert seen["date"] == "2026-07-15"
+
+
+# ---------------------------------------------------------------------------
 # logger endpoints
 # ---------------------------------------------------------------------------
 def test_log_endpoints():

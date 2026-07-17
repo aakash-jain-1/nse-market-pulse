@@ -509,6 +509,8 @@
         <label class="chk" title="Re-resolve exits on REAL 1-minute candles (true intraday path — which-came-first, wick timing) instead of the daily high/low. Heavier; limited to NSE's ~30-40 day minute retention, older trades fall back to daily."><input type="checkbox" id="simBtIntrabar"> minute-accurate</label>
         <button id="simBacktestDaily" style="padding:6px 12px">📅 Daily backtest (real EOD)</button>
         <button id="simWalkforward" style="padding:6px 12px" title="Out-of-sample check: split the daily history into train/test, learn the best-per-regime playbook on train, and measure whether each strategy's edge — and the regime-adaptive selection — actually survives out-of-sample. Separates a real edge from a curve-fit one.">🧪 Walk-forward (out-of-sample)</button>
+        <button id="eodRefresh" style="padding:6px 12px" title="Download NSE's End-of-Day bhavcopy (whole cash market + full F&O universe) from the static archive and load it into the local history cache. Broadens the daily-backtest universe to every listed name and gives ANY symbol a resilient EOD price — works off-hours and even when NSE's live API is down.">⬇ Load EOD (whole market)</button>
+        <span id="eodStatus" style="color:var(--muted);font-size:11px"></span>
         <span style="color:var(--muted);font-size:11px">Risk-based sizing: each trade risks ₹2,000 to its stop · target=right, stop=wrong · multi-day hold (≤3 sessions). Expectancy in R.</span>
       </div>
       <div id="scanFilters" class="scan-filters" style="display:none">
@@ -711,14 +713,14 @@
         </div>
         <div id="ocTable"><div class="chart-note">Enter an F&amp;O symbol and click Load.</div></div>
         <div id="ocTradeBox" class="trade-box" style="display:none">
-          <h4>Paper trade this option <span style="color:var(--muted);font-weight:400">(virtual money · sized in lots)</span></h4>
+          <h4>Paper trade this option <span style="color:var(--muted);font-weight:400">(virtual money · sized in lots · Buy = long, Sell = write/short)</span></h4>
           <div class="trade-row">
             <select id="ocTType"><option value="CE">CE (Call)</option><option value="PE">PE (Put)</option></select>
             <select id="ocTStrike" style="width:110px"></select>
             <span id="ocTPremium" style="color:var(--muted);font-size:12px;align-self:center"></span>
             <label style="font-size:12px;color:var(--muted);align-self:center">Lots <input type="number" id="ocTQty" min="1" value="1" style="width:60px" /></label>
-            <button class="buy" id="ocTBuy">Buy</button>
-            <button class="sell" id="ocTSell">Sell</button>
+            <button class="buy" id="ocTBuy" title="Buy to open a long (pay premium; max loss = premium paid)">Buy</button>
+            <button class="sell" id="ocTSell" title="Sell to write/short (receive premium, posts ~15% margin) — you do NOT need to hold a long; also closes a long">Sell / Write</button>
           </div>
           <div id="ocTLotInfo" style="font-size:11.5px;color:var(--muted);margin-top:6px"></div>
           <div class="trade-msg" id="ocTradeMsg"></div>
@@ -3741,7 +3743,7 @@
         holds.innerHTML = `<table><thead><tr><th>Stock</th><th>Qty</th><th>Avg</th><th>LTP</th><th>Value</th><th>P&L</th></tr></thead><tbody>` +
           p.positions.map(pos => `<tr>
             <td class="sym">${pos.symbol}</td>
-            <td>${fmtNum(pos.qty)}${pos.lots?` <span style="color:var(--muted)">(${pos.lots} lot${pos.lots>1?'s':''}${pos.kind==='future'?(pos.qty<0?' · SHORT':' · LONG'):''})</span>`:''}</td>
+            <td>${fmtNum(pos.qty)}${pos.lots?` <span style="color:var(--muted)">(${pos.lots} lot${pos.lots>1?'s':''}${(pos.kind==='future'||pos.kind==='option')?(pos.qty<0?' · SHORT':' · LONG'):''})</span>`:''}${pos.margin?` <span style="color:var(--muted)" title="Margin blocked">· ₹${fmtNum(pos.margin)} mgn</span>`:''}</td>
             <td>${fmtPrice(pos.avgPrice)}</td><td>${fmtPrice(pos.ltp)}</td>
             <td>${fmtNum(pos.value)}</td>
             <td class="${pos.pnl>=0?'pos':'neg'}">${pos.pnl>=0?'+':''}${fmtNum(pos.pnl)} (${pos.pnlPct>=0?'+':''}${pos.pnlPct}%)</td>
@@ -4394,6 +4396,36 @@
       }
       btn.disabled = false; btn.textContent = "🧪 Walk-forward (out-of-sample)";
     };
+    const renderEodStatus = (s) => {
+      const el = document.getElementById("eodStatus");
+      if (!el) return;
+      if (!s || (!s.cached && !s.cmDate)) { el.textContent = "EOD cache: empty"; return; }
+      const age = s.ageSec == null ? "" : (s.ageSec < 90 ? " · just now"
+        : " · " + Math.round(s.ageSec / 60) + "m ago");
+      el.textContent = `EOD ${s.cmDate || "?"}: ${s.equities || 0} equities · ${s.futures || 0} futures${age}`;
+    };
+    const loadEodStatus = async () => {
+      try { renderEodStatus(await fetch("/api/eod/status").then(r => r.json())); }
+      catch (e) { /* leave blank */ }
+    };
+    document.getElementById("eodRefresh").onclick = async () => {
+      const btn = document.getElementById("eodRefresh");
+      btn.disabled = true; btn.textContent = "⏳ Downloading bhavcopy…";
+      try {
+        const res = await fetch("/api/eod/refresh", { method: "POST" }).then(r => r.json());
+        const el = document.getElementById("eodStatus");
+        if (el) el.textContent = `Loaded EOD ${res.cmDate || "?"}: ${res.bars || 0} equity bars · ${res.oi || 0} futures OI rows into the local cache.`;
+      } catch (e) {
+        const el = document.getElementById("eodStatus");
+        if (el) el.textContent = "EOD load failed: " + e;
+      }
+      btn.disabled = false; btn.textContent = "⬇ Load EOD (whole market)";
+    };
+    // Populate the EOD status once on load; retry a couple times so it fills in
+    // after the background bhavcopy pre-warm (a ~2s archive download) completes.
+    loadEodStatus();
+    setTimeout(loadEodStatus, 4000);
+    setTimeout(loadEodStatus, 12000);
     document.getElementById("fReset").onclick = () => {
       document.getElementById("fDir").value = "any";
       document.getElementById("fChg").value = "";

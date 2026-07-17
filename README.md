@@ -45,8 +45,8 @@ layers analytics on top:
   that follows the strategy-of-the-day), each forward-tested in its **own parallel
   simulation** and compared **day-by-day against the market regime**,
 - an **offline backtester** that replays those strategies over archived data,
-- **paper trading** for equities, futures (margin/leverage) and options (lot-size
-  enforced),
+- **paper trading** for equities, futures (margin/leverage, long/short) and options
+  (lot-size enforced, buy or **write/short**),
 - per-stock **deep-dive** analysis (30/60/90-day price + delivery + OI history),
 - live **option chains**, **Greeks**, **market depth** and **intraday charts**.
 
@@ -91,8 +91,12 @@ layers analytics on top:
 
 ### Paper trading (virtual, `paper.py`)
 - Starts at ₹10,00,000. **Equities**, **futures** (margin ≈15%, long/short with
-  netting, live MTM) and **options** (lot-size enforced). Live P&L + order
-  history; state persisted to `paper_state.json`.
+  netting, live MTM) and **options** — lot-size enforced and **long OR short
+  (writing)**: `SELL` opens a written short (you don't need to hold a long) that
+  **receives the premium and posts margin** (~15% of notional, like a real broker);
+  `BUY` covers it, freeing margin and realizing P&L. Long options pay the premium up
+  front (no margin). Live P&L + order history; state in `paper_state.json`. *(Virtual
+  money only — no broker, no real orders.)*
 
 ---
 
@@ -247,6 +251,7 @@ flowchart TB
         direction TB
         NC["nse_client.py<br/>• warmed requests.Session (TTL 300s)<br/>• hot lists → normalized dicts<br/>• get_scanner / _build_idea / get_demand_score<br/>• get_price (symbol→LTP map)"]
         NQ["nse_quote.py<br/>• NextApi gateway<br/>• quote / depth / intraday chart<br/>• option chain + Black-Scholes Greeks"]
+        BC["bhavcopy.py<br/>• EOD UDiFF bhavcopy (static archive)<br/>• resilient price / lot fallback<br/>• ingest → eod_bars/eod_oi"]
         ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime()<br/>• 17 generators"]
         SM["sim.py<br/>• per-strategy ledgers<br/>• take/update/summary<br/>• daily rollup + regime leaderboard"]
         BK["backtest_strategies.py<br/>• virtual-clock replay<br/>• scorecards + equity curves"]
@@ -271,6 +276,9 @@ flowchart TB
     SL --> SM & DBM
     BK --> DBM
     PP --> NC
+    NC -.EOD fallback.-> BC
+    BC --> NSEAPI
+    BC -.ingest.-> DBM
 ```
 
 ---
@@ -490,6 +498,18 @@ flowchart LR
   only trustworthy if its out-of-sample expectancy stays positive.
 - **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
   entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
+- **🗄 EOD data resilience & full-market coverage** (`bhavcopy.py`, `/api/eod/*`,
+  Sim-tab **⬇ Load EOD (whole market)** button): NSE's live JSON is anti-bot/flaky
+  and only the ~100-150 hot-list names carry a price. NSE *also* publishes the daily
+  **UDiFF Common Bhavcopy** as a plain static ZIP/CSV on `nsearchives.nseindia.com`
+  (no anti-bot gate). This ingests the CM (cash, ~3100 equities) + FO (derivatives,
+  ~215 futures + lot sizes) files — pure parsers, weekend/holiday walk-back, 30-min
+  cache — and wires the EOD close in as the **last-resort price** so *any* listed
+  symbol is priceable **off-hours and even when the live API is down** (e.g. paper-
+  trade or look up a name that never appears in the hot lists). It also supplies a
+  **lot-size fallback** and can bulk-load the whole market into the local history
+  cache to **broaden the daily-backtest universe**. Dependency-free (the small
+  bhavcopy slice of `jugaad-data`, implemented in-house).
 
 ---
 
@@ -690,6 +710,9 @@ python nse_demand.py losers     # top losers
 | `GET /api/deepdive/<sym>` | 30/60/90-day price + delivery + OI deep-dive |
 | `GET /api/quote/<sym>` · `/api/chart/<sym>` | Live quote + market depth · intraday price line |
 | `GET /api/depth?symbols=<csv>` | Batch order-book imbalance/spread stats (Scanner "⚖ Order-book scan"; capped, pooled) |
+| `GET /api/eod/status[?refresh=1]` | EOD bhavcopy freshness/coverage (date, #equities, #futures, cache age; no secrets) |
+| `GET /api/eod/price/<sym>` · `/api/eod/quote/<sym>` | Resilient EOD close / full EOD record for **any** listed symbol (works off-hours; static NSE archive) |
+| `POST /api/eod/refresh[{date}]` | Ingest a day's bhavcopy (whole cash market + F&O) into the `eod_bars`/`eod_oi` cache (broadens the daily-backtest universe) |
 | `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
 | `GET /api/live/config` | Live feed status: provider (angel/dhan)? configured? connected? market-open? watchlist (never returns secrets) |
 | `POST /api/live/watch` | Set the subscribed symbol set + focus (`{symbols:[…], focus}`) |
@@ -721,6 +744,7 @@ nse-market-pulse/
 ├── app.py                  # Flask server + JSON API (thin routes) — port 5055
 ├── nse_client.py           # NSE session mgmt + hot lists + scanner + ideas (CORE)
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
+├── bhavcopy.py             # EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback
 ├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
 ├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
 ├── strategies.py           # 17 strategy generators (incl. regime-adaptive) + regime detector
@@ -730,12 +754,12 @@ nse-market-pulse/
 ├── backtest_daily.py        # Daily-bar historical backtest over real NSE EOD data
 ├── walkforward.py          # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── notify.py               # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger
-├── paper.py                # Paper-trading engine (equity/futures/options)
+├── paper.py                # Paper-trading engine (equity + long/short options + long/short futures)
 ├── snapshot_logger.py      # Background logger (snapshots + IV + context + alerts) → SQLite
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 410 unit tests, 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
+├── test_*.py               # 456 unit tests, 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

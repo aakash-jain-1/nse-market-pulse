@@ -141,20 +141,82 @@ def test_option_bad_type_and_side():
         assert paper.place_option_order("N", "2026-07-30", 100, "CE", "HOLD", 1)[0] is False
 
 
-def test_option_oversell_rejected():
-    with _paper() as s:
-        s.lot["NIFTY"] = 50
-        s.opt[("NIFTY", "2026-07-30", 25000.0, "CE")] = 120.0
-        paper.place_option_order("NIFTY", "2026-07-30", 25000, "CE", "BUY", 1)
-        ok, msg, _ = paper.place_option_order("NIFTY", "2026-07-30", 25000, "CE", "SELL", 2)
-        assert not ok and "hold" in msg
-
-
 def test_option_no_premium():
     with _paper() as s:
         s.lot["NIFTY"] = 50
         ok, msg, _ = paper.place_option_order("NIFTY", "2026-07-30", 25000, "CE", "BUY", 1)
         assert not ok and "premium" in msg
+
+
+# ---------------------------------------------------------------------------
+# Options — writing (sell-to-open a SHORT), cover, MTM, flip
+# ---------------------------------------------------------------------------
+def _opt_short(s, prem=120.0, spot=25000.0, lot=50):
+    s.lot["NIFTY"] = lot
+    s.price["NIFTY"] = spot                       # underlying spot → margin base
+    s.opt[("NIFTY", "2026-07-30", 25000.0, "CE")] = prem
+
+
+def test_option_write_short_receives_premium_and_posts_margin():
+    with _paper() as s:
+        _opt_short(s)
+        ok, msg, order = paper.place_option_order(
+            "NIFTY", "2026-07-30", 25000, "CE", "SELL", 1)     # no long held!
+        assert ok, msg
+        assert "short" in msg
+        pf = paper.portfolio()
+        # received 120*50 = 6000 premium, posted 50*25000*0.15 = 187500 margin
+        assert pf["cash"] == 1_000_000.0 + 6000.0 - 187500.0
+        pos = pf["positions"][0]
+        assert pos["kind"] == "option" and pos["qty"] == -50 and pos["lots"] == 1
+        assert pos["margin"] == 187500.0 and pos["avgPrice"] == 120.0
+        # freshly opened → no P&L yet, equity still 10 lakh
+        assert pos["pnl"] == 0.0 and pf["equity"] == 1_000_000.0
+
+
+def test_option_short_profits_when_premium_drops():
+    with _paper() as s:
+        _opt_short(s, prem=120.0)
+        paper.place_option_order("NIFTY", "2026-07-30", 25000, "CE", "SELL", 1)
+        s.opt[("NIFTY", "2026-07-30", 25000.0, "CE")] = 80.0    # premium decays
+        pf = paper.portfolio()
+        pos = pf["positions"][0]
+        assert pos["pnl"] == 2000.0                              # (120-80)*50
+        assert pf["totalPnl"] == 2000.0
+
+
+def test_option_short_cover_realizes_pnl_and_frees_margin():
+    with _paper() as s:
+        _opt_short(s, prem=120.0)
+        paper.place_option_order("NIFTY", "2026-07-30", 25000, "CE", "SELL", 1)
+        s.opt[("NIFTY", "2026-07-30", 25000.0, "CE")] = 80.0
+        ok, msg, order = paper.place_option_order(
+            "NIFTY", "2026-07-30", 25000, "CE", "BUY", 1)        # buy-to-cover
+        assert ok, msg
+        assert order["realized"] == 2000.0
+        pf = paper.portfolio()
+        assert pf["positions"] == []                             # flat
+        assert pf["cash"] == 1_002_000.0 and pf["totalPnl"] == 2000.0
+
+
+def test_option_sell_beyond_long_flips_to_short():
+    with _paper() as s:
+        _opt_short(s, prem=120.0)
+        paper.place_option_order("NIFTY", "2026-07-30", 25000, "CE", "BUY", 1)   # long 1
+        ok, msg, _ = paper.place_option_order(
+            "NIFTY", "2026-07-30", 25000, "CE", "SELL", 2)       # sell 2 → net short 1
+        assert ok, msg
+        pos = paper.portfolio()["positions"][0]
+        assert pos["qty"] == -50 and pos["margin"] == 187500.0 and pos["avgPrice"] == 120.0
+
+
+def test_option_short_insufficient_margin_rejected():
+    with _paper() as s:
+        _opt_short(s, prem=120.0, spot=25000.0)
+        # 100 lots → margin 100*50*25000*0.15 ≈ 1.875 cr ≫ 10 lakh, even with premium
+        ok, msg, _ = paper.place_option_order(
+            "NIFTY", "2026-07-30", 25000, "CE", "SELL", 100)
+        assert not ok and "margin" in msg
 
 
 # ---------------------------------------------------------------------------

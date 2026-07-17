@@ -483,6 +483,22 @@ def eod_bars_put(symbol, bars):
     return len(rows)
 
 
+def eod_bars_put_bulk(bars):
+    """Upsert daily bars for MANY symbols in ONE transaction. Each bar dict must
+    carry its own 'symbol' and a clean 'd' (YYYY-MM-DD). Used by the bhavcopy
+    ingest to load the whole cash market (~2400 rows) in a single write instead
+    of a per-symbol transaction."""
+    rows = [_eod_bar_row((b.get("symbol") or "").upper(), b)
+            for b in bars if b.get("d") and b.get("symbol")]
+    if not rows:
+        return 0
+    with _write_lock, _conn() as c:
+        c.executemany(
+            f"INSERT OR REPLACE INTO eod_bars ({','.join(EOD_BAR_COLS)}) "
+            f"VALUES ({','.join('?' * len(EOD_BAR_COLS))})", rows)
+    return len(rows)
+
+
 def eod_oi_get(symbol, expiry):
     with _conn() as c:
         return [dict(r) for r in c.execute(

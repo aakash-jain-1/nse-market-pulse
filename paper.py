@@ -25,6 +25,10 @@ IST = timezone(timedelta(hours=5, minutes=30))
 STATE_FILE = os.path.join(os.path.dirname(__file__), "paper_state.json")
 STARTING_CASH = 1_000_000.0  # Rs 10 lakh virtual capital
 FUT_MARGIN_RATE = 0.15  # approx SPAN+exposure margin (~6.6x leverage) for paper
+# Writing (selling to open) an option has futures-like risk, so a real broker
+# blocks margin on the short leg. We post ~this fraction of the underlying
+# notional. Long options need NO margin (max loss = premium already paid).
+OPT_SHORT_MARGIN_RATE = 0.15
 
 _lock = threading.Lock()
 
@@ -147,10 +151,19 @@ def place_order(symbol, side, qty):
 
 def place_option_order(underlying, expiry, strike, opt_type, side, lots):
     """
-    Simulated option order sized in LOTS (real F&O sizing). Fills at the current
-    premium (LTP) from the option chain. Total quantity = lots x the underlying's
-    market lot; cost = premium x quantity. Positions are keyed by the full
-    contract so CE/PE and each strike are tracked separately.
+    Simulated option order sized in LOTS (real F&O sizing), supporting LONG AND
+    SHORT (option writing) — you do NOT need to hold a long to sell. Fills at the
+    current premium (LTP) from the option chain; positions are keyed by the full
+    contract (CE/PE + strike tracked separately) and qty is SIGNED (long +, short -).
+
+      BUY  = buy-to-open a long  / buy-to-cover a short
+      SELL = sell-to-close a long / sell-to-open a short (writing)
+
+    Cash/margin, mirroring real F&O:
+      - Long: pay the premium up front (max loss = premium). No margin.
+      - Short (written): RECEIVE the premium, but POST margin (~OPT_SHORT_MARGIN_RATE
+        of the underlying notional) since the risk is futures-like. Covering frees
+        the margin proportionally and realizes P&L.
     """
     import nse_quote
 
@@ -173,6 +186,7 @@ def place_option_order(underlying, expiry, strike, opt_type, side, lots):
 
     lot_size = nse.get_lot_size(underlying) or 1
     qty = lots * lot_size
+    signed = qty if side == "BUY" else -qty
 
     price = nse_quote.get_option_price(underlying, expiry, strike, opt_type)
     if price is None or price <= 0:
@@ -184,45 +198,90 @@ def place_option_order(underlying, expiry, strike, opt_type, side, lots):
     with _lock:
         state = _load()
         pos = state["positions"].get(key)
-        cost = price * qty
+        old_qty = pos["qty"] if pos else 0  # signed units
 
-        if side == "BUY":
-            if cost > state["cash"]:
-                return (False,
-                        f"Insufficient virtual cash: need Rs {cost:,.0f} "
-                        f"({lots} lot(s) x {lot_size}), have Rs {state['cash']:,.0f}", None)
-            state["cash"] -= cost
-            if pos:
-                total_qty = pos["qty"] + qty
-                pos["avgPrice"] = (pos["avgPrice"] * pos["qty"] + cost) / total_qty
-                pos["qty"] = total_qty
-                pos["lots"] = pos.get("lots", 0) + lots
+        realized = 0.0
+        margin_freed = 0.0
+        margin_needed = 0.0
+        premium_flow = 0.0   # + = cash in (received), - = cash out (paid)
+
+        # Portion that closes/reduces the existing opposite position.
+        closing = 0
+        if pos and old_qty != 0 and (old_qty > 0) != (signed > 0):
+            closing = min(abs(signed), abs(old_qty))
+        opening = abs(signed) - closing
+
+        if closing:
+            direction = 1 if old_qty > 0 else -1   # closing a long vs a short
+            realized = (price - pos["avgPrice"]) * closing * direction
+            if direction > 0:
+                premium_flow += price * closing           # sell-to-close long → receive
             else:
-                state["positions"][key] = {
-                    "qty": qty, "avgPrice": price, "kind": "option",
-                    "label": label, "underlying": underlying, "expiry": expiry,
-                    "strike": strike, "optType": opt_type,
-                    "lots": lots, "lotSize": lot_size,
-                }
-        else:  # SELL
-            held = pos["qty"] if pos else 0
-            if qty > held:
-                held_lots = held // lot_size if lot_size else held
-                return False, f"Cannot sell {lots} lot(s) of {label}: you hold {held_lots} lot(s)", None
-            state["cash"] += cost
-            pos["qty"] -= qty
-            pos["lots"] = pos.get("lots", 0) - lots
-            if pos["qty"] == 0:
+                premium_flow -= price * closing           # buy-to-cover short → pay
+                # .get: legacy option positions predate margin tracking.
+                margin_freed = pos.get("margin", 0.0) * (closing / abs(old_qty))
+
+        if opening:
+            if signed > 0:
+                premium_flow -= price * opening           # buy-to-open long → pay, no margin
+            else:
+                premium_flow += price * opening           # sell-to-open short → receive
+                spot = nse.get_price(underlying) or strike
+                margin_needed = opening * spot * OPT_SHORT_MARGIN_RATE
+
+        net = premium_flow + margin_freed - margin_needed
+        if state["cash"] + net < 0:
+            if opening and signed > 0:   # couldn't fund a long premium
+                return (False,
+                        f"Insufficient virtual cash: need Rs {price * opening:,.0f} "
+                        f"for {lots} lot(s) of {label}, have Rs {state['cash']:,.0f}", None)
+            return (False,                # couldn't post short-writing margin
+                    f"Insufficient margin to short {lots} lot(s) of {label}: need "
+                    f"Rs {margin_needed:,.0f}, have Rs "
+                    f"{state['cash'] + premium_flow + margin_freed:,.0f}", None)
+
+        state["cash"] += net
+        new_qty = old_qty + signed
+
+        if new_qty == 0:
+            if pos:
                 del state["positions"][key]
+        else:
+            if not pos:
+                pos = {"kind": "option", "label": label, "underlying": underlying,
+                       "expiry": expiry, "strike": strike, "optType": opt_type,
+                       "lotSize": lot_size, "qty": 0, "avgPrice": price, "margin": 0.0}
+                state["positions"][key] = pos
+            if closing and opening:
+                # Flipped through zero → the new leg starts fresh at the fill price.
+                pos["avgPrice"] = price
+                pos["margin"] = margin_needed
+            elif opening and (old_qty == 0 or (old_qty > 0) == (signed > 0)):
+                # Adding to the same side → weighted-average premium.
+                pos["avgPrice"] = (
+                    (pos["avgPrice"] * abs(old_qty)) + price * opening
+                ) / (abs(old_qty) + opening)
+                pos["margin"] = pos.get("margin", 0.0) + margin_needed
+            else:
+                # Pure reduction → avg unchanged, margin (if any) freed.
+                pos["margin"] = pos.get("margin", 0.0) - margin_freed
+            pos["qty"] = new_qty
+            pos["lots"] = int(round(abs(new_qty) / lot_size)) if lot_size else abs(new_qty)
 
         order = {
             "time": _now(), "symbol": label, "side": side, "qty": qty,
-            "lots": lots, "lotSize": lot_size,
-            "price": round(price, 2), "value": round(cost, 2),
+            "lots": lots, "lotSize": lot_size, "kind": "option",
+            "price": round(price, 2), "value": round(price * qty, 2),
+            "realized": round(realized, 2) if closing else None,
         }
         state["orders"].append(order)
         _save(state)
-        return True, f"Order executed: {lots} lot(s) x {lot_size} = {qty} units", order
+        pos_word = "short" if new_qty < 0 else "long"
+        rmsg = f" · realized Rs {realized:,.0f}" if closing else ""
+        return (True,
+                f"{side} {lots} lot(s) x {lot_size} {label} @ {price:g} "
+                f"({pos_word} {abs(new_qty) // lot_size if lot_size else abs(new_qty)} lot(s)){rmsg}",
+                order)
 
 
 def place_futures_order(symbol, side, lots):
@@ -356,21 +415,30 @@ def portfolio():
     invested = 0.0
     for key, pos in state["positions"].items():
         ltp = _reprice(key, pos)
-        if pos.get("kind") == "future":
-            # Margin-based: signed MTM; equity contribution = margin + unrealized.
-            qty = pos["qty"]
+        qty = pos["qty"]
+        kind = pos.get("kind")
+        margin = pos.get("margin", 0.0)          # >0 for futures + SHORT options
+        # A position is margin-based (equity shown as margin locked) for all
+        # futures and for written (short) options.
+        margin_based = kind == "future" or (kind == "option" and qty < 0)
+        if kind == "future":
+            # No premium changes hands → equity contribution = margin + unrealized.
             pnl = (ltp - pos["avgPrice"]) * qty  # qty signed → shorts profit on drop
-            margin = pos.get("margin", 0.0)
             mkt = margin + pnl
             cost = margin
-            holdings_value += mkt
-            invested += cost
+        elif kind == "option":
+            # Premium WAS exchanged into cash, so value the contract at LTP (signed)
+            # and add back the locked margin for shorts (avoids double-counting the
+            # received premium). Long: mkt = ltp*qty; short: margin − liability.
+            pnl = (ltp - pos["avgPrice"]) * qty
+            mkt = ltp * qty + margin
+            cost = margin if qty < 0 else pos["avgPrice"] * qty
         else:
-            mkt = ltp * pos["qty"]
-            cost = pos["avgPrice"] * pos["qty"]
+            mkt = ltp * qty
+            cost = pos["avgPrice"] * qty
             pnl = mkt - cost
-            holdings_value += mkt
-            invested += cost
+        holdings_value += mkt
+        invested += cost
         positions.append(
             {
                 "symbol": pos.get("label", key),
@@ -378,7 +446,7 @@ def portfolio():
                 "qty": pos["qty"],
                 "lots": pos.get("lots"),
                 "lotSize": pos.get("lotSize"),
-                "margin": round(pos.get("margin", 0.0), 2) if pos.get("kind") == "future" else None,
+                "margin": round(pos.get("margin", 0.0), 2) if margin_based else None,
                 "avgPrice": round(pos["avgPrice"], 2),
                 "ltp": round(ltp, 2),
                 "value": round(mkt, 2),

@@ -207,6 +207,24 @@ def test_eod_bars_oi_meta():
         assert db.eod_bars_get("ACME") == []
 
 
+def test_eod_bars_put_bulk():
+    with _temp_db():
+        n = db.eod_bars_put_bulk([
+            {"symbol": "acme", "d": "2026-07-16", "close": "100", "volume": "5"},
+            {"symbol": "BETA", "d": "2026-07-16", "close": "200"},
+            {"symbol": "NOD", "close": "9"},        # no 'd' → skipped
+            {"d": "2026-07-16", "close": "1"},       # no symbol → skipped
+        ])
+        assert n == 2
+        assert db.eod_bars_get("ACME")[0]["close"] == 100.0   # symbol upper-cased
+        assert db.eod_bars_get("BETA")[0]["close"] == 200.0
+        # Re-ingesting the same day REPLACEs (immutable past, revised newest).
+        assert db.eod_bars_put_bulk(
+            [{"symbol": "ACME", "d": "2026-07-16", "close": "111"}]) == 1
+        assert db.eod_bars_get("ACME")[0]["close"] == 111.0
+        assert db.eod_bars_put_bulk([]) == 0
+
+
 # ---------------------------------------------------------------------------
 # minute bars
 # ---------------------------------------------------------------------------

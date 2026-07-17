@@ -487,7 +487,20 @@ def get_lot_sizes():
         pass
     if out:
         _lots_cache.update(ts=time.time(), map=out)
-    return out or (_lots_cache["map"] or {})
+        return out
+    if _lots_cache["map"]:
+        return _lots_cache["map"]
+    # fo_mktlots.csv failed and we have no cache — fall back to the FO bhavcopy's
+    # per-contract lot column (static archive, no anti-bot gate).
+    try:
+        import bhavcopy
+        lots = bhavcopy.lot_sizes()
+        if lots:
+            _lots_cache.update(ts=time.time(), map=lots)
+            return lots
+    except Exception:
+        pass
+    return {}
 
 
 def get_lot_size(symbol):
@@ -1344,9 +1357,13 @@ def get_price_map():
 
 def get_price(symbol):
     """
-    Return the latest known price for a symbol. First checks the merged hot-list
-    map (fast, no extra request); falls back to the per-stock NextApi quote so
-    that ANY tradable symbol can be priced (enables paper-trading anything).
+    Return the latest known price for a symbol, most-live first:
+      1. the merged hot-list LTP map (fast, no extra request),
+      2. the per-stock NextApi quote (any symbol, live, during market hours),
+      3. the NSE EOD bhavcopy close (resilient: works off-hours & when the live
+         JSON API is down; prices ANY listed name — broadens the tradable
+         universe well beyond the ~100-150 hot-list symbols).
+    Lazy imports avoid circular dependencies (nse_quote/bhavcopy import this).
     """
     if not symbol:
         return None
@@ -1354,9 +1371,15 @@ def get_price(symbol):
     price = get_price_map().get(sym)
     if price is not None:
         return price
-    # Lazy import avoids a circular dependency (nse_quote imports this module).
     try:
         import nse_quote
-        return nse_quote.get_ltp(sym)
+        price = nse_quote.get_ltp(sym)
+        if price is not None:
+            return price
+    except Exception:
+        pass
+    try:
+        import bhavcopy
+        return bhavcopy.eod_close(sym)
     except Exception:
         return None

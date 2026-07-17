@@ -304,6 +304,38 @@ def api_alerts_test():
     return jsonify(notify.send_test())
 
 
+@app.route("/api/eod/status")
+def api_eod_status():
+    """Freshness/coverage of the EOD bhavcopy cache (?refresh=1 forces a pull)."""
+    import bhavcopy
+    refresh = request.args.get("refresh") in ("1", "true", "yes")
+    return jsonify(bhavcopy.status(refresh=refresh))
+
+
+@app.route("/api/eod/price/<symbol>")
+def api_eod_price(symbol):
+    """Latest EOD close for ANY listed symbol (resilient off-hours price)."""
+    import bhavcopy
+    return jsonify({"symbol": symbol.upper(), "close": bhavcopy.eod_close(symbol),
+                    "date": bhavcopy.status().get("cmDate")})
+
+
+@app.route("/api/eod/quote/<symbol>")
+def api_eod_quote(symbol):
+    """Full EOD record for a symbol (CM bar + near future) from the bhavcopy."""
+    import bhavcopy
+    return jsonify(bhavcopy.eod_quote(symbol))
+
+
+@app.route("/api/eod/refresh", methods=["POST"])
+def api_eod_refresh():
+    """Ingest a day's bhavcopy into the eod_bars/eod_oi cache (broadens the
+    daily-backtest universe to the whole market). Defaults to the latest day."""
+    import bhavcopy
+    body = request.get_json(silent=True) or {}
+    return jsonify(bhavcopy.ingest_db(date=body.get("date") or None))
+
+
 @app.route("/api/chart/<symbol>")
 def api_chart(symbol):
     return jsonify(nse_quote.get_chart(symbol))
@@ -752,6 +784,18 @@ if __name__ == "__main__":
                     log.warning("sim pre-warm failed (%s)", fn.__name__, exc_info=True)
 
         threading.Thread(target=_warm_sim, daemon=True).start()
+
+        # Pre-warm the EOD bhavcopy cache (2 static archive files) so the last-
+        # resort price fallback + EOD status are instant, and off-hours pricing
+        # for any listed symbol works from the first request.
+        def _warm_eod():
+            try:
+                import bhavcopy
+                bhavcopy.latest()
+            except Exception:
+                log.warning("EOD bhavcopy pre-warm failed", exc_info=True)
+
+        threading.Thread(target=_warm_eod, daemon=True).start()
 
         # Show the phone-friendly URLs once (in the serving worker).
         ip = _lan_ip() if HOST == "0.0.0.0" else HOST

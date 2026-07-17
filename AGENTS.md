@@ -41,6 +41,7 @@ NSE/
 ├── app.py             # Flask server + JSON API endpoints (runs on port 5055)
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
 ├── nse_quote.py       # Per-stock quote/chart/depth (NextApi) + OHLCV candles (charting)
+├── bhavcopy.py        # EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
@@ -50,9 +51,10 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (9 strategies)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 410 unit tests across 23 suites (see below)
+├── test_*.py          # 456 unit tests across 24 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
+│   ├── test_bhavcopy.py                             # EOD UDiFF parsers + fetch walk-back + price/lot fallback
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
 │   ├── test_quote.py / test_quote_more.py / test_book.py   # nse_quote math + parsers + depth
 │   ├── test_ideas.py / test_ideas_journal.py / test_strategies.py / test_paper.py
@@ -387,9 +389,16 @@ with no creds the app is unchanged.
  Buy/Sell from the stock detail modal; 💼 Portfolio button shows holdings,
  live mark-to-market P&L, and order history. Fills are simulated at the latest
  price from `nse_client.get_price()`, which merges all live lists into a
- symbol->LTP map. **Options too:** `place_option_order()` fills CE/PE at the
- live premium (from the option chain) via a trade box in the ⛓ Options modal;
- option positions are tracked per-contract and re-priced live in the portfolio.
+ symbol->LTP map. **Options too (long AND short/writing):** `place_option_order()`
+ fills CE/PE at the live premium (from the option chain) via a trade box in the ⛓
+ Options modal; positions use SIGNED qty (long +, short −). `BUY` = buy-to-open long /
+ buy-to-cover short; `SELL` = sell-to-close long / **sell-to-open a written short**
+ (you do NOT need to hold a long). Long pays the premium (no margin, max loss =
+ premium); **short (written) RECEIVES the premium but POSTS margin**
+ (`OPT_SHORT_MARGIN_RATE=0.15` × underlying-spot notional) since the risk is
+ futures-like — covering frees margin proportionally + realizes P&L. `portfolio()`
+ marks written options as margin-based (`ltp*qty signed + margin`, so the received
+ premium isn't double-counted).
  **Options are sized in LOTS** — `place_option_order(...lots)` multiplies by the
  underlying's market lot (`nse_client.get_lot_size()`, from NSE's `fo_mktlots.csv`,
  215 names, cached a day); the trade box shows lot size + total units + est. cost,
@@ -398,10 +407,11 @@ with no creds the app is unchanged.
  LONG **and** SHORT with proper netting/flip-through-zero, realizes P&L + releases
  margin on close, and marks to market on the live near-month price. Traded from a
  "Paper trade FUTURES" box in the detail modal (shown only for F&O names).
- **Limitation:** only symbols currently in the hot lists
-  (~100-150) have a price, so only those are tradable. State persists to
-  `paper_state.json` (gitignored). This is broker-agnostic by design: swapping
-  in a real broker feed later only changes the price/fill source.
+ **Pricing:** hot-list LTP → per-stock NextApi quote → **EOD bhavcopy close**
+  (`bhavcopy.py`), so ANY listed symbol is tradable (live during hours, last close
+  otherwise). State persists to `paper_state.json` (gitignored). This is
+  broker-agnostic by design: swapping in a real broker feed later only changes the
+  price/fill source.
 - **Futures tab** (`get_futures()`) — most-active stock futures with **basis**
   (futures price - spot = premium/discount), basis %, annualized carry (by days
   to expiry), OI, and long/short buildup. OI change is cross-referenced from the
@@ -445,11 +455,35 @@ with no creds the app is unchanged.
   broker feed too, and extend the Live tab to index/F&O instruments (currently NSE
   cash equities only).
 - Phone/LAN access + optional deploy.
-- Consider `jugaad-data` / `nsefeed` as a more robust fallback for the flaky
-  bits (quotes, historical). See README/analysis for the API landscape.
+- ✅ *(done — see below)* `jugaad-data`/`nsefeed`-style fallback for the flaky bits:
+  implemented natively as `bhavcopy.py` (EOD UDiFF ingest), no third-party dep.
+  Still open: point the intraday **scanner** at the full EOD universe; parse FO
+  options (STO/IDO) for resilient EOD max-pain/PCR.
 
 ## Done recently
 
+- **✍️ Paper option writing / short-selling (`paper.py`)** — options only did
+  buy-to-open / sell-to-**close** (a user hit "Cannot sell… you hold 0 lots"). Now
+  `place_option_order` uses signed qty like futures: `SELL` opens a **written short**
+  (no long needed) that RECEIVES the premium and POSTS margin
+  (`OPT_SHORT_MARGIN_RATE=0.15` × underlying-spot notional); `BUY` covers it (frees
+  margin, realizes P&L). `portfolio()` marks written options margin-based
+  (`ltp*qty + margin`, no premium double-count). UI shows SHORT/LONG + margin and a
+  **Sell / Write** button. Tests +5 −1 (suite **452 → 456**). Paper money only.
+- **🗄 Data resilience + broaden universe (`bhavcopy.py`)** — the live NSE JSON is
+  anti-bot/flaky and only ~100-150 hot-list names had a price. NSE also ships the
+  daily **UDiFF Common Bhavcopy** as STATIC ZIP/CSV on `nsearchives.nseindia.com`
+  (no anti-bot gate). New `bhavcopy.py` parses the CM (cash, ~3100 equities) + FO
+  (derivatives, ~215 futures + lot sizes) files — pure `parse_cm`/`parse_fo`
+  (`TradDt` already `YYYY-MM-DD`), best-effort `_download` (404 → skip; one
+  force-session retry) with weekend/holiday **walk-back** and a 30-min lock-guarded
+  `latest()` cache. Wired as the **last-resort price** in `nse_client.get_price()`
+  (hot-list → NextApi live → **EOD close**, so ANY listed symbol is priceable off-
+  hours + when the live API is down) and a **lot-size fallback** in `get_lot_sizes()`.
+  `db.eod_bars_put_bulk` + `ingest_db()` bulk-load the whole market into
+  `eod_bars`/`eod_oi`, widening the daily-backtest universe. `/api/eod/status|price|
+  quote|refresh` + startup pre-warm; Sim-tab **⬇ Load EOD (whole market)** button +
+  freshness pill. Dependency-free. Tests +42, module **99 %** (suite **410 → 452**).
 - **🛡 Walk-forward robustness overlay on strategy-of-the-day** — the regime
   leaderboard / strategy-of-the-day used to pick the best **in-sample** edge (curve-fit
   risk). It now **prefers a walk-forward-robust** strategy and **skips ones flagged
