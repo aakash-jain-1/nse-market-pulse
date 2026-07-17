@@ -151,6 +151,42 @@ def test_kind_defaults_to_bulk_for_garbage():
     assert D._kind("BLOCK") == "block"
 
 
+# ---------------------------------------------------------------------------
+# WAF-block behaviour (inherits nse_client's shared cooldown)
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _reset_block():
+    import nse_client as nse
+    saved = nse._blocked_until
+    nse._blocked_until = 0.0
+    try:
+        yield nse
+    finally:
+        nse._blocked_until = saved
+
+
+def test_latest_keeps_old_deals_during_block():
+    """A WAF block (download → None while blocked) must NOT clobber good data with an
+    empty list, and must NOT advance ts (so we refetch once the cooldown clears)."""
+    old = [{"symbol": "ACME", "side": "BUY", "qty": 100.0, "price": 10.0,
+            "date": "16-Jul-2026", "name": None, "client": None, "remarks": None}]
+    with _reset_block() as nse, _reset_cache(), \
+            _patch(bhavcopy, "_download", lambda url: None):
+        D._cache["bulk"].update(ts=123.0, deals=list(old), date="16-Jul-2026")
+        nse.note_block("test")
+        c = D.latest("bulk", force=True)
+        assert c["deals"] == old               # kept, not emptied
+        assert c["date"] == "16-Jul-2026"
+        assert c["ts"] == 123.0                 # not advanced → retried after cooldown
+
+
+def test_status_reports_blocked_for():
+    with _reset_block() as nse, _reset_cache():
+        assert D.status()["blockedForSec"] == 0.0
+        nse.note_block("test")
+        assert D.status()["blockedForSec"] > 0
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

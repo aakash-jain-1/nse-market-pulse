@@ -97,12 +97,18 @@ def latest(kind="bulk", force=False):
     the shared per-kind cache dict; treat it as READ-ONLY. An empty list is a valid
     cached result (e.g. no block deals that day), so validity is time-based."""
     import bhavcopy
+    import nse_client as nse
     kind = _kind(kind)
     c = _cache[kind]
     with _lock:
         if not force and c["ts"] and (time.time() - c["ts"]) < _TTL:
             return c
         raw = bhavcopy._download(_URLS[kind])
+        if raw is None and nse.blocked_for():
+            # WAF block, not a genuinely empty session — keep whatever we had and
+            # DON'T advance ts, so we retry once the cooldown clears (instead of
+            # pinning an empty list for the full 30-min TTL).
+            return c
         deals = parse_deals(raw.decode("utf-8", "replace")) if raw else []
         c.update(ts=time.time(), deals=deals, date=(deals[0]["date"] if deals else None))
         return c
@@ -145,4 +151,6 @@ def status(refresh=False):
                   "cached": bool(c.get("ts"))}
     out["ttlSec"] = _TTL
     out["source"] = "nsearchives bulk/block deals CSV"
+    import nse_client as nse
+    out["blockedForSec"] = nse.blocked_for()   # >0 while NSE's WAF is blocking us
     return out

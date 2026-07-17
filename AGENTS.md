@@ -44,6 +44,7 @@ NSE/
 ├── bhavcopy.py        # EOD UDiFF bhavcopy ingest (static archive) + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill(days)
 ├── deals.py           # Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status
 ├── eod_scanner.py     # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure
+├── eod_conviction.py  # EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals agreeing; save→ideas / digest→notify
 ├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
@@ -54,12 +55,13 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 555 unit tests across 27 suites (see below)
+├── test_*.py          # 595 unit tests across 28 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
-│   ├── test_bhavcopy.py                             # EOD UDiFF + sec_bhavdata_full delivery parsers + walk-back + backfill + delivery-merge
-│   ├── test_deals.py                                # bulk/block deal parse (incl. NO-RECORDS) + cached fetch/recent/by_symbol/status
+│   ├── test_bhavcopy.py                             # EOD UDiFF + sec_bhavdata_full delivery parsers + walk-back + backfill (pacing/abort-on-block) + delivery-merge
+│   ├── test_deals.py                                # bulk/block deal parse (incl. NO-RECORDS) + cached fetch/recent/by_symbol/status + keep-cache-during-block
 │   ├── test_eod_scanner.py                          # full-market swing scanner: features/tags/score/views/scan/status + delivery view + deals xref
+│   ├── test_eod_conviction.py                       # conviction board: OI-state quadrants / pillars / 2R plan / stacked ranking / save-skip
 │   ├── test_eod_options.py                          # resilient EOD option chain: parse/assemble/chain/summary/analytics
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
 │   ├── test_quote.py / test_quote_more.py / test_book.py   # nse_quote math + parsers + depth
@@ -367,6 +369,15 @@ with no creds the app is unchanged.
   (funds/HNIs/promoters, legally disclosed) from NSE's nsearchives CSVs, parsed +
   cached 30 min. `/api/eod/deals?kind=bulk|block&limit=` (+ `?status=1`). Used to
   flag scanner rows a big player just traded (🐋 badge + score bonus).
+- **🏆 Conviction board (`eod_conviction.py`)** — the synthesis: fuses the independent
+  EOD signals (breakout of the N-day high, delivery% accumulation, bulk/block-deal
+  footprint, F&O OI buildup, volume, trend) into ONE ranked "tomorrow's watchlist" via
+  **confirmation stacking** — ranked by how many independent signals AGREE, then the
+  blended score, so a 4-way-confirmed name beats a lone strong signal. Each pick gets
+  a volatility-scaled 2R plan. **Save** persists the board to the Ideas history (dated
+  to the EOD session, never clobbers a live idea); **Send digest** pushes the top picks
+  off-screen via `notify.send_digest()`. 🏆 Conviction tab; `/api/eod/conviction[/save|
+  /digest]`. Off-hours.
 - **Demand Score** — composite ranking combining volume-gainers (volume
   multiple), most-active-by-value (money flow rank), and top-gainers (% gain).
   See `get_demand_score()`.
@@ -494,11 +505,40 @@ with no creds the app is unchanged.
   leaderboards / `strategy_of_day` / walk-forward are statistically trustworthy.
 - ✅ *(done — see below)* delivery% + bulk/block deals market-wide — `sec_bhavdata_full`
   merged into `eod_bars` (re-activates the delivery strategy) + `deals.py` institutional
-  footprint feed + an Accumulation scanner view. Still open: a futures rollover tracker;
-  a scheduled/auto EOD backfill.
+  footprint feed + an Accumulation scanner view.
+- ✅ *(done — see below)* EOD conviction board (`eod_conviction.py`) — fuses breakout +
+  delivery + deals + OI buildup into one confirmation-stacked "tomorrow's watchlist";
+  save→Ideas history + off-screen digest. Still open: a futures rollover tracker; a
+  scheduled/auto EOD backfill + auto-digest after close.
 
 ## Done recently
 
+- **🛡️ Akamai/WAF block backoff + gentle backfill pacing** — the user hit
+  **"Access Denied … edgesuite.net"** in Chrome: NSE's edge had temporarily blocked
+  their IP, caused by our own bursty automated traffic (repeated full-history
+  backfills + live polling), and made *self-perpetuating* by a failure path that
+  rebuilt the session (2 extra homepage GETs) on every 403. Added a **shared 10-min
+  cooldown** in `nse_client` (`blocked_for`/`note_block`/`is_blocked_response`): the
+  first 403 pauses ALL NSE traffic — `_fetch` serves stale cache / fails fast (no
+  rebuild), `get_session` reuses the stale session, `bhavcopy._download` returns None
+  without retrying, and **every per-stock call in `nse_quote` (via a new block-aware
+  `_sget()`)** does the same (the user's log showed `/api/quote/…` still 403-ing — that
+  gap is now closed). `backfill(pace=0.5)` now spaces days with a jittered pause and
+  **aborts early** if the WAF fires mid-run; `deals` keeps prior data during a block
+  instead of caching an empty list. Can't un-block an IP (time/new network does) but
+  stops us re-earning it. Tests **+17** (suite **578 → 595**); lint clean.
+- **🏆 EOD conviction board (`eod_conviction.py`)** — the synthesis of all the EOD work:
+  fuses the independent market-wide signals (breakout of the N-day high, delivery%
+  accumulation, bulk/block-deal footprint, F&O OI buildup, volume, trend) into ONE
+  ranked "tomorrow's watchlist" via **confirmation stacking** (ranked by how many
+  independent signals agree, then blended conviction). Pure pillar logic + OI-quadrant
+  classification (`_oi_state`) + a volatility-scaled 2R plan. **Save** persists the
+  board to the Ideas history (dated to the EOD session, never clobbers a live idea);
+  **Send digest** pushes the top picks off-screen via `notify.send_digest()`. New 🏆
+  Conviction tab (min-signals selector, filters, card layout with confirmation badges +
+  stacked reasons + plan). `/api/eod/conviction[/save|/digest]`. Verified e2e on ~3,300
+  real names (HIRECT = breakout + 26.9× vol + 🐋 bulk deal; save persisted 24 picks;
+  digest formatted cleanly). Tests **+23** (suite **555 → 578**); lint + JS clean.
 - **🚚 Delivery% + bulk/block deals market-wide (`bhavcopy` delivery merge + `deals.py`)**
   — the full-universe EOD backtest had found the **Delivery% strategy going quiet (0
   trades)**: the UDiFF CM bhavcopy we ingest **omits the delivery column**. NSE ships

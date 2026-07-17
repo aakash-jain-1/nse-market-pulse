@@ -38,6 +38,7 @@ rather than taking on an unmaintained third-party dep.
 import csv
 import io
 import logging
+import random
 import threading
 import time
 import zipfile
@@ -340,9 +341,14 @@ def parse_sec_delivery(text, series=EQUITY_SERIES):
 def _download(url):
     """Fetch archive bytes, or None on any failure (missing day/holiday/network).
 
-    A 404 (holiday / not published yet) returns None immediately. Any other error
-    is retried once with a rebuilt NSE session (covers a dead cookie jar)."""
+    A 404 (holiday / not published yet) returns None immediately. A 403 is NSE's
+    Akamai WAF blocking our IP — we record it (shared cooldown in nse_client) and
+    return None WITHOUT retrying, since a rebuild/retry only deepens the block. Any
+    other error is retried once with a rebuilt session (covers a dead cookie jar).
+    Short-circuits to None while a block cooldown is active."""
     import nse_client as nse
+    if nse.blocked_for():
+        return None
     hdr = {"Referer": nse.BASE + "/", "Accept": "*/*",
            "User-Agent": nse.HEADERS["User-Agent"]}
     for force in (False, True):
@@ -350,10 +356,13 @@ def _download(url):
             r = nse.get_session(force=force).get(url, headers=hdr, timeout=30)
             if r.status_code == 404:
                 return None
+            if nse.is_blocked_response(r):
+                nse.note_block("archive")
+                return None                 # don't retry into an active WAF block
             r.raise_for_status()
             return r.content
         except Exception:
-            if force:
+            if force or nse.blocked_for():
                 log.warning("bhavcopy download failed: %s", url, exc_info=True)
                 return None
     return None
@@ -555,14 +564,17 @@ def ingest_db(date=None):
             "deliv": deliv, "equities": len(cm), "futures": len(fo.get("futures") or {})}
 
 
-def backfill(days=20, progress=None):
+def backfill(days=20, progress=None, pace=0.5):
     """Ingest the last `days` trading sessions' bhavcopies into eod_bars/eod_oi so
     the EOD scanner + daily backtest have market-wide HISTORY (not just today's
     single day). Idempotent — re-ingesting a day just REPLACEs the same rows.
 
-    Each day is one CM + one FO archive fetch (~1-2s), so this is slow (~1s/day);
+    Each day is one CM + one FO (+ delivery) archive fetch (~1-2s), so this is slow;
     call it from a background thread. Serialized by a lock so two callers can't
-    hammer the archive at once. Returns a summary of what landed.
+    hammer the archive at once. Between days we wait `pace` seconds + jitter to stay
+    gentle on NSE's edge (a burst of dozens of fetches is what trips the Akamai WAF).
+    If a WAF block is detected mid-run we STOP early (`blocked` in the result) rather
+    than pouring the rest of the requests into an active block. Returns a summary.
     """
     days = max(1, min(int(days), 250))
     got = {"asked": days, "days": 0, "bars": 0, "oi": 0, "deliv": 0,
@@ -570,14 +582,21 @@ def backfill(days=20, progress=None):
     if not _backfill_lock.acquire(blocking=False):
         got["busy"] = True
         return got
+    import nse_client as nse
     try:
         seen = set()
         for d in _recent_trading_days(n=days):
+            if nse.blocked_for():                 # WAF block from a prior day → stop
+                got["blocked"] = True
+                break
             res = ingest_db(date=d)
             cm_date = res.get("cmDate")
             # A holiday walks back to the prior session, which we may already have
             # ingested this pass — count each distinct published day once.
             if not cm_date or cm_date in seen or not res.get("bars"):
+                if nse.blocked_for():             # empty because we just got blocked
+                    got["blocked"] = True
+                    break
                 continue
             seen.add(cm_date)
             got["days"] += 1
@@ -591,6 +610,8 @@ def backfill(days=20, progress=None):
                     progress(dict(got))
                 except Exception:
                     pass
+            if pace:                              # gentle, jittered spacing per day
+                time.sleep(pace + random.uniform(0, pace))
         got["dates"].sort()
         return got
     finally:

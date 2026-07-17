@@ -439,9 +439,10 @@ def test_fetch_skips_corrupt_zip():
 # _download transport (404 vs error vs session-rebuild retry)
 # ---------------------------------------------------------------------------
 class _Resp:
-    def __init__(self, status=200, content=b"zip"):
+    def __init__(self, status=200, content=b"zip", text=""):
         self.status_code = status
         self.content = content
+        self.text = text
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -449,11 +450,22 @@ class _Resp:
 
 
 def _fake_nse(get_impl):
-    """A stand-in nse_client module exposing BASE/HEADERS + a get_session()."""
+    """A stand-in nse_client module exposing BASE/HEADERS + a get_session() and the
+    WAF-block API `_download` now depends on (blocked_for / note_block /
+    is_blocked_response). The block tracker is real so tests can assert on it."""
+    import time as _t
     import types
+    import nse_client as _real
     m = types.SimpleNamespace()
     m.BASE = "https://www.nseindia.com"
     m.HEADERS = {"User-Agent": "UA"}
+    m._until = 0.0
+    m.blocked_for = lambda: max(0.0, m._until - _t.time())
+
+    def _note(source="nse"):
+        m._until = _t.time() + 600
+    m.note_block = _note
+    m.is_blocked_response = _real.is_blocked_response
 
     class _S:
         def get(self, url, **kw):
@@ -496,6 +508,37 @@ def test_download_retries_then_none_on_error():
     with _patch_nse_module(_fake_nse(boom)):
         assert b._download("http://x") is None
     assert calls["n"] == 2      # first attempt + one force-session retry
+
+
+def test_download_403_marks_block_and_does_not_retry():
+    """An Akamai 403 records the block and returns None WITHOUT a force retry (a
+    rebuild would fire two more GETs straight into the block)."""
+    calls = {"n": 0}
+
+    def waf(url, **k):
+        calls["n"] += 1
+        return _Resp(403, b"", text="Access Denied edgesuite.net")
+
+    fake = _fake_nse(waf)
+    with _patch_nse_module(fake):
+        assert b._download("http://x") is None
+        assert calls["n"] == 1               # no retry into the block
+        assert fake.blocked_for() > 0         # cooldown recorded
+
+
+def test_download_short_circuits_while_blocked():
+    """Once blocked, _download must not touch the network at all."""
+    calls = {"n": 0}
+
+    def any_get(url, **k):
+        calls["n"] += 1
+        return _Resp(200, b"OK")
+
+    fake = _fake_nse(any_get)
+    fake.note_block("test")                   # pretend we're already blocked
+    with _patch_nse_module(fake):
+        assert b._download("http://x") is None
+    assert calls["n"] == 0                     # never hit NSE
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +713,7 @@ def test_backfill_counts_distinct_days_and_progress():
     it = iter(results)
     progress = []
     with _patch(b, "ingest_db", lambda date=None: next(it)):
-        got = b.backfill(days=5, progress=lambda g: progress.append(g["days"]))
+        got = b.backfill(days=5, pace=0, progress=lambda g: progress.append(g["days"]))
     assert got["days"] == 3                          # distinct published sessions
     assert got["bars"] == 2400 * 3 and got["oi"] == 600
     assert got["deliv"] == 2300 * 3                  # summed over counted days (dup skipped)
@@ -702,6 +745,60 @@ def test_backfill_busy_returns_without_running():
     finally:
         b._backfill_lock.release()
     assert got.get("busy") is True and got["days"] == 0
+
+
+@contextlib.contextmanager
+def _reset_nse_block():
+    import nse_client as nse
+    saved = nse._blocked_until
+    nse._blocked_until = 0.0
+    try:
+        yield nse
+    finally:
+        nse._blocked_until = saved
+
+
+def test_backfill_stops_early_on_block():
+    """If NSE starts blocking us mid-run, backfill aborts (flag `blocked`) instead
+    of pouring the remaining days' requests into an active block."""
+    seen = {"n": 0}
+
+    with _reset_nse_block() as nse:
+        def fake_ingest(date=None):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return {"cmDate": "2026-07-15", "bars": 10, "oi": 5,
+                        "deliv": 3, "equities": 100}
+            nse.note_block("test")            # day 2: the WAF starts blocking
+            return {"cmDate": None, "bars": 0}
+
+        with _patch(b, "ingest_db", fake_ingest):
+            got = b.backfill(days=5, pace=0)
+
+    assert got.get("blocked") is True
+    assert got["days"] == 1                    # only the first day landed
+    assert seen["n"] == 2                       # stopped right after the block
+
+
+def test_backfill_paces_between_days():
+    """A gentle jittered pause runs once per landed day (bursts are what trip the
+    WAF); the pause is in [pace, 2*pace)."""
+    slept = []
+
+    def fake_ingest(date=None):
+        i = len(slept) + fake_ingest.calls
+        fake_ingest.calls += 1
+        return {"cmDate": "2026-07-%02d" % (10 + fake_ingest.calls),
+                "bars": 1, "oi": 0, "deliv": 0, "equities": 1}
+    fake_ingest.calls = 0
+
+    with _reset_nse_block(), _patch(b, "ingest_db", fake_ingest), \
+            _patch(b.time, "sleep", slept.append):
+        got = b.backfill(days=3, pace=0.5)
+
+    assert got["days"] == 3
+    assert len(slept) == 3                      # one gentle pause per landed day
+    assert all(0.5 <= s < 1.0 for s in slept)   # pace + jitter in [0.5, 1.0)
 
 
 # ---------------------------------------------------------------------------

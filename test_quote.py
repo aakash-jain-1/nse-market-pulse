@@ -31,11 +31,14 @@ def _patch(obj, name, value):
 
 
 class _Resp:
-    def __init__(self, payload):
+    def __init__(self, payload, status=200, text=""):
         self._p = payload
+        self.status_code = status
+        self.text = text
 
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            raise RuntimeError("http %d" % self.status_code)
 
     def json(self):
         return self._p
@@ -47,6 +50,17 @@ class _Session:
 
     def get(self, *a, **k):
         return _Resp(self._p)
+
+
+@contextlib.contextmanager
+def _reset_block():
+    """Clear + restore nse_client's shared WAF-block cooldown around a test."""
+    saved = nse._blocked_until
+    nse._blocked_until = 0.0
+    try:
+        yield
+    finally:
+        nse._blocked_until = saved
 
 
 @contextlib.contextmanager
@@ -249,6 +263,76 @@ def test_baked_epoch_roundtrip():
     naive = dt.datetime(2026, 7, 15, 9, 15, 0)
     ms = q._baked_epoch(naive) * 1000
     assert intrabar.candle_dt(ms) == naive
+
+
+# ---------------------------------------------------------------------------
+# WAF-block backoff (shared cooldown from nse_client)
+# ---------------------------------------------------------------------------
+def test_sget_short_circuits_when_blocked():
+    def boom(*a, **k):
+        raise AssertionError("must not hit NSE while blocked")
+
+    with _reset_block(), _patch(nse, "get_session", boom):
+        nse.note_block("test")
+        raised = False
+        try:
+            q._sget("https://x/api")
+        except RuntimeError:
+            raised = True
+        assert raised
+
+
+def test_sget_marks_block_on_403():
+    calls = {"n": 0}
+
+    class _S:
+        def get(self, *a, **k):
+            calls["n"] += 1
+            return _Resp({}, status=403, text="Access Denied edgesuite.net")
+
+    with _reset_block(), _patch(nse, "get_session", lambda *a, **k: _S()):
+        raised = False
+        try:
+            q._sget("https://x/api")
+        except RuntimeError:
+            raised = True
+        assert raised
+        assert calls["n"] == 1                 # one hit, then recorded
+        assert nse.blocked_for() > 0
+
+
+def test_call_does_not_retry_into_a_block():
+    """A 403 on the first NextApi GET records the block; _call must NOT do its
+    force-rebuild retry (that would fire warm-up + call straight into the block)."""
+    calls = {"n": 0}
+
+    class _S:
+        def get(self, *a, **k):
+            calls["n"] += 1
+            return _Resp({}, status=403, text="Access Denied")
+
+    with _reset_block(), _clean_cache(), \
+            _patch(q, "_warm", lambda s: None), \
+            _patch(nse, "get_session", lambda *a, **k: _S()):
+        raised = False
+        try:
+            q._call("getSymbolData&symbol=ACME", "ACME")
+        except Exception:
+            raised = True
+        assert raised
+        assert calls["n"] == 1                  # NO retry into the block
+        assert nse.blocked_for() > 0
+
+
+def test_warm_skipped_during_block():
+    def boom(*a, **k):
+        raise AssertionError("warm must not hit NSE while blocked")
+
+    with _reset_block(), _patch(nse, "get_session", boom):
+        q._warmed.discard("ACME")
+        nse.note_block("test")
+        q._warm("ACME")                         # returns immediately, no GET
+        assert "ACME" not in q._warmed
 
 
 def _main():

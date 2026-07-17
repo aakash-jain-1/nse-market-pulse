@@ -83,6 +83,7 @@ nse_quote.py         Per-stock quote/chart/DEPTH (NextApi) + OHLCV (charting) + 
 bhavcopy.py          EOD UDiFF bhavcopy ingest (static archive) + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill(days)
 deals.py             Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status, off-hours
 eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure math
+eod_conviction.py    EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals that agree; save→ideas / digest→notify
 eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours
 angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
@@ -99,7 +100,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 555 across 27 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/deals/eodscanner/eodoptions/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 595 across 28 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -112,11 +113,28 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   (M3). `HTTPAdapter(pool_connections=16, pool_maxsize=32)` avoids pool-full warns.
   **`_fetch()`** has a path-keyed **15s TTL micro-cache** (shared read-only object;
   callers must not mutate) that cut duplicate hot-list GETs ~72%/cycle.
+- **Akamai/WAF block backoff (`nse_client.blocked_for`/`note_block`/`is_blocked_response`)**:
+  NSE fronts everything with Akamai, which returns **HTTP 403 "Access Denied"
+  (edgesuite.net, "Reference #…")** to EVERY request once our IP looks bot-like.
+  Retrying — *especially* rebuilding the session, which itself GETs the homepage +
+  market page — pours more requests into the block and lengthens it. So the **first
+  403 starts a 10-min cooldown** (`_BLOCK_COOLDOWN=600`) during which ALL NSE traffic
+  short-circuits: `_fetch()` serves stale cache or fails fast (no NSE hit, no rebuild),
+  `get_session()` reuses the stale session instead of warming up, `bhavcopy._download`
+  returns `None` without retrying, and every per-stock call in `nse_quote` (via `_sget`)
+  does the same. This is a **shared** cooldown — a block seen by the live API, the static
+  archives, *or* the per-stock NextApi gateway pauses all of them. It can't un-block us (only time / a
+  new IP does), but it stops us **re-earning or extending** the block. **Cause of a
+  block:** bursty automated fetches — mainly repeated full-history **backfills** — plus
+  live polling on the same IP.
 - **NextApi gateway (`nse_quote.py`)**: the old `/api/quote-equity` is 403 and
   `/api/chart-databyindex` is empty. The site's `/api/NextApi/apiClient/GetQuoteApi`
   (with a stock-specific Referer) unlocks per-stock quotes, **5-level depth**
   (`getSymbolData` → `orderBook`), and real intraday points. `_cache` is capped
-  (`_CACHE_MAX=2000`).
+  (`_CACHE_MAX=2000`). **All** NSE GETs here funnel through **`_sget()`**, which
+  honours the shared WAF cooldown (§ Akamai block backoff) — during a block it
+  short-circuits without hitting NSE and never does its force-rebuild retry; a 403
+  records the block. Warm-up visits (`_warm`/`_oc_warm`/`_deriv_warm`) skip while blocked.
 - **EOD bhavcopy (`bhavcopy.py`)**: NSE's live JSON is anti-bot/flaky and only
   the ~100-150 hot-list names have a price. NSE ALSO publishes the daily "UDiFF"
   **Common Bhavcopy** as STATIC ZIP/CSV on `nsearchives.nseindia.com` (no anti-bot
@@ -127,8 +145,11 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   in `nse_client.get_price()` (→ any listed symbol is priceable, off-hours + when
   the live API is down) and a **lot-size fallback** in `get_lot_sizes()`.
   `ingest_db()` bulk-loads CM bars + FO OI into `eod_bars`/`eod_oi` to widen the
-  daily-backtest universe to the whole market. Dependency-free (reimplements the
-  slice of `jugaad-data` we need). The UDiFF CM file **omits delivery%**, so
+  daily-backtest universe to the whole market. **`backfill(days, pace=0.5)`** loops
+  sessions with a **jittered pause per day** (`[pace, 2*pace)`) so a big history load
+  doesn't burst the archive (the #1 way to trip the WAF), and **aborts early** with a
+  `blocked` flag if `nse_client.blocked_for()` fires mid-run. Dependency-free
+  (reimplements the slice of `jugaad-data` we need). The UDiFF CM file **omits delivery%**, so
   `ingest_db()` also pulls the **`sec_bhavdata_full`** plain CSV (`parse_sec_delivery`/
   `fetch_sec_delivery`) and merges per-symbol `delivPct`/`delivQty` **for the same
   session only** (never stamps a walked-back day's delivery onto today) — re-activating
@@ -140,6 +161,18 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   `bhavcopy._download` + a 30-min lock-guarded cache. `by_symbol()` powers a cheap
   scanner cross-reference (🐋 badge + score bonus when `with_deals=1`); `recent()`/
   `status()` back `/api/eod/deals`. Off-hours friendly.
+- **Conviction board (`eod_conviction.py`)**: FUSES the independent EOD signals —
+  breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint,
+  F&O OI buildup, volume, trend — into ONE ranked "tomorrow's watchlist". The core
+  idea is **confirmation stacking**: a pick is ranked by how many INDEPENDENT
+  pillars agree first, then the blended score, so a 4-way-confirmed name beats a
+  single strong signal. Pillar logic (`_pillars_long`/`_short`), OI classification
+  (`_oi_state`: price×OI → long/short buildup / covering / unwinding) and the
+  volatility-scaled 2R plan (`_plan`) are pure + tested. `board()` reuses
+  `eod_scanner._features` + `db.eod_bars_all`/`eod_oi_all` + `deals.by_symbol`.
+  `save()` writes picks into the `ideas` table (dated to the EOD session, reasons
+  prefixed "🏆 EOD conviction") WITHOUT clobbering a live idea. `notify.send_digest()`
+  pushes the top picks off-screen. `/api/eod/conviction[/save|/digest]`; 🏆 Conviction tab.
 - **Data flow**: `nse_client`/`nse_quote` normalize NSE fields into stable keys
   (`symbol`, `ltp`, `pChange`, `volume`, ...). `app.py` (JSON API) + `nse_demand.py`
   (CLI) consume them; the frontend polls `/api/<view>` and renders client-side.
@@ -172,11 +205,14 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   `/api/eod/price/<sym>`, `/api/eod/quote/<sym>`, `/api/eod/refresh` (POST → ingest
   the whole market into the EOD cache), **`/api/eod/scan?view=&limit=&minPrice=&
   minValueCr=&fno=1&deals=1`** (full-market swing scanner; `view=delivery` for
-  accumulation, `deals=1` cross-references bulk/block deals), **`/api/eod/deals?kind=
-  bulk|block&limit=`** (+ `?status=1` for freshness), **`/api/eod/backfill`** (POST
-  {days} starts a background history load — now also merges delivery%; GET polls),
-  **`/api/eod/optionchain/<sym>[?expiry]`** + **`/summary`** (resilient EOD option
-  chain from the FO bhavcopy — PCR/max-pain/OI walls, off-hours).
+  accumulation, `deals=1` cross-references bulk/block deals),   **`/api/eod/deals?kind=
+  bulk|block&limit=`** (+ `?status=1` for freshness), **`/api/eod/conviction?limit=&
+  minPrice=&minValueCr=&minPillars=&fno=1&deals=0`** (stacked-conviction board) +
+  **`/conviction/save`** (POST → persist to Ideas) + **`/conviction/digest`** (POST →
+  off-screen digest), **`/api/eod/backfill`** (POST {days} starts a background
+  history load — now also merges delivery%; GET polls), **`/api/eod/optionchain/
+  <sym>[?expiry]`** + **`/summary`** (resilient EOD option chain from the FO bhavcopy
+  — PCR/max-pain/OI walls, off-hours).
 - Live: `/api/live/config`, `/api/live/watch` (POST), `/api/live/seed/<sym>`, SSE stream.
 - Alerts: **`/api/alerts/status`** (no secrets), **`/api/alerts/test`** (POST).
 - Sim/research: `/api/sim/summary|daily|leaderboard|performance|analytics|regime`,
@@ -207,7 +243,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **555 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **595 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -217,7 +253,9 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   `test_strategies.py`, `test_bhavcopy.py` (EOD UDiFF + sec_bhavdata_full delivery
   parsers + fetch walk-back + price/lot fallback + delivery-merge wiring),
   `test_deals.py` (bulk/block parse incl. NO-RECORDS + cached fetch),
-  `test_eod_scanner.py` (incl. delivery view + deals xref), `test_app.py`
+  `test_eod_scanner.py` (incl. delivery view + deals xref),
+  `test_eod_conviction.py` (OI-state quadrants / pillars / 2R plan / stacked board /
+  save-skip), `test_app.py`
   (middleware) + `test_app_routes.py` (every endpoint via the Flask test client),
   `test_db.py`, `test_logger.py`, `test_feeds.py`, `test_book.py`, `test_notify.py`.
 - Coverage: `python -m coverage run -m pytest && coverage report -m --omit="test_*.py"`
@@ -294,6 +332,13 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   with a "+Npp vs avg" spike hint. `deals.py` fetches NSE **bulk/block deals** (the
   institutional footprint) and the scanner cross-references them (`?deals=1`) to flag
   🐋 rows a big player traded (+ score bonus). `/api/eod/deals`.
+- ✅ **EOD conviction board (`eod_conviction.py`)** — fuses the independent EOD signals
+  (breakout / delivery accumulation / bulk-block deal / OI buildup / volume / trend)
+  into ONE ranked "tomorrow's watchlist" via **confirmation stacking** (ranked by
+  #signals that agree, then blended score). Each pick carries a volatility-scaled 2R
+  plan. **Save→Ideas history** (durable watchlist, never clobbers a live idea) and an
+  **off-screen digest** via `notify.send_digest()`. 🏆 Conviction tab. Verified e2e on
+  ~3,300 real names (HIRECT = breakout + 26.9× vol + 🐋 bulk deal, etc.).
 - ✅ **Full-universe EOD backtest (`backtest_daily.py source="eod"`)** — runs the 9
   EOD-computable strategies over the WHOLE ingested bhavcopy universe read straight
   from SQLite (`db.eod_bars`/`db.eod_oi`) instead of a curated ~40–260-name NSE pull.
@@ -329,6 +374,73 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Akamai/WAF block backoff + gentle backfill pacing (suite 578 → 595)
+- **Why:** the user hit **"Access Denied … edgesuite.net Reference #…"** in Chrome —
+  NSE's Akamai edge had temporarily **blocked their IP**. Root cause was our own
+  bursty automated traffic: repeated full-history **backfills** (dozens of archive
+  fetches back-to-back) + live polling on the same IP. Worse, our failure path made
+  it *self-perpetuating* — every `_fetch` 403 triggered a `get_session(force=True)`
+  **rebuild**, which itself GETs the homepage + market page, i.e. **3 more requests
+  into an active block** per call, several times a minute.
+- **How:** a **shared cooldown** in `nse_client` (`blocked_for()`/`note_block()`/
+  `is_blocked_response()`, `_BLOCK_COOLDOWN=600s`). The first 403 (or a WAF body
+  marker) starts it; while active, `_fetch()` serves stale cache or fails fast **without
+  hitting NSE or rebuilding**, and `get_session()` reuses the stale session instead of
+  warming up. `bhavcopy._download` honours + reports the same cooldown (no retry into a
+  block). `backfill(pace=0.5)` now **spaces days with a jittered pause** and **aborts
+  early** (`blocked` flag) if the WAF fires mid-run. `deals.latest` no longer caches an
+  *empty* result during a block (keeps prior data, doesn't advance TTL); `deals.status`
+  surfaces `blockedForSec`. The snapshot logger's forced-rebuild self-heal is
+  automatically neutered by the `get_session` guard.
+- **Follow-up (same session):** the user's log showed the per-stock path still 403-ing
+  (`/api/quote/AIIL`) — `nse_quote.py` wasn't covered. Routed **all** its NSE GETs
+  (quote/depth/chart/futures/expiries/option-chain) through a new block-aware **`_sget()`**
+  helper (short-circuit while blocked, `note_block` on a 403, no retry into a block) and
+  gated the warm-up visits. Now the live API, static archives AND per-stock gateway all
+  share one cooldown.
+- **Note:** this can't *un-block* an IP (only time / a new network does) — it stops us
+  **re-earning or extending** the block. Recovery for the user: switch network (mobile
+  hotspot), clear NSE cookies + Incognito, or just wait it out.
+- **Tests:** +17 (suite **578 → 595**, all green): `test_client.py` block helpers +
+  `_fetch`/`get_session` short-circuit (no rebuild into a block, serves stale);
+  `test_bhavcopy.py` 403-marks-block/no-retry, short-circuit-while-blocked, backfill
+  abort-on-block + per-day pacing; `test_deals.py` keep-cache-during-block + status
+  field; `test_quote.py` `_sget` short-circuit/mark-block, `_call` no-retry-into-block,
+  warm skipped while blocked. Lint clean.
+
+### 2026-07-17 — EOD conviction board — "tomorrow's watchlist" (`eod_conviction.py`, suite 555 → 578)
+- **Why:** we now compute lots of INDEPENDENT market-wide EOD signals (breakout,
+  delivery% accumulation, bulk/block deals, F&O OI buildup, volume, trend) but they
+  lived in separate views. A trader still had to eyeball several tabs to find the
+  names where evidence *agrees*. Agreement across independent signals is exactly what
+  raises the odds — so this fuses them into one ranked board.
+- **How:** `eod_conviction.board()` reuses `eod_scanner._features` over the whole
+  ingested universe (`db.eod_bars_all`), pairs it with the near-month OI series
+  (`db.eod_oi_all` → `_oi_state` classifies price×OI into long/short buildup /
+  covering / unwinding) and the latest bulk/block deals (`deals.by_symbol`). Per name
+  it fires independent LONG/SHORT **pillars** (`_pillars_long`/`_short`), picks the
+  stronger side, and ranks by **confirmations first, then blended conviction** —
+  confirmation stacking, so a 4-way-confirmed name beats a lone strong signal. Each
+  pick gets a volatility-scaled **2R plan** (`_plan`: stop ≈ 1.3× recent daily range,
+  floored 3% / capped 9%; 2:1 target).
+- **Persist + push:** `save()` writes picks into the `ideas` table dated to the EOD
+  session (reasons prefixed "🏆 EOD conviction"), and **skips any existing
+  (day,symbol,direction)** so it never clobbers a tracked live idea — they then show
+  up in the Ideas history as a durable watchlist. `notify.send_digest()` +
+  `_fmt_digest()` push the top longs/shorts off-screen (Telegram/webhook).
+- **API/UI:** `/api/eod/conviction` (+ `/save`, `/digest` POST); a new **🏆 Conviction**
+  tab with a min-signals selector, price/value/F&O filters, card layout (confirmation
+  badge + stacked reasons + plan), and Save / Send-digest buttons.
+- **Real e2e:** a 28-session backfill (88,171 bars, delivery on 100%, 6,036 OI rows)
+  → board scanned 3,288 names → 12 longs + 12 shorts; e.g. HIRECT (breakout + 26.9×
+  vol + 🐋 bulk deal), PRIMECAB/IPCALAB (breakout + delivery + volume). Save persisted
+  24 picks; digest formatted cleanly.
+- **Tests:** +23 (suite **555 → 578**, all green): OI-state quadrants, deal netting,
+  pillar firing (long/short), avg-range/2R plan (+ clamps), pick side-selection,
+  board ranking/filters/empty-note, save persist + skip-existing; notify `_fmt_digest`
+  (shape/escaping/empty) + `send_digest` (no-channel / supplied-board); conviction
+  route arg-parsing + save/digest routes. Lint + py_compile + JS syntax clean.
 
 ### 2026-07-17 — Delivery% + bulk/block deals market-wide (`bhavcopy` delivery merge + `deals.py`, suite 530 → 555)
 - **Why:** the previous full-universe EOD backtest found the **Delivery% strategy had

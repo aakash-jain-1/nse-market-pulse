@@ -127,7 +127,7 @@ def test_get_ohlc_token_not_found():
 # ---------------------------------------------------------------------------
 def test_get_option_expiries():
     with _patch(q, "_oc_warm", lambda s: None), \
-         _patch(q.nse, "get_session", lambda: _Session({"expiryDates": ["28-Jul-2026", "25-Aug-2026"]})):
+         _patch(q.nse, "get_session", lambda *a, **k: _Session({"expiryDates": ["28-Jul-2026", "25-Aug-2026"]})):
         exps = q.get_option_expiries("acc")
     assert exps == ["28-Jul-2026", "25-Aug-2026"]
 

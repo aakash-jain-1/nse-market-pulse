@@ -64,6 +64,7 @@ layers analytics on top:
 | 🎯 **F&O Sim** | The **same** forward-test as Sim, but a dedicated **parallel book that only trades F&O-eligible names** (ones you can actually take with futures/leverage). Same strategies, same live signals, same ₹2k/trade sizing — so you can compare F&O-only performance against the all-market book side by side. |
 | 🔎 **Scanner** | One ranked board combining volume spikes, money flow, momentum & OI buildup, with filters (direction, %chg, volume ×avg, value, OI signal, F&O-only). |
 | 🌐 **EOD Scan** | The **market-wide, off-hours** scanner: ranks the whole EOD bhavcopy universe (up to **~2400** cash names + F&O, not just the ~100–150 live hot lists) for swing setups — breakouts/breakdowns of the recent N-day high/low, gaps, unusual volume, trend vs 20/50-day MAs, NR7 squeezes, and **high delivery% accumulation** (real buying vs intraday churn, with a "+Npp vs avg" spike hint). A **🐋 deals** toggle cross-references the latest **bulk/block deals** (institutional footprint) and flags rows a big player just traded. Works nights/weekends. Click **⬇ Backfill history** once to load recent daily bars (also merges delivery%). Prices are the last EOD close. |
+| 🏆 **Conviction** | The **synthesis board** — fuses the independent EOD signals (breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint, F&O OI buildup, volume, trend) into ONE ranked **"tomorrow's watchlist"** via **confirmation stacking**: names are ranked by how many independent signals *agree*, so a setup confirmed 4 ways outranks a lone strong signal. Each pick carries a volatility-scaled 2R plan. **💾 Save to Ideas** keeps the board as a durable watchlist in the Ideas history; **🔔 Send digest** pushes the top picks to your phone (Telegram/webhook). Works off-hours. |
 | ★ **Demand Score** | Composite ranking — stocks appearing across gainers, money-flow & volume spikes float to the top. |
 | **Volume Gainers** | Stocks trading far above their average volume. |
 | **F&O Open Interest** | OI spurts, classified long buildup / short buildup / short covering / long unwinding. |
@@ -243,7 +244,7 @@ flowchart TB
 
     subgraph API["app.py — routes"]
         direction TB
-        R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}<br/>/api/eod/{scan,deals,backfill,status,price,quote,refresh}"]
+        R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}<br/>/api/eod/{scan,deals,conviction,backfill,status,price,quote,refresh}"]
         R2["/api/{recommendations,deepdive,quote,<br/>chart,optionchain,fno/universe}<br/>/api/eod/optionchain/&lt;sym&gt;[/summary]"]
         R3["/api/sim/{strategies,summary,daily,leaderboard,performance,<br/>backtest,backtest_daily,walkforward,strategy_of_day,regime,take,auto,mode,reset}"]
         R4["/api/paper/{portfolio,order,option_order,<br/>futures_order,reset}"]
@@ -257,6 +258,7 @@ flowchart TB
         BC["bhavcopy.py<br/>• EOD UDiFF bhavcopy + delivery%<br/>• resilient price / lot fallback<br/>• ingest / backfill → eod_bars/eod_oi"]
         DL["deals.py<br/>• bulk/block deals (nsearchives)<br/>• institutional footprint<br/>• by_symbol / recent / status"]
         ES["eod_scanner.py<br/>• full-market EOD/swing scan<br/>• breakouts/gaps/vol/MA/NR7/delivery<br/>• bulk-deal xref · reads db.eod_bars"]
+        CV["eod_conviction.py<br/>• fuses breakout+delivery+deals+OI<br/>• confirmation-stacked watchlist<br/>• save→ideas · digest→notify"]
         EO["eod_options.py<br/>• EOD option chain (FO bhavcopy)<br/>• PCR / max-pain / OI walls<br/>• live-shape fallback (off-hours)"]
         ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime() (+ India-VIX volState)<br/>• 17 generators"]
         SM["sim.py<br/>• per-strategy ledgers<br/>• take/update/summary<br/>• daily rollup + regime leaderboard"]
@@ -753,6 +755,9 @@ python nse_demand.py losers     # top losers
 | `POST /api/eod/refresh[{date}]` | Ingest a day's bhavcopy (whole cash market + F&O) into the `eod_bars`/`eod_oi` cache (broadens the daily-backtest universe; also merges delivery%) |
 | `GET /api/eod/scan?view=&limit=&minPrice=&minValueCr=&fno=1&deals=1` | Full-market EOD/swing scanner over `db.eod_bars` (`view=setups\|breakout\|breakdown\|gainers\|losers\|unusual\|squeeze\|value\|delivery`; `deals=1` cross-references bulk/block deals with a 🐋 badge) |
 | `GET /api/eod/deals?kind=bulk\|block&limit=` (+ `?status=1`) | Latest session's **bulk/block deals** (institutional footprint), market-wide + off-hours |
+| `GET /api/eod/conviction?limit=&minPrice=&minValueCr=&minPillars=&fno=1&deals=0` | **Stacked-conviction board** — fuses breakout + delivery + deals + OI buildup, ranked by how many independent signals agree |
+| `POST /api/eod/conviction/save` | Persist the current conviction board into the Ideas history (dated to the EOD session; never clobbers a live idea) |
+| `POST /api/eod/conviction/digest` | Push the conviction digest (top longs/shorts) to the configured off-screen channel (Telegram/webhook) |
 | `GET·POST /api/eod/backfill[{days}]` | Load the last N sessions' bhavcopies (+ delivery%) into the local history cache; POST starts a background job, GET polls progress |
 | `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
 | `GET /api/live/config` | Live feed status: provider (angel/dhan)? configured? connected? market-open? watchlist (never returns secrets) |
@@ -788,6 +793,7 @@ nse-market-pulse/
 ├── bhavcopy.py             # EOD UDiFF bhavcopy ingest + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill
 ├── deals.py                # Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status
 ├── eod_scanner.py          # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours
+├── eod_conviction.py       # EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals agreeing; save→ideas / digest→notify
 ├── eod_options.py          # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
 ├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
 ├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
@@ -803,7 +809,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 555 unit tests, 27 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/deals/eodscanner/eodoptions/db/app+routes/feeds/…)
+├── test_*.py               # 595 unit tests, 28 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
@@ -838,12 +844,26 @@ sequenceDiagram
     Note over C: session cached, TTL 300s, guarded by a lock
     C->>N: GET /api/<endpoint> (reusing warmed session)
     N-->>C: JSON ✅
-    Note over C: on 401/403/expiry → rebuild session automatically
+    Note over C: on expiry → rebuild session automatically
+    Note over C,N: on a 403 "Access Denied" (Akamai block) → 10-min cooldown, pause ALL NSE traffic
 ```
 
 Every endpoint response is normalized into stable keys (`symbol`, `ltp`,
 `pChange`, `volume`, `oiSignal`, …) so the frontend and CLI never depend on NSE's
 raw field names.
+
+**Akamai / "Access Denied" backoff.** NSE's edge (Akamai) blocks an IP with an
+HTTP 403 *"Access Denied … edgesuite.net"* page once it looks bot-like — usually
+from **bursty automated fetches**, mainly repeated full-history **backfills**.
+Retrying (especially rebuilding the session, which re-GETs the homepage) only
+deepens it, so the first 403 starts a **shared 10-minute cooldown**
+(`nse_client.blocked_for()`): while active, live fetches serve stale cache or fail
+fast, the session isn't warmed up, and `bhavcopy`/`deals` archive downloads **and
+every per-stock quote/depth/chart/option-chain call** (`nse_quote._sget`)
+short-circuit. `bhavcopy.backfill()` also **paces itself** (a jittered pause per
+day) and **stops early** if a block is detected mid-run. This can't lift an active
+block — only time or a **different network** does (switch to a mobile hotspot,
+clear NSE cookies, or wait it out) — but it stops the app from re-earning it.
 
 ---
 

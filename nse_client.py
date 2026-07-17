@@ -49,6 +49,53 @@ _session_ts = 0.0
 _lock = threading.Lock()
 _SESSION_TTL = 300  # seconds before we proactively refresh cookies
 
+# --- Akamai / WAF block backoff -------------------------------------------
+# NSE fronts everything with Akamai. When it decides our IP looks bot-like it
+# returns HTTP 403 "Access Denied" (edgesuite.net) to EVERY request. Retrying —
+# especially rebuilding the session, which itself GETs the homepage + market page
+# — just pours more requests into the block and lengthens it. So the first 403
+# starts a cooldown during which ALL NSE traffic (live API + static archives via
+# bhavcopy) short-circuits instead of hammering. This can't un-block us (only time
+# / a new IP does), but it stops us re-earning or extending the block.
+_BLOCK_COOLDOWN = 600  # seconds to pause NSE traffic after a WAF block
+_blocked_until = 0.0
+# Response bodies/status that mean "the edge is blocking us" (not a real 404 miss).
+_BLOCK_MARKERS = ("access denied", "edgesuite.net", "reference #", "akamai")
+
+
+def blocked_for():
+    """Seconds remaining on the WAF-block cooldown (0.0 when clear). Callers should
+    avoid hitting NSE while this is > 0."""
+    return max(0.0, round(_blocked_until - time.time(), 1))
+
+
+def note_block(source="nse"):
+    """Record that NSE's edge is blocking us — start/extend the cooldown. Idempotent
+    within a cooldown; logs once per fresh block so logs don't flood."""
+    global _blocked_until
+    fresh = _blocked_until <= time.time()
+    _blocked_until = time.time() + _BLOCK_COOLDOWN
+    if fresh:
+        log.warning("NSE edge is blocking us (Akamai 403 via %s) — pausing NSE "
+                    "requests for %ds. Your IP is temporarily rate-limited; this "
+                    "clears on its own (or use a different network).",
+                    source, _BLOCK_COOLDOWN)
+
+
+def is_blocked_response(resp):
+    """True when a response is an Akamai/WAF block rather than a genuine result.
+    A 403/401 from NSE's edge is a block; we also sniff the body markers so a WAF
+    page served with a 200 is still caught."""
+    try:
+        if resp.status_code in (401, 403):
+            return True
+        if resp.status_code >= 400:
+            body = (resp.text or "")[:1500].lower()
+            return any(m in body for m in _BLOCK_MARKERS)
+    except Exception:
+        pass
+    return False
+
 
 def _build_session():
     s = requests.Session()
@@ -79,6 +126,15 @@ def get_session(force=False):
         cur, ts = _session, _session_ts
     if not force and cur is not None and (time.time() - ts) <= _SESSION_TTL:
         return cur
+
+    # During a WAF block, DON'T warm up a new session — the warm-up itself GETs the
+    # homepage + market page, which just deepens the block. Reuse the stale session
+    # if we have one; otherwise signal that NSE is unavailable right now.
+    if blocked_for():
+        if cur is not None:
+            return cur
+        raise RuntimeError("NSE session unavailable — WAF cooldown (%ss left)"
+                           % blocked_for())
 
     try:
         fresh = _build_session()
@@ -131,12 +187,29 @@ def _fetch(path, ttl=_FETCH_TTL):
         hit = _fetch_cache.get(path)      # atomic read; benign if a racer refetches
         if hit and (time.time() - hit[0]) < ttl:
             return hit[1]
+    # While the WAF is blocking us, don't poke NSE. Serve the last good value if we
+    # have one (better a few minutes stale than deepening the block); else fail fast.
+    if blocked_for():
+        hit = _fetch_cache.get(path)
+        if hit:
+            return hit[1]
+        raise RuntimeError("NSE blocked (WAF cooldown %ss)" % blocked_for())
     try:
         r = get_session().get(BASE + path, timeout=15)
+        if is_blocked_response(r):
+            note_block("api")
         r.raise_for_status()
         data = r.json()
     except Exception:
+        # A fresh block (or one just detected) → don't rebuild+retry into it.
+        if blocked_for():
+            hit = _fetch_cache.get(path)
+            if hit:
+                return hit[1]
+            raise
         r = get_session(force=True).get(BASE + path, timeout=15)
+        if is_blocked_response(r):
+            note_block("api")
         r.raise_for_status()
         data = r.json()
     if ttl:

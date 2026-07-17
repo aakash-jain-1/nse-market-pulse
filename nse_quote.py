@@ -103,9 +103,24 @@ def _referer(symbol):
     return {"Referer": nse.BASE + "/get-quote/equity/" + symbol}
 
 
+def _sget(url, headers=None, timeout=15, force=False):
+    """Session GET that honours the shared WAF-block cooldown (`nse_client`): it never
+    touches NSE while blocked, and turns an Akamai 403 / WAF page into a RECORDED block
+    (`nse.note_block`) so callers stop retrying into it. Raises on block or HTTP error;
+    every caller already falls back to cache/empty on an exception."""
+    if nse.blocked_for():
+        raise RuntimeError("NSE blocked (WAF cooldown %ss)" % nse.blocked_for())
+    r = nse.get_session(force=force).get(url, headers=headers, timeout=timeout)
+    if nse.is_blocked_response(r):
+        nse.note_block("quote")
+        raise RuntimeError("NSE WAF block (403)")
+    r.raise_for_status()
+    return r
+
+
 def _warm(symbol):
     """Visit the stock's quote page once so NSE is happy with the context."""
-    if symbol in _warmed:
+    if symbol in _warmed or nse.blocked_for():
         return
     try:
         nse.get_session().get(
@@ -117,21 +132,18 @@ def _warm(symbol):
 
 
 def _call(query, symbol):
-    """GET a NextApi function, rebuilding the session once on failure."""
+    """GET a NextApi function; honours the WAF cooldown and rebuilds the session once
+    on a NON-block failure (a block short-circuits without retrying into it)."""
     _warm(symbol)
     url = nse.BASE + NEXT + query
     try:
-        r = nse.get_session().get(url, headers=_referer(symbol), timeout=15)
-        r.raise_for_status()
-        return r.json()
+        return _sget(url, _referer(symbol)).json()
     except Exception:
+        if nse.blocked_for():
+            raise
         _warmed.discard(symbol)
         _warm(symbol)
-        r = nse.get_session(force=True).get(
-            url, headers=_referer(symbol), timeout=15
-        )
-        r.raise_for_status()
-        return r.json()
+        return _sget(url, _referer(symbol), force=True).json()
 
 
 def get_quote(symbol, series="EQ"):
@@ -287,16 +299,15 @@ _OHLC_TTL = 30       # seconds
 
 
 def _charting_get(path):
-    """GET a charting.nseindia.com path (reusing the warmed session; retry once)."""
+    """GET a charting.nseindia.com path (reusing the warmed session; retry once on a
+    non-block failure, short-circuit during a WAF cooldown)."""
     url = _CHARTING + path
     try:
-        r = nse.get_session().get(url, headers=_CHARTING_REF, timeout=20)
-        r.raise_for_status()
-        return r.json()
+        return _sget(url, _CHARTING_REF, timeout=20).json()
     except Exception:
-        r = nse.get_session(force=True).get(url, headers=_CHARTING_REF, timeout=20)
-        r.raise_for_status()
-        return r.json()
+        if nse.blocked_for():
+            raise
+        return _sget(url, _CHARTING_REF, timeout=20, force=True).json()
 
 
 def get_token(symbol, series="EQ"):
@@ -405,7 +416,7 @@ def _oc_referer(symbol):
 
 
 def _oc_warm(symbol):
-    if ("oc", symbol) in _warmed:
+    if ("oc", symbol) in _warmed or nse.blocked_for():
         return
     try:
         nse.get_session().get(
@@ -421,7 +432,7 @@ def _deriv_referer(symbol):
 
 
 def _deriv_warm(symbol):
-    if ("deriv", symbol) in _warmed:
+    if ("deriv", symbol) in _warmed or nse.blocked_for():
         return
     try:
         nse.get_session().get(
@@ -446,11 +457,8 @@ def get_symbol_futures(symbol):
         return hit[1]
 
     _deriv_warm(symbol)
-    r = nse.get_session().get(
-        nse.BASE + NEXT + f"getSymbolDerivativesData&symbol={symbol}",
-        headers=_deriv_referer(symbol), timeout=15,
-    )
-    r.raise_for_status()
+    r = _sget(nse.BASE + NEXT + f"getSymbolDerivativesData&symbol={symbol}",
+              _deriv_referer(symbol))
     data = r.json()
 
     underlying = None
@@ -509,8 +517,7 @@ def get_option_expiries(symbol):
     symbol = symbol.upper().strip()
     _oc_warm(symbol)
     url = nse.BASE + NEXT + f"getOptionChainDropdown&symbol={symbol}"
-    r = nse.get_session().get(url, headers=_oc_referer(symbol), timeout=15)
-    r.raise_for_status()
+    r = _sget(url, _oc_referer(symbol))
     return r.json().get("expiryDates", []) or []
 
 
@@ -571,8 +578,7 @@ def get_option_chain(symbol, expiry=None):
 
     _oc_warm(symbol)
     q = f"getOptionChainData&symbol={symbol}&params=expiryDate={expiry}"
-    r = nse.get_session().get(nse.BASE + NEXT + q, headers=_oc_referer(symbol), timeout=15)
-    r.raise_for_status()
+    r = _sget(nse.BASE + NEXT + q, _oc_referer(symbol))
     data = r.json()
 
     underlying = _num(data.get("underlyingValue"))

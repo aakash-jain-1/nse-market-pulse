@@ -13,6 +13,7 @@ Run: python test_client.py   (also works under pytest)
 """
 
 import contextlib
+import time
 from datetime import datetime, timedelta
 
 import nse_client as nse
@@ -26,6 +27,56 @@ def _patch(obj, name, value):
         yield
     finally:
         setattr(obj, name, orig)
+
+
+@contextlib.contextmanager
+def _reset_block():
+    """Clear + restore the WAF-block cooldown and session pointers around a test."""
+    saved = (nse._blocked_until, nse._session, nse._session_ts)
+    nse._blocked_until = 0.0
+    try:
+        yield
+    finally:
+        nse._blocked_until, nse._session, nse._session_ts = saved
+
+
+@contextlib.contextmanager
+def _reset_fetch_cache():
+    saved = dict(nse._fetch_cache)
+    nse._fetch_cache.clear()
+    try:
+        yield
+    finally:
+        nse._fetch_cache.clear()
+        nse._fetch_cache.update(saved)
+
+
+class _Resp:
+    """Minimal stand-in for a requests.Response."""
+
+    def __init__(self, status=200, json_data=None, text=""):
+        self.status_code = status
+        self._json = {} if json_data is None else json_data
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise Exception("HTTP %d" % self.status_code)
+
+    def json(self):
+        return self._json
+
+
+class _Sess:
+    """Fake session that returns a canned response and counts .get() calls."""
+
+    def __init__(self, resp):
+        self._resp = resp
+        self.calls = 0
+
+    def get(self, url, **kw):
+        self.calls += 1
+        return self._resp
 
 
 @contextlib.contextmanager
@@ -289,6 +340,107 @@ def test_get_lot_size():
         assert nse.get_lot_size("nifty") == 50
         assert nse.get_lot_size("nope") is None
         assert nse.get_lot_size(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Akamai / WAF block backoff
+# ---------------------------------------------------------------------------
+def test_note_block_and_blocked_for():
+    with _reset_block():
+        assert nse.blocked_for() == 0.0
+        nse.note_block("test")
+        assert 0 < nse.blocked_for() <= nse._BLOCK_COOLDOWN
+
+
+def test_is_blocked_response():
+    assert nse.is_blocked_response(_Resp(403))
+    assert nse.is_blocked_response(_Resp(401))
+    # a WAF page can arrive with a non-401/403 status — sniff the body markers
+    assert nse.is_blocked_response(_Resp(503, text="... Access Denied  Reference #18.x"))
+    assert nse.is_blocked_response(_Resp(500, text="blocked by edgesuite.net"))
+    # a genuine miss / real payload is NOT a block
+    assert not nse.is_blocked_response(_Resp(404, text="not found"))
+    assert not nse.is_blocked_response(_Resp(200, json_data={"ok": 1}))
+
+
+def test_fetch_marks_block_on_403_without_rebuild():
+    """A 403 records the block and must NOT trigger a force-rebuild retry (the
+    rebuild itself would fire two more GETs into the block)."""
+    sess = _Sess(_Resp(403, text="Access Denied edgesuite.net"))
+    seen = {"n": 0, "force": []}
+
+    def fake_gs(force=False):
+        seen["n"] += 1
+        seen["force"].append(force)
+        return sess
+
+    with _reset_block(), _reset_fetch_cache(), _patch(nse, "get_session", fake_gs):
+        raised = False
+        try:
+            nse._fetch("/api/x", ttl=0)
+        except Exception:
+            raised = True
+        assert raised
+        assert nse.blocked_for() > 0          # block recorded
+        assert seen["n"] == 1                  # only the initial (non-forced) session
+        assert seen["force"] == [False]        # never rebuilt into the block
+        assert sess.calls == 1                 # exactly one NSE hit
+
+
+def test_fetch_short_circuits_when_blocked_serving_stale():
+    """While blocked, a stale cache entry is served WITHOUT touching NSE."""
+    def boom(*a, **k):
+        raise AssertionError("must not hit NSE while blocked")
+
+    with _reset_block(), _reset_fetch_cache(), _patch(nse, "get_session", boom):
+        nse._fetch_cache["/api/y"] = (time.time() - 9999, {"cached": True})  # stale
+        nse.note_block("test")
+        assert nse._fetch("/api/y") == {"cached": True}
+
+
+def test_fetch_blocked_no_cache_raises_without_hitting_nse():
+    def boom(*a, **k):
+        raise AssertionError("must not hit NSE while blocked")
+
+    with _reset_block(), _reset_fetch_cache(), _patch(nse, "get_session", boom):
+        nse.note_block("test")
+        raised = False
+        try:
+            nse._fetch("/api/z")
+        except RuntimeError:
+            raised = True
+        assert raised
+
+
+def test_get_session_skips_warmup_during_block():
+    built = {"n": 0}
+
+    def fake_build():
+        built["n"] += 1
+        return "FRESH"
+
+    with _reset_block(), _patch(nse, "_build_session", fake_build):
+        with nse._lock:                       # pretend we have an expired session
+            nse._session = "STALE"
+            nse._session_ts = time.time() - 10_000
+        nse.note_block("test")
+        # even force=True must reuse the stale session, not warm up into the block
+        assert nse.get_session(force=True) == "STALE"
+        assert built["n"] == 0
+
+
+def test_get_session_blocked_no_session_raises():
+    with _reset_block(), _patch(nse, "_build_session", lambda: "FRESH"):
+        with nse._lock:
+            nse._session = None
+            nse._session_ts = 0.0
+        nse.note_block("test")
+        raised = False
+        try:
+            nse.get_session(force=True)
+        except RuntimeError:
+            raised = True
+        assert raised
 
 
 def _main():
