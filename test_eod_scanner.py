@@ -400,6 +400,52 @@ def test_status_reports_coverage():
     assert st["lookback"] == es.LOOKBACK
 
 
+# ---------------------------------------------------------------------------
+# sector relative-strength pillar (score bonus + 🧭 tag)
+# ---------------------------------------------------------------------------
+def test_score_folds_in_sector_strength():
+    base = es._score({"pctFromHigh": 0.0})                       # breakout, no sector
+    lead = es._score({"pctFromHigh": 0.0, "sectorStrength": 90.0})
+    lag = es._score({"pctFromHigh": 0.0, "sectorStrength": 10.0})
+    assert lead == round(base + 8, 1)                            # leading sector bonus
+    assert lag == round(base - 6, 1)                             # lagging sector penalty
+
+
+def test_tags_leading_sector_badge():
+    lead = es._tags({"pctFromHigh": 0.0, "windowDays": 20,
+                     "sector": "IT", "sectorRank": 1, "sectorLeading": True})
+    assert any(t.startswith("🧭 IT #1") for t in lead)
+    # present but not leading → no compass badge
+    plain = es._tags({"pctFromHigh": 0.0, "windowDays": 20,
+                      "sector": "IT", "sectorLeading": False})
+    assert not any(t.startswith("🧭") for t in plain)
+
+
+def _ramp(a, b, n=40, val=5e8):
+    cs = [a + (b - a) * i / (n - 1) for i in range(n)]
+    out, prev = [], cs[0]
+    for d, c in zip(_dates(n), cs):
+        out.append(_bar(d, round(c, 2), prev=round(prev, 2), val=val))
+        prev = c
+    return out
+
+
+def test_scan_annotates_leading_sector():
+    with _temp_db() as db:
+        # IT trending up (leading sector); Banks trending down.
+        db.eod_bars_put("TCS", _ramp(80, 120))
+        db.eod_bars_put("INFY", _ramp(80, 112))
+        db.eod_bars_put("WIPRO", _ramp(80, 110))
+        for s in ("HDFCBANK", "ICICIBANK", "SBIN"):
+            db.eod_bars_put(s, _ramp(120, 96))
+        r = es.scan(view="setups", min_price=20, min_value_cr=1.0)
+    tcs = next((x for x in r["rows"] if x["symbol"] == "TCS"), None)
+    assert tcs is not None
+    assert tcs.get("sector") == "IT" and tcs.get("sectorLeading") is True
+    assert tcs.get("sectorStrength") == 100.0
+    assert any(t.startswith("🧭 IT") for t in tcs["tags"])
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

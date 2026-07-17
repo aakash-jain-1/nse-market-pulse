@@ -51,6 +51,7 @@ _DELIV_WEAK = 35.0        # delivery% below this on a down day = churn/distribut
 _VOL_HOT = 1.5            # today's volume vs its trailing average
 _OI_BUILD = 8.0           # near-month OI change% that counts as a meaningful build
 _MIN_WINDOW = 10          # need this much history before trusting a "breakout"
+_SECTOR_W = 14            # weight of the "leading/lagging sector" confirmation pillar
 
 _CR = 1e7                 # ₹1 crore (turnover filter; value is in rupees)
 
@@ -118,7 +119,19 @@ def _deal_side(deals_for_sym):
     return None
 
 
-def _pillars_long(f, oi, deal_side):
+def _sector_tag(sector, kind):
+    """Label for the sector pillar, e.g. 'IT is a leading sector (#1/12, RS +4)'."""
+    rk, tot, rs = sector.get("rank"), sector.get("total"), sector.get("rs")
+    tag = f"{sector['sector']} is a {kind} sector"
+    if rk and tot:
+        extra = f"#{rk}/{tot}"
+        if rs is not None:
+            extra += f", RS {rs:+.0f}"
+        tag += f" ({extra})"
+    return tag
+
+
+def _pillars_long(f, oi, deal_side, sector=None):
     """Independent bullish confirmations for a name. Returns [(label, weight), …].
     Each entry is one 'pillar'; the board ranks by how many fired, then by weight."""
     out = []
@@ -145,10 +158,12 @@ def _pillars_long(f, oi, deal_side):
         out.append((f"F&O short covering (OI {oi['oiPct']:.0f}%)", 12))
     if deal_side == "BUY":
         out.append(("🐋 bulk/block BUY (institutional print)", 16))
+    if sector and sector.get("leading"):
+        out.append((f"🧭 {_sector_tag(sector, 'leading')}", _SECTOR_W))
     return out
 
 
-def _pillars_short(f, oi, deal_side):
+def _pillars_short(f, oi, deal_side, sector=None):
     """Independent bearish confirmations for a name. Mirror of `_pillars_long`."""
     out = []
     wd = f.get("windowDays") or 0
@@ -170,6 +185,8 @@ def _pillars_short(f, oi, deal_side):
         out.append((f"F&O short buildup (OI +{oi['oiPct']:.0f}%)", 18))
     if deal_side == "SELL":
         out.append(("🐋 bulk/block SELL (institutional print)", 16))
+    if sector and sector.get("lagging"):
+        out.append((f"🧭 {_sector_tag(sector, 'lagging')}", _SECTOR_W))
     return out
 
 
@@ -210,11 +227,11 @@ def _rating(conviction, confirmations):
     return "Low"
 
 
-def _pick(f, bars, oi, deal_side, deal_list):
+def _pick(f, bars, oi, deal_side, deal_list, sector=None):
     """Build the best (LONG or SHORT) conviction pick for one name, or None.
     Chooses the side with more confirming pillars (higher score breaks ties)."""
-    longs = _pillars_long(f, oi, deal_side)
-    shorts = _pillars_short(f, oi, deal_side)
+    longs = _pillars_long(f, oi, deal_side, sector)
+    shorts = _pillars_short(f, oi, deal_side, sector)
     if not longs and not shorts:
         return None
     lscore, sscore = sum(w for _, w in longs), sum(w for _, w in shorts)
@@ -239,6 +256,12 @@ def _pick(f, bars, oi, deal_side, deal_list):
         "deal": ({"side": deal_side,
                   "client": (deal_list[0].get("client") if deal_list else None)}
                  if deal_side else None),
+        "sector": ({"name": sector["sector"], "rank": sector.get("rank"),
+                    "total": sector.get("total"), "rs": sector.get("rs"),
+                    "strength": sector.get("strength"),
+                    "leading": sector.get("leading"),
+                    "lagging": sector.get("lagging")}
+                   if sector else None),
         "conviction": conviction,
         "confirmations": len(pillars),
         "reasons": [lbl for lbl, _ in pillars],
@@ -275,6 +298,16 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
     oi_all = db.eod_oi_all(since=_es._since(latest, lookback))
     deal_map = _es._deal_map(with_deals)
 
+    # Sector relative-strength map (one pass over the same bars): a leading sector
+    # is an extra LONG pillar, a lagging sector an extra SHORT pillar.
+    smap, _ss = {}, None
+    try:
+        import sector_scan as _ss
+        smap = _ss.strength_map(grouped, min_price, min_value_cr)
+    except Exception:
+        log.warning("board: sector-strength cross-reference failed", exc_info=True)
+        _ss = None
+
     fno = None
     if fno_only:
         try:
@@ -298,7 +331,8 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         price_up = (f.get("pChange") or 0) >= 0
         oi = _oi_state(oi_all.get(sym), price_up)
         dlist = deal_map.get(sym) or []
-        pick = _pick(f, bars, oi, _deal_side(dlist), dlist)
+        sctx = _ss.context(smap, sym) if (_ss and smap) else None
+        pick = _pick(f, bars, oi, _deal_side(dlist), dlist, sctx)
         if not pick or pick["confirmations"] < min_pillars:
             continue
         picks.append(pick)

@@ -41,6 +41,12 @@ _WEIGHTS = (0.5, 0.5)          # (short, long)
 LOOKBACK = 75                  # bars to load — LONG_WIN + margin for weekends
 _MIN_BARS = 6                  # need at least this much history to score a name
 
+# Sector-strength percentile thresholds for "leading" / "lagging" (top / bottom
+# third). Used by `context()` so the Conviction board + EOD scanner can treat a
+# leading sector as an extra confirmation pillar.
+_LEAD_PCTILE = 67.0
+_LAG_PCTILE = 33.0
+
 
 # ---------------------------------------------------------------------------
 # pure maths
@@ -132,6 +138,93 @@ def _aggregate(records, market_median):
 
 
 # ---------------------------------------------------------------------------
+# record building + sector-strength map (shared by scan / Conviction / EOD scan)
+# ---------------------------------------------------------------------------
+def _collect(grouped, min_price, min_value_cr, short, long):
+    """Scored per-name records from grouped bars ({SYMBOL:[bars]}). Keeps only
+    classified + liquid names with enough history to blend a return. Returns
+    (records, classified) — `classified` counts every name with a known sector
+    (pre-liquidity), matching scan()'s coverage stats. Pure given `grouped`."""
+    min_val = (min_value_cr or 0) * _es._CR
+    records, classified = [], 0
+    for sym, bars in grouped.items():
+        sec = _sec.sector_of(sym)
+        if not sec:
+            continue
+        classified += 1
+        f = _es._features(bars)
+        if not f or f.get("bars", 0) < _MIN_BARS:
+            continue
+        if min_price and f["close"] < min_price:
+            continue
+        if min_val and (f.get("value") or 0) < min_val:
+            continue
+        closes = [b["close"] for b in bars if b.get("close") is not None]
+        blended = _blended(closes, short, long)
+        if blended is None:
+            continue
+        r20, r60 = _ret(closes, short), _ret(closes, long)
+        pm20 = f.get("pctFromMa20")
+        records.append({
+            "symbol": sym, "sector": sec, "blended": blended, "rs": None,
+            "close": f["close"], "value": f.get("value"),
+            "pChange": f.get("pChange"),
+            "ret20": round(r20, 2) if r20 is not None else None,
+            "ret60": round(r60, 2) if r60 is not None else None,
+            "trend": f.get("trend"),
+            "pctFromHigh": f.get("pctFromHigh"),
+            "aboveMa20": (pm20 > 0) if pm20 is not None else None,
+        })
+    return records, classified
+
+
+def _rank_records(records):
+    """Fill rs/rsRank in place (blended return minus the market median). Returns
+    the market median, or None when there's nothing to rank."""
+    if not records:
+        return None
+    market_median = _median([r["blended"] for r in records])
+    ranks = _percentiles([r["blended"] for r in records])
+    for r, rk in zip(records, ranks):
+        r["rs"] = round(r["blended"] - market_median, 2)
+        r["rsRank"] = rk
+    return market_median
+
+
+def strength_map(grouped, min_price=20.0, min_value_cr=2.0,
+                 short=SHORT_WIN, long=LONG_WIN):
+    """{sector: {rank, rs, strength, count, total}} from already-loaded grouped
+    bars — so the Conviction board / EOD scanner can consult sector strength
+    WITHOUT a second DB pass. `strength` is the 0-100 percentile used by
+    `context()` to flag leading/lagging sectors. Empty when nothing scores."""
+    records, _ = _collect(grouped, min_price, min_value_cr, short, long)
+    market_median = _rank_records(records)
+    if market_median is None:
+        return {}
+    rows = _aggregate(records, market_median)
+    total = len(rows)
+    return {r["sector"]: {"rank": r["rank"], "rs": r["rs"],
+                          "strength": r["strength"], "count": r["count"],
+                          "total": total} for r in rows}
+
+
+def context(smap, symbol):
+    """Sector context for a symbol against a `strength_map`, or None if the symbol
+    is unclassified / its sector didn't score. `leading`/`lagging` flag the top /
+    bottom third of sectors — the flag the Conviction board treats as a pillar."""
+    sec = _sec.sector_of(symbol)
+    if not sec or not smap:
+        return None
+    s = smap.get(sec)
+    if not s:
+        return None
+    return {"sector": sec, "rank": s["rank"], "rs": s["rs"],
+            "strength": s["strength"], "total": s["total"],
+            "leading": s["strength"] >= _LEAD_PCTILE,
+            "lagging": s["strength"] <= _LAG_PCTILE}
+
+
+# ---------------------------------------------------------------------------
 # scan (impure: reads db.eod_bars)
 # ---------------------------------------------------------------------------
 def scan(limit_sectors=None, names_per_sector=5, lead_sectors=4,
@@ -157,37 +250,9 @@ def scan(limit_sectors=None, names_per_sector=5, lead_sectors=4,
 
     latest = db.eod_latest_date()
     grouped = db.eod_bars_all(since=_es._since(latest, lookback))
-    min_val = (min_value_cr or 0) * _es._CR
 
-    records, scanned, classified = [], 0, 0
-    for sym, bars in grouped.items():
-        sec = _sec.sector_of(sym)
-        if not sec:
-            continue
-        classified += 1
-        f = _es._features(bars)
-        if not f or f.get("bars", 0) < _MIN_BARS:
-            continue
-        if min_price and f["close"] < min_price:
-            continue
-        if min_val and (f.get("value") or 0) < min_val:
-            continue
-        closes = [b["close"] for b in bars if b.get("close") is not None]
-        blended = _blended(closes, short, long)
-        if blended is None:
-            continue
-        scanned += 1
-        pm20 = f.get("pctFromMa20")
-        records.append({
-            "symbol": sym, "sector": sec, "blended": blended, "rs": None,
-            "close": f["close"], "value": f.get("value"),
-            "pChange": f.get("pChange"),
-            "ret20": round(_ret(closes, short), 2) if _ret(closes, short) is not None else None,
-            "ret60": round(_ret(closes, long), 2) if _ret(closes, long) is not None else None,
-            "trend": f.get("trend"),
-            "pctFromHigh": f.get("pctFromHigh"),
-            "aboveMa20": (pm20 > 0) if pm20 is not None else None,
-        })
+    records, classified = _collect(grouped, min_price, min_value_cr, short, long)
+    scanned = len(records)
 
     if not records:
         return {
@@ -203,12 +268,7 @@ def scan(limit_sectors=None, names_per_sector=5, lead_sectors=4,
                      "better relative strength works)."),
         }
 
-    market_median = _median([r["blended"] for r in records])
-    ranks = _percentiles([r["blended"] for r in records])
-    for r, rk in zip(records, ranks):
-        r["rs"] = round(r["blended"] - market_median, 2)
-        r["rsRank"] = rk
-
+    market_median = _rank_records(records)
     sector_rows = _aggregate(records, market_median)
     if limit_sectors:
         sector_rows = sector_rows[:int(limit_sectors)]

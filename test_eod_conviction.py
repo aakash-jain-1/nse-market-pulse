@@ -133,6 +133,50 @@ def test_pillars_short_mirror():
 
 
 # ---------------------------------------------------------------------------
+# sector pillar (leading sector confirms a long, lagging confirms a short)
+# ---------------------------------------------------------------------------
+def _sec(**kw):
+    base = {"sector": "IT", "rank": 1, "total": 12, "rs": 4.2,
+            "strength": 90.0, "leading": False, "lagging": False}
+    base.update(kw)
+    return base
+
+
+def test_sector_tag_format():
+    assert ec._sector_tag(_sec(), "leading") == "IT is a leading sector (#1/12, RS +4)"
+    assert ec._sector_tag(_sec(rank=None, total=None), "leading") == "IT is a leading sector"
+
+
+def test_pillars_long_sector_leading_adds_pillar():
+    # a lone uptrend is 1 pillar; a leading sector stacks a 2nd, independent one
+    base = ec._pillars_long(_feat(trend="up"), None, None)
+    withsec = ec._pillars_long(_feat(trend="up"), None, None, _sec(leading=True))
+    assert len(withsec) == len(base) + 1
+    lbl, w = withsec[-1]
+    assert "leading sector" in lbl and lbl.startswith("🧭 IT") and w == ec._SECTOR_W
+
+
+def test_pillars_long_sector_no_pillar_unless_leading():
+    # present but neither leading nor lagging → contributes nothing
+    assert ec._pillars_long(_feat(trend="up"), None, None, _sec(strength=50.0)) == \
+        ec._pillars_long(_feat(trend="up"), None, None)
+    assert ec._pillars_long(_feat(trend="up"), None, None, None) == \
+        ec._pillars_long(_feat(trend="up"), None, None)
+
+
+def test_pillars_short_sector_lagging_adds_pillar():
+    base = ec._pillars_short(_feat(trend="down", pChange=-1.0), None, None)
+    withsec = ec._pillars_short(_feat(trend="down", pChange=-1.0), None, None,
+                                _sec(sector="Pharma", rank=12, strength=8.0, lagging=True))
+    assert len(withsec) == len(base) + 1
+    lbl, w = withsec[-1]
+    assert "lagging sector" in lbl and "Pharma" in lbl and w == ec._SECTOR_W
+    # a leading-sector context must NOT confirm a short
+    assert ec._pillars_short(_feat(trend="down"), None, None, _sec(leading=True)) == \
+        ec._pillars_short(_feat(trend="down"), None, None)
+
+
+# ---------------------------------------------------------------------------
 # plan
 # ---------------------------------------------------------------------------
 def test_avg_range_pct():
@@ -181,6 +225,20 @@ def test_pick_none_when_no_pillars():
     assert ec._pick(_feat(), [_bar(d, 100.0) for d in _dates(5)], None, None, []) is None
 
 
+def test_pick_carries_sector_and_extra_confirmation():
+    f = _feat(pctFromHigh=0.5, trend="up", delivPct=70.0)
+    bars = [_bar(d, 100.0) for d in _dates(14)]
+    plain = ec._pick(f, bars, None, None, [])
+    withsec = ec._pick(f, bars, None, None, [],
+                       _sec(sector="IT", rank=1, total=12, strength=95.0, leading=True))
+    # the leading sector is one more confirming pillar than the same name without it
+    assert withsec["confirmations"] == plain["confirmations"] + 1
+    assert withsec["conviction"] > plain["conviction"]
+    assert withsec["sector"]["name"] == "IT" and withsec["sector"]["leading"] is True
+    assert any("leading sector" in r for r in withsec["reasons"])
+    assert plain["sector"] is None
+
+
 # ---------------------------------------------------------------------------
 # board() / save() against a seeded DB
 # ---------------------------------------------------------------------------
@@ -224,6 +282,29 @@ def test_board_min_pillars_gate():
         strict = ec.board(min_price=20, min_value_cr=1.0, min_pillars=6)
     # 6 independent confirmations is a very high bar; STACKED has ~4 → empty.
     assert strict["count"] == 0
+
+
+def _seed_sectors(db):
+    # IT = leading sector; TCS also carries a clean breakout + delivery + volume stack.
+    tcs = [_bar(d, 50.0 + i, deliv=45.0) for i, d in enumerate(_dates(40))]
+    tcs.append(_bar("2026-07-15", 130.0, prev=100.0, o=101.0, h=132.0, l=124.0,
+                    vol=4000, val=5e8, deliv=78.0))
+    db.eod_bars_put("TCS", tcs)
+    db.eod_bars_put("INFY", [_bar(d, 50.0 + i, val=5e8) for i, d in enumerate(_dates(41))])
+    db.eod_bars_put("WIPRO", [_bar(d, 40.0 + i, val=5e8) for i, d in enumerate(_dates(41))])
+    # Banks = the weaker sector (downtrend) so IT clearly leads the ranking.
+    for s in ("HDFCBANK", "ICICIBANK", "SBIN"):
+        db.eod_bars_put(s, [_bar(d, 200.0 - i, val=5e8) for i, d in enumerate(_dates(41))])
+
+
+def test_board_adds_sector_pillar_for_leading_name():
+    with _temp_db() as db:
+        _seed_sectors(db)
+        b = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2)
+    tcs = next((p for p in b["longs"] if p["symbol"] == "TCS"), None)
+    assert tcs is not None
+    assert tcs["sector"] and tcs["sector"]["name"] == "IT" and tcs["sector"]["leading"]
+    assert any("leading sector" in r for r in tcs["reasons"])
 
 
 def test_board_empty_db_has_note():

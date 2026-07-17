@@ -48,7 +48,7 @@ NSE/
 ├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
 ├── eod_scheduler.py   # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
 ├── sectors.py         # Curated NSE symbol→sector map (17 sectors, ~303 names) — static data + sector_of()/all_sectors()
-├── sector_scan.py     # Sector relative-strength board over db.eod_bars — cross-sectional RS vs market, ranks sectors + leaders/laggards
+├── sector_scan.py     # Sector relative-strength board over db.eod_bars — cross-sectional RS vs market, ranks sectors + leaders/laggards; strength_map/context = the reusable sector pillar the EOD Scan + Conviction boards fold in
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
@@ -59,7 +59,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 655 unit tests across 32 suites (see below)
+├── test_*.py          # 667 unit tests across 32 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -525,6 +525,16 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🧭 Sector RS wired into the Conviction board + EOD scanner** — the new sector strength is
+  now an **extra confirmation pillar** everywhere, so a breakout **in a leading sector ranks
+  higher** than the same breakout in a laggard. `sector_scan.py` grew a reusable
+  `strength_map(grouped, …)` (sector→{rank, rs, strength, total}) + `context(smap, symbol)`
+  (flags leading ≥67th / lagging ≤33rd percentile), both built from the **already-loaded**
+  bars (no extra DB pass; lazy import breaks the sector_scan↔eod_scanner cycle).
+  `eod_conviction.board()` adds a 🧭 leading-sector pillar to longs / lagging-sector pillar to
+  shorts (weight 14) and carries `pick["sector"]`; `eod_scanner.scan()` tags rows `🧭 <sector>
+  #<rank>` and nudges `_score` (+8 leading / −6 lagging). UI: coloured sector chip on each
+  conviction card + the badge on scanner rows. Tests **+12** (suite **655 → 667**); lint clean.
 - **🧭 Sector relative-strength (rotation) board** — individual breakouts are stronger when
   the whole *sector* is being bought, but we had no sector awareness. New `sectors.py` (a
   curated, dependency-free symbol→sector map: **17 sectors, ~303 names**) + `sector_scan.py`,

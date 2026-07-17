@@ -610,7 +610,7 @@
         <span id="eodScanStatus" style="color:var(--muted);font-size:11px"></span>
       </div>
       <div id="convBar" class="scan-filters" style="display:none">
-        <label title="A pick makes the board only when at least this many INDEPENDENT signals agree (breakout / delivery / volume / trend / OI buildup / bulk-deal).">Min signals
+        <label title="A pick makes the board only when at least this many INDEPENDENT signals agree (breakout / delivery / volume / trend / OI buildup / bulk-deal / leading sector).">Min signals
           <select id="cvPillars">
             <option value="2">2+ (broad)</option>
             <option value="3" selected>3+ (recommended)</option>
@@ -1197,13 +1197,14 @@
       const oi = p.oi ? ` · <span title="F&O near-month OI">${escapeHtml(p.oi.label)} ${p.oi.oiPct >= 0 ? "+" : ""}${p.oi.oiPct}%</span>` : "";
       const deal = p.deal ? ` · <span style="color:var(--accent)">🐋 ${escapeHtml(p.deal.side)}${p.deal.client ? " (" + escapeHtml(p.deal.client) + ")" : ""}</span>` : "";
       const deliv = (p.delivPct != null) ? ` · Deliv ${p.delivPct.toFixed(0)}%` : "";
+      const sec = p.sector ? ` · <span style="color:${p.sector.leading ? "var(--green)" : p.sector.lagging ? "var(--red)" : "var(--muted)"}" title="Sector relative strength · rank #${p.sector.rank || "?"}/${p.sector.total || "?"}">🧭 ${escapeHtml(p.sector.name)}${p.sector.rank ? " #" + p.sector.rank : ""}</span>` : "";
       return `<div class="conv-card" data-sym="${p.symbol}" style="border-left:4px solid ${col}">
         <div class="conv-head">
           <span class="conv-sym">${escapeHtml(p.symbol)}</span>
           <span class="conv-badge" style="background:${col}">${p.confirmations}✓ ${long ? "LONG" : "SHORT"}</span>
           <span class="conv-rating">${escapeHtml(p.rating)} · conv ${p.conviction}</span>
         </div>
-        <div class="conv-sub">₹${fmtPrice(p.close)} · ${p.pChange >= 0 ? "+" : ""}${(p.pChange || 0).toFixed(2)}%${deliv}${p.volMult ? " · " + p.volMult + "x vol" : ""}${oi}${deal}</div>
+        <div class="conv-sub">₹${fmtPrice(p.close)} · ${p.pChange >= 0 ? "+" : ""}${(p.pChange || 0).toFixed(2)}%${deliv}${p.volMult ? " · " + p.volMult + "x vol" : ""}${oi}${deal}${sec}</div>
         <div class="conv-plan">Entry <b>${fmtPrice(p.entry)}</b> · SL ${fmtPrice(p.stop)} (${p.stopPct}%) · Tgt ${fmtPrice(p.target)} (${p.targetPct}%) · R:R ${p.rr}</div>
         <ul class="conv-reasons">${reasons}</ul>
       </div>`;
@@ -1211,7 +1212,7 @@
 
     function renderConviction(data) {
       const longs = data.longs || [], shorts = data.shorts || [];
-      const cov = `<div class="chart-note" style="margin:0 0 8px">🏆 <b>Stacked-conviction board</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names scanned · ${longs.length} long / ${shorts.length} short setups where <b>≥${data.filters ? data.filters.minPillars : 3} independent signals agree</b>. ${data.withDeals ? "Bulk/block deals cross-referenced. " : ""}Prices are the last EOD <b>close</b> (not live).</div>`;
+      const cov = `<div class="chart-note" style="margin:0 0 8px">🏆 <b>Stacked-conviction board</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names scanned · ${longs.length} long / ${shorts.length} short setups where <b>≥${data.filters ? data.filters.minPillars : 3} independent signals agree</b>. ${data.withDeals ? "Bulk/block deals cross-referenced. " : ""}🧭 = the name sits in a leading/lagging sector. Prices are the last EOD <b>close</b> (not live).</div>`;
       if (!longs.length && !shorts.length) {
         const hint = data.note || "No names cleared the confirmation bar — lower ‘Min signals’, loosen the price/value filters, or backfill more history (breakouts need ~20+ sessions).";
         return cov + `<div class="empty">${escapeHtml(hint)}</div>`;

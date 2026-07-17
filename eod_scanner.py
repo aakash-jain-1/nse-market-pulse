@@ -51,6 +51,12 @@ VIEWS = ("setups", "breakout", "breakdown", "gainers", "losers",
 # Delivery% at/above this = real (non-intraday) buying → accumulation conviction.
 _DELIV_HOT = 60.0
 
+# Sector relative-strength percentile thresholds (top / bottom third): a setup in
+# a leading sector scores higher, one in a lagging sector lower. Kept in sync with
+# sector_scan's `context()`; a breakout in a strong sector beats a lone breakout.
+_SECTOR_LEAD = 67.0
+_SECTOR_LAG = 33.0
+
 
 # ---------------------------------------------------------------------------
 # pure helpers
@@ -197,6 +203,9 @@ def _tags(f):
     for d in (f.get("deals") or []):
         tags.append("🐋 bulk BUY" if d.get("side") == "BUY" else "🐋 bulk SELL")
         break                                  # one badge is enough for the board
+    if f.get("sectorLeading") and f.get("sector"):
+        rk = f.get("sectorRank")
+        tags.append(f"🧭 {f['sector']} #{rk}" if rk else f"🧭 {f['sector']} lead")
     return tags
 
 
@@ -225,6 +234,12 @@ def _score(f):
         s += _clip((dp - 60) / 8, 0, 5)
     if any(d.get("side") == "BUY" for d in (f.get("deals") or [])):
         s += 8                                   # a big player bought today
+    ss = f.get("sectorStrength")                 # sector relative-strength pillar
+    if ss is not None:
+        if ss >= _SECTOR_LEAD:
+            s += 8                               # riding a leading sector
+        elif ss <= _SECTOR_LAG:
+            s -= 6                               # fighting a lagging sector
     return round(s, 1)
 
 
@@ -291,6 +306,38 @@ def _deal_map(enabled):
         return {}
 
 
+def _sector_strength(grouped, min_price, min_value_cr):
+    """{sector: strength…} from the already-loaded bars, or {} on any failure.
+    Lazy import breaks the sector_scan↔eod_scanner cycle (sector_scan imports us
+    at module load; we only reach back into it at call time)."""
+    try:
+        import sector_scan
+        return sector_scan.strength_map(grouped, min_price, min_value_cr)
+    except Exception:
+        log.warning("scan: sector-strength cross-reference failed", exc_info=True)
+        return {}
+
+
+def _attach_sector(f, smap, sym):
+    """Tag a row with its sector's relative-strength context (leading/lagging),
+    which `_score`/`_tags` then fold in as an extra confirmation pillar."""
+    if not smap:
+        return
+    try:
+        import sector_scan
+        ctx = sector_scan.context(smap, sym)
+    except Exception:
+        ctx = None
+    if not ctx:
+        return
+    f["sector"] = ctx["sector"]
+    f["sectorStrength"] = ctx["strength"]
+    f["sectorRank"] = ctx["rank"]
+    f["sectorRs"] = ctx["rs"]
+    f["sectorLeading"] = ctx["leading"]
+    f["sectorLagging"] = ctx["lagging"]
+
+
 def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
          fno_only=False, lookback=LOOKBACK, with_deals=False):
     """Rank the whole ingested EOD universe by `view`.
@@ -311,6 +358,7 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
     latest = db.eod_latest_date()
     grouped = db.eod_bars_all(since=_since(latest, lookback))
     deal_map = _deal_map(with_deals)
+    smap = _sector_strength(grouped, min_price, min_value_cr)
 
     fno = None
     if fno_only:
@@ -339,6 +387,7 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
             continue
         if deal_map.get(sym):
             f["deals"] = deal_map[sym]
+        _attach_sector(f, smap, sym)
         f["score"] = _score(f)
         f["tags"] = _tags(f)
         rows.append(f)

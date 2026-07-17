@@ -209,6 +209,52 @@ def test_status_reports_coverage():
     assert "symbols" in st and "rows" in st
 
 
+# ---------------------------------------------------------------------------
+# strength_map / context — the reusable pillar the scanner + conviction board use
+# ---------------------------------------------------------------------------
+def _seed_four_sectors(db):
+    """Four sectors with a clean strength gradient → percentiles 100/75/50/25."""
+    grades = {
+        "TCS": (100, 150), "INFY": (100, 145), "WIPRO": (100, 140),          # IT strongest
+        "HINDUNILVR": (100, 120), "ITC": (100, 118), "NESTLEIND": (100, 116),  # FMCG mild up
+        "HDFCBANK": (100, 101), "ICICIBANK": (100, 100), "SBIN": (100, 102),   # Banks flat
+        "SUNPHARMA": (100, 88), "CIPLA": (100, 90), "DRREDDY": (100, 86),       # Pharma weakest
+    }
+    for sym, (a, b) in grades.items():
+        db.eod_bars_put(sym, _ramp(a, b))
+
+
+def test_strength_map_ranks_and_flags():
+    with _temp_db() as db:
+        _seed_four_sectors(db)
+        smap = ss.strength_map(db.eod_bars_all(), min_price=20, min_value_cr=1.0)
+    assert set(smap) >= {"IT", "FMCG", "Banks", "Pharma"}
+    assert smap["IT"]["rank"] == 1 and smap["IT"]["strength"] == 100.0
+    assert smap["Pharma"]["strength"] == 25.0
+    assert smap["IT"]["total"] == len(smap) and smap["IT"]["count"] == 3
+    # leading = top third (≥67), lagging = bottom third (≤33)
+    it = ss.context(smap, "TCS")
+    assert it["sector"] == "IT" and it["leading"] and not it["lagging"]
+    ph = ss.context(smap, "SUNPHARMA")
+    assert ph["lagging"] and not ph["leading"]
+    mid = ss.context(smap, "HDFCBANK")     # 50th pct → neither
+    assert not mid["leading"] and not mid["lagging"]
+
+
+def test_context_none_for_unclassified_or_empty_map():
+    with _temp_db() as db:
+        _seed_four_sectors(db)
+        smap = ss.strength_map(db.eod_bars_all(), min_price=20, min_value_cr=1.0)
+    assert ss.context(smap, "ZZ_NOT_A_SYMBOL") is None   # unclassified
+    assert ss.context({}, "TCS") is None                  # empty map
+    assert ss.context(None, "TCS") is None
+
+
+def test_strength_map_empty_without_history():
+    with _temp_db():
+        assert ss.strength_map({}, 20, 1.0) == {}
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))

@@ -87,7 +87,7 @@ eod_conviction.py    EOD conviction board — fuses breakout+delivery+deals+OI b
 eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours
 eod_scheduler.py     Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest), persists last-run in eod_meta
 sectors.py           Curated NSE symbol→sector map (17 sectors, ~303 names) — dependency-free static data + sector_of()/all_sectors()
-sector_scan.py       Sector relative-strength (rotation) board over db.eod_bars — cross-sectional RS vs market median, ranks sectors + surfaces leaders/laggards
+sector_scan.py       Sector relative-strength (rotation) board over db.eod_bars — cross-sectional RS vs market median, ranks sectors + surfaces leaders/laggards; strength_map()/context() = the reusable sector pillar the EOD Scan + Conviction boards fold in
 angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
 notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger
@@ -104,7 +104,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 655 across 32 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 667 across 32 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -252,7 +252,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **655 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **667 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -391,6 +391,34 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Sector RS wired into Conviction + EOD scanner (suite 655 → 667)
+- **Why:** we built a sector RS board but it sat on its own tab. A breakout **in a
+  leading sector** should outrank the same breakout in a laggard — so sector strength
+  belongs as a confirmation pillar inside the boards that actually rank names.
+- **What:** `sector_scan.py` refactored — record-building extracted into pure
+  `_collect(grouped,…)` + `_rank_records()`, reused by both `scan()` and two new
+  reusable helpers: **`strength_map(grouped,…)`** → `{sector: {rank, rs, strength,
+  count, total}}`, and **`context(smap, symbol)`** → per-name `{sector, rank, rs,
+  strength, total, leading, lagging}` (leading ≥67th pct, lagging ≤33rd). Both compute
+  off the **already-loaded** bars — no second DB pass.
+- **Conviction** (`eod_conviction.board`): computes the strength map once, threads a
+  per-name `context` into `_pick`. `_pillars_long` gains a **🧭 leading-sector** pillar,
+  `_pillars_short` a **🧭 lagging-sector** pillar (weight `_SECTOR_W = 14`) — so it's a
+  real, independent confirmation that lifts confirmation count + conviction. Each pick
+  now carries `pick["sector"]`.
+- **EOD scanner** (`eod_scanner.scan`): attaches sector context to each row; `_score`
+  adds **+8** for a leading sector / **−6** for a lagging one, and `_tags` adds a
+  `🧭 <sector> #<rank>` badge. Lazy `import sector_scan` inside the functions breaks the
+  `sector_scan → eod_scanner` import cycle.
+- **UI:** coloured 🧭 sector chip on each conviction card (green leading / red lagging),
+  the badge on scanner rows, and updated tab/tooltip copy.
+- **Smoke run:** IT ramped up + Banks down → IT strength 100 (leading); TCS long picks up
+  the `🧭 IT is a leading sector (#1/2, RS +35)` pillar, scanner tags it `🧭 IT #1`.
+- **Tests:** +12 (**655 → 667**): `strength_map`/`context` leading/lagging thresholds +
+  empty/unclassified guards; conviction sector pillar (long-leading / short-lagging,
+  none-when-mid, `_pick` carries sector + extra confirmation, seeded `board()`); scanner
+  `_score` bonus/penalty + `_tags` badge + seeded `scan()`. Lint clean.
 
 ### 2026-07-17 — Sector relative-strength (rotation) board (suite 631 → 655)
 - **Why:** individual breakouts work better when the whole SECTOR is bid — money
