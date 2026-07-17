@@ -379,6 +379,28 @@ def api_eod_scan():
     ))
 
 
+@app.route("/api/eod/sectors")
+def api_eod_sectors():
+    """Sector relative-strength (rotation) board over the ingested EOD history:
+    ranks sectors by RS vs the market and surfaces the leading names. Off-hours,
+    no network. ?minPrice=&minValueCr=&namesPerSector=&leadSectors=."""
+    import sector_scan
+
+    def fnum(name, default):
+        v = request.args.get(name)
+        try:
+            return float(v) if v not in (None, "") else default
+        except ValueError:
+            return default
+
+    return jsonify(sector_scan.scan(
+        min_price=fnum("minPrice", 20.0),
+        min_value_cr=fnum("minValueCr", 2.0),
+        names_per_sector=int(fnum("namesPerSector", 5)),
+        lead_sectors=int(fnum("leadSectors", 4)),
+    ))
+
+
 @app.route("/api/eod/deals")
 def api_eod_deals():
     """Latest bulk/block deals (institutional footprint), market-wide and off-hours.

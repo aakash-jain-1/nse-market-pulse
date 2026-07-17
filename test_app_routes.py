@@ -430,6 +430,25 @@ def test_eod_scan_arg_parsing():
         assert seen["fno_only"] is False and seen["with_deals"] is False
 
 
+def test_eod_sectors_arg_parsing():
+    import sector_scan
+    seen = {}
+
+    def fake(min_price=20.0, min_value_cr=2.0, names_per_sector=5, lead_sectors=4):
+        seen.update(min_price=min_price, min_value_cr=min_value_cr,
+                    names_per_sector=names_per_sector, lead_sectors=lead_sectors)
+        return {"sectors": [], "leaders": []}
+
+    with _patch(sector_scan, "scan", fake):
+        st, j = _json("/api/eod/sectors?minPrice=50&minValueCr=5&namesPerSector=3&leadSectors=6")
+        assert st == 200 and "sectors" in j
+        assert seen == {"min_price": 50.0, "min_value_cr": 5.0,
+                        "names_per_sector": 3, "lead_sectors": 6}
+        _json("/api/eod/sectors")                     # defaults
+        assert seen == {"min_price": 20.0, "min_value_cr": 2.0,
+                        "names_per_sector": 5, "lead_sectors": 4}
+
+
 def test_eod_deals_route():
     import deals
     seen = {}

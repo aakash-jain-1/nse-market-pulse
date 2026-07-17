@@ -86,6 +86,8 @@ eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/g
 eod_conviction.py    EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals that agree; save→ideas / digest→notify
 eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours
 eod_scheduler.py     Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest), persists last-run in eod_meta
+sectors.py           Curated NSE symbol→sector map (17 sectors, ~303 names) — dependency-free static data + sector_of()/all_sectors()
+sector_scan.py       Sector relative-strength (rotation) board over db.eod_bars — cross-sectional RS vs market median, ranks sectors + surfaces leaders/laggards
 angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
 notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger
@@ -102,7 +104,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 631 across 30 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 655 across 32 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -250,7 +252,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **631 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **655 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -389,6 +391,31 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Sector relative-strength (rotation) board (suite 631 → 655)
+- **Why:** individual breakouts work better when the whole SECTOR is bid — money
+  rotates between sectors over weeks and riding the leading one is a durable swing edge.
+  We had zero sector awareness.
+- **What:** `sectors.py` — a curated, dependency-free NSE symbol→sector map (**17 sectors,
+  ~303 names** covering F&O + the liquid cash universe; unrecognised symbols are simply
+  left unclassified). `sector_scan.py` — mines `db.eod_bars` for **cross-sectional**
+  relative strength: each name's blended (20/60-day) return minus the **market median**
+  (we have no index history in the bhavcopy, so the market IS the universe). A sector's
+  strength = the median RS of its present constituents; sectors are ranked, and the top
+  names inside the strongest `leadSectors` become the **leader board** (downtrends
+  excluded); the weakest sector's names are the **laggards**. All the maths (`_ret`,
+  `_blended`, `_median`, `_percentiles`, `_aggregate`) is pure; `scan()` is one
+  `eod_bars_all` query reusing `eod_scanner._features`. Works off-hours, no network.
+- **Endpoint/UI:** `GET /api/eod/sectors?minPrice=&minValueCr=&namesPerSector=&leadSectors=`
+  + a **🧭 Sectors** tab (ranked sector table with a centre-zero RS bar + breadth, and
+  Leaders/Laggards name tables; rows click through to the stock modal).
+- **First real run:** Realty strongest (RS +16.5), across 303 classified names / 17 sectors.
+- **Note:** RS improves with backfill depth (best with ~60+ sessions); with only a few days
+  it degrades to a short-horizon RS. It's a market-wide *board* (like Conviction), not a
+  per-symbol backtest strategy — sector strength is cross-sectional.
+- **Tests:** +24 (**631 → 655**): map integrity/canonicalisation, RS math + percentiles +
+  aggregation ranking/breadth, seeded `scan()` (IT leaders vs Banks laggards, filters,
+  empty-db note, clamps), and the route arg-parsing. Lint clean.
 
 ### 2026-07-17 — Auto EOD backfill after close (suite 618 → 631)
 - **Why:** the EOD scanner, conviction board, and daily/portfolio backtests all read the

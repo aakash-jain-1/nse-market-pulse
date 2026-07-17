@@ -65,6 +65,7 @@ layers analytics on top:
 | 🔎 **Scanner** | One ranked board combining volume spikes, money flow, momentum & OI buildup, with filters (direction, %chg, volume ×avg, value, OI signal, F&O-only). |
 | 🌐 **EOD Scan** | The **market-wide, off-hours** scanner: ranks the whole EOD bhavcopy universe (up to **~2400** cash names + F&O, not just the ~100–150 live hot lists) for swing setups — breakouts/breakdowns of the recent N-day high/low, gaps, unusual volume, trend vs 20/50-day MAs, NR7 squeezes, and **high delivery% accumulation** (real buying vs intraday churn, with a "+Npp vs avg" spike hint). A **🐋 deals** toggle cross-references the latest **bulk/block deals** (institutional footprint) and flags rows a big player just traded. Works nights/weekends. Click **⬇ Backfill history** once to load recent daily bars (also merges delivery%) — or let it **auto-refresh** shortly after the 15:30 close (see *Auto EOD refresh* below). Prices are the last EOD close. |
 | 🏆 **Conviction** | The **synthesis board** — fuses the independent EOD signals (breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint, F&O OI buildup, volume, trend) into ONE ranked **"tomorrow's watchlist"** via **confirmation stacking**: names are ranked by how many independent signals *agree*, so a setup confirmed 4 ways outranks a lone strong signal. Each pick carries a volatility-scaled 2R plan. **💾 Save to Ideas** keeps the board as a durable watchlist in the Ideas history; **🔔 Send digest** pushes the top picks to your phone (Telegram/webhook). Works off-hours. |
+| 🧭 **Sectors** | **Sector relative-strength / rotation** — ranks the ~16 sectors by each sector's median momentum **vs the whole market** (cross-sectional RS from the EOD bhavcopy), so you can see which sectors money is rotating **into** and **out of**, then surfaces the **leading names inside the strongest sectors** (the actionable watchlist) and the **laggards** in the weakest. Works off-hours; sharper the more history you backfill. |
 | ★ **Demand Score** | Composite ranking — stocks appearing across gainers, money-flow & volume spikes float to the top. |
 | **Volume Gainers** | Stocks trading far above their average volume. |
 | **F&O Open Interest** | OI spurts, classified long buildup / short buildup / short covering / long unwinding. |
@@ -779,6 +780,7 @@ python nse_demand.py losers     # top losers
 | `POST /api/eod/conviction/save` | Persist the current conviction board into the Ideas history (dated to the EOD session; never clobbers a live idea) |
 | `POST /api/eod/conviction/digest` | Push the conviction digest (top longs/shorts) to the configured off-screen channel (Telegram/webhook) |
 | `GET /api/eod/scheduler` · `POST /api/eod/scheduler/run` | Auto post-close EOD refresh: state (enabled/runAt/lastRun/dueToday) · trigger a backfill+deals+digest now (off-thread) |
+| `GET /api/eod/sectors?minPrice=&minValueCr=&namesPerSector=&leadSectors=` | **Sector relative-strength board** — ranks sectors by RS vs the market, surfaces leading names in the strongest sectors + laggards in the weakest |
 | `GET·POST /api/eod/backfill[{days}]` | Load the last N sessions' bhavcopies (+ delivery%) into the local history cache; POST starts a background job, GET polls progress |
 | `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
 | `GET /api/live/config` | Live feed status: provider (angel/dhan)? configured? connected? market-open? watchlist (never returns secrets) |
@@ -818,6 +820,8 @@ nse-market-pulse/
 ├── eod_conviction.py       # EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals agreeing; save→ideas / digest→notify
 ├── eod_options.py          # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
 ├── eod_scheduler.py        # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
+├── sectors.py              # Curated NSE symbol→sector map (17 sectors, ~303 names) — static data + sector_of()/all_sectors()
+├── sector_scan.py          # Sector relative-strength board over db.eod_bars — cross-sectional RS vs market, ranks sectors + leaders/laggards
 ├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
 ├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
 ├── strategies.py           # 17 strategy generators (incl. regime-adaptive) + regime detector
@@ -833,7 +837,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 631 unit tests, 30 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/db/app+routes/feeds/…)
+├── test_*.py               # 655 unit tests, 32 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

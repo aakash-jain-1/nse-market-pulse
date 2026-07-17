@@ -47,6 +47,8 @@ NSE/
 ├── eod_conviction.py  # EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals agreeing; save→ideas / digest→notify
 ├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
 ├── eod_scheduler.py   # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
+├── sectors.py         # Curated NSE symbol→sector map (17 sectors, ~303 names) — static data + sector_of()/all_sectors()
+├── sector_scan.py     # Sector relative-strength board over db.eod_bars — cross-sectional RS vs market, ranks sectors + leaders/laggards
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
@@ -57,7 +59,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 631 unit tests across 30 suites (see below)
+├── test_*.py          # 655 unit tests across 32 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -67,6 +69,8 @@ NSE/
 │   ├── test_eod_conviction.py                       # conviction board: OI-state quadrants / pillars / 2R plan / stacked ranking / save-skip
 │   ├── test_eod_options.py                          # resilient EOD option chain: parse/assemble/chain/summary/analytics
 │   ├── test_eod_scheduler.py                        # auto post-close refresh: pure should_run gating / job orchestration / tick recording / routes
+│   ├── test_sectors.py                              # sector map integrity: reverse index / canonicalisation / coverage / first-wins
+│   ├── test_sector_scan.py                          # sector RS: _ret/_blended/_median/_percentiles/_aggregate + seeded scan (leaders vs laggards)
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
 │   ├── test_quote.py / test_quote_more.py / test_book.py   # nse_quote math + parsers + depth
 │   ├── test_ideas.py / test_ideas_journal.py / test_strategies.py / test_paper.py
@@ -521,6 +525,18 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🧭 Sector relative-strength (rotation) board** — individual breakouts are stronger when
+  the whole *sector* is being bought, but we had no sector awareness. New `sectors.py` (a
+  curated, dependency-free symbol→sector map: **17 sectors, ~303 names**) + `sector_scan.py`,
+  which mines `db.eod_bars` for **cross-sectional** RS: each name's blended (20/60-day) return
+  minus the **market median** (the bhavcopy has no index history, so the market IS the
+  universe), aggregated to a per-sector median RS. Sectors are ranked, the top names inside the
+  strongest sectors become the **leader board** (downtrends excluded), the weakest sector's
+  names are the **laggards**. Pure maths (`_ret`/`_blended`/`_median`/`_percentiles`/
+  `_aggregate`); `scan()` is one `eod_bars_all` query reusing `eod_scanner._features`.
+  `GET /api/eod/sectors` + a **🧭 Sectors** tab (ranked table with a centre-zero RS bar +
+  Leaders/Laggards). First live run: Realty strongest (RS +16.5). Tests **+24** (suite
+  **631 → 655**); lint clean.
 - **🗓️ Auto EOD backfill after close** — the EOD scanner / conviction board / backtests
   read the ingested bhavcopy universe, which only refreshed on a manual "Load EOD". New
   `eod_scheduler.py` runs **one paced, block-aware refresh** (bhavcopy → deals → optional

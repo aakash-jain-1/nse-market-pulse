@@ -627,6 +627,26 @@
         <button id="cvDigest" title="Push the top picks to your configured off-screen channel (Telegram/webhook). Set it up in the header 🔔 first.">🔔 Send digest</button>
         <span id="cvStatus" style="color:var(--muted);font-size:11px"></span>
       </div>
+      <div id="secBar" class="scan-filters" style="display:none">
+        <label title="How many leading names to show per strong sector.">Names / sector
+          <select id="secNames">
+            <option value="3">3</option>
+            <option value="5" selected>5</option>
+            <option value="8">8</option>
+          </select>
+        </label>
+        <label title="How many of the strongest sectors feed the leader board.">Lead sectors
+          <select id="secLead">
+            <option value="3">Top 3</option>
+            <option value="4" selected>Top 4</option>
+            <option value="6">Top 6</option>
+          </select>
+        </label>
+        <label>Min price<input type="number" id="secMinPrice" min="0" step="10" style="width:70px" value="20"></label>
+        <label>Min value (Cr)<input type="number" id="secMinVal" min="0" step="1" style="width:70px" value="2"></label>
+        <button id="secApply">Apply</button>
+        <span id="secStatus" style="color:var(--muted);font-size:11px"></span>
+      </div>
       <div id="futMomentum" class="fut-mom" style="display:none"></div>
       <div id="tableWrap"><div class="loading">Loading…</div></div>
     </div>
@@ -848,6 +868,8 @@
         desc: "Scans the WHOLE cash market (~2400 names, not just the live hot lists) from NSE's End-of-Day bhavcopy history for swing setups — breakouts/breakdowns of the recent high/low, gaps, unusual volume, trend vs 20/50-day MAs and NR7 squeezes. Works off-hours & weekends. Click ‘Backfill history’ once to load recent daily bars. Educational — NOT advice." },
       { key: "conviction", label: "🏆 Conviction", title: "EOD Conviction Board — tomorrow's watchlist",
         desc: "FUSES the independent end-of-day signals — breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint and F&O OI buildup — into one ranked watchlist. Names are ranked by how many signals AGREE (confirmation stacking), so a setup confirmed 4 ways beats a single strong signal. Save it to the Ideas history or push a digest to your phone. Works off-hours. Educational — NOT advice." },
+      { key: "sectors",    label: "🧭 Sectors", title: "Sector Relative-Strength — where's the money rotating?",
+        desc: "Ranks the ~16 sectors by RELATIVE STRENGTH (each sector's median momentum vs the whole market) so you can see which sectors money is rotating INTO and OUT of, then surfaces the leading names inside the strongest sectors — the actionable watchlist. Cross-sectional RS from the EOD bhavcopy history; works off-hours. The more days you backfill, the better it works. Educational — NOT advice." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
         desc: "Composite ranking — stocks appearing across gainers, money-flow & volume spikes rank highest." },
       { key: "volgainers", label: "Volume Gainers", title: "Volume Gainers (unusual activity)",
@@ -1057,6 +1079,8 @@
         current === "eod" ? "flex" : "none";
       document.getElementById("convBar").style.display =
         current === "conviction" ? "flex" : "none";
+      document.getElementById("secBar").style.display =
+        current === "sectors" ? "flex" : "none";
       document.getElementById("futMode").style.display =
         current === "futures" ? "flex" : "none";
       document.getElementById("recoBar").style.display =
@@ -1196,6 +1220,82 @@
         ? `<div class="conv-col"><h3 class="conv-col-h">${title} <span style="color:var(--muted);font-weight:400">(${arr.length})</span></h3>${arr.map(convCard).join("")}</div>`
         : "";
       return cov + `<div class="conv-grid">${col("🟢 Longs", longs)}${col("🔴 Shorts", shorts)}</div>`;
+    }
+
+    function sectorsQuery() {
+      const p = new URLSearchParams();
+      const g = id => document.getElementById(id);
+      p.set("namesPerSector", g("secNames").value || "5");
+      p.set("leadSectors", g("secLead").value || "4");
+      if (g("secMinPrice").value !== "") p.set("minPrice", g("secMinPrice").value);
+      if (g("secMinVal").value !== "") p.set("minValueCr", g("secMinVal").value);
+      return "?" + p.toString();
+    }
+
+    // A horizontal RS bar: green right of centre = outperforming the market, red left.
+    function secRsBar(rs, maxAbs) {
+      const m = maxAbs || 1;
+      const frac = Math.max(-1, Math.min(1, (rs || 0) / m));
+      const w = Math.abs(frac) * 50;                       // half-width (centre = market)
+      const col = rs >= 0 ? "var(--green)" : "var(--red)";
+      const side = rs >= 0 ? `left:50%;width:${w}%` : `right:50%;width:${w}%`;
+      return `<span class="rs-track"><i style="position:absolute;${side};background:${col}"></i>
+        <span class="rs-zero"></span></span>`;
+    }
+
+    function renderSectors(data) {
+      const secs = data.sectors || [];
+      const mkt = data.market;
+      const cov = `<div class="chart-note" style="margin:0 0 8px">🧭 <b>Sector relative-strength</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.classified || 0)} classified names, ${fmtNum(data.scanned || 0)} scored · RS is each name's ${data.windows ? data.windows.short + "/" + data.windows.long + "-day" : ""} blended return vs the <b>market median</b>${mkt ? " (" + (mkt.medianReturn >= 0 ? "+" : "") + mkt.medianReturn + "%, breadth " + mkt.breadthUpPct + "% up)" : ""}. Last EOD close, not live.</div>`;
+      if (!secs.length)
+        return cov + `<div class="empty">${escapeHtml(data.note || "No classified EOD history yet — backfill more days on the 🌐 EOD Scan tab.")}</div>`;
+      const maxAbs = Math.max(1, ...secs.map(s => Math.abs(s.rs || 0)));
+      const secRows = secs.map(s => {
+        const strong = s.rank <= (data.filters ? data.filters.leadSectors : 4);
+        return `<tr${strong ? ' style="background:rgba(34,197,94,0.06)"' : ""}>
+          <td style="text-align:right;color:var(--muted)">${s.rank}</td>
+          <td><b>${escapeHtml(s.sector)}</b> <span style="color:var(--muted);font-size:10px">${s.count}</span></td>
+          <td class="${s.rs >= 0 ? "pos" : "neg"}" style="text-align:right;font-weight:600">${s.rs >= 0 ? "+" : ""}${s.rs != null ? s.rs : "—"}</td>
+          <td style="width:160px">${secRsBar(s.rs, maxAbs)}</td>
+          <td style="text-align:right">${s.medianReturn != null ? (s.medianReturn >= 0 ? "+" : "") + s.medianReturn + "%" : "—"}</td>
+          <td style="text-align:right">${s.breadthUpPct != null ? s.breadthUpPct + "%" : "—"}</td>
+          <td style="color:var(--muted);font-size:11px">${(s.topNames || []).join(", ")}</td>
+        </tr>`;
+      }).join("");
+      const secTable = `<div style="overflow-x:auto"><table class="tbl" style="min-width:640px">
+        <thead><tr><th style="text-align:right">#</th><th>Sector</th>
+        <th style="text-align:right" title="Median relative strength of the sector's names vs the market (percentage points)">RS</th>
+        <th title="Green right of centre = outperforming the market; red left = lagging">vs market</th>
+        <th style="text-align:right" title="Median blended return of the sector's names">Return</th>
+        <th style="text-align:right" title="% of the sector's names up on the day">Breadth</th>
+        <th>Top names</th></tr></thead><tbody>${secRows}</tbody></table></div>`;
+
+      const leadCard = (r) => {
+        const tags = (r.tags || []).map(t => `<span class="scan-tag${t.indexOf("high") >= 0 ? " star" : ""}">${escapeHtml(t)}</span>`).join("");
+        return `<tr data-sym="${r.symbol}">
+          <td class="sym"><b>${escapeHtml(r.symbol)}</b><div style="color:var(--muted);font-size:10px">${escapeHtml(r.sector)}</div></td>
+          <td>${fmtPrice(r.close)}</td>
+          ${eodPct(r.pChange)}
+          <td class="${r.rs >= 0 ? "pos" : "neg"}" style="font-weight:600">${r.rs >= 0 ? "+" : ""}${r.rs}</td>
+          <td>${r.ret20 != null ? (r.ret20 >= 0 ? "+" : "") + r.ret20 + "%" : "—"}</td>
+          <td>${r.ret60 != null ? (r.ret60 >= 0 ? "+" : "") + r.ret60 + "%" : "—"}</td>
+          <td><div class="scan-tags">${tags || "—"}</div></td>
+        </tr>`;
+      };
+      const leaders = data.leaders || [], laggards = data.laggards || [];
+      const leadTbl = (title, arr, note) => arr.length
+        ? `<div style="flex:1 1 380px;min-width:320px">
+             <h3 class="conv-col-h">${title} <span style="color:var(--muted);font-weight:400">(${arr.length})</span></h3>
+             <div style="color:var(--muted);font-size:11px;margin:-4px 0 6px">${note}</div>
+             <div style="overflow-x:auto"><table class="tbl" style="min-width:420px"><thead><tr><th>Stock</th><th>Close</th><th>%Chg</th>
+             <th title="Relative strength vs market (pp)">RS</th><th>${data.windows ? data.windows.short : 20}d</th><th>${data.windows ? data.windows.long : 60}d</th><th>Setup</th></tr></thead>
+             <tbody>${arr.map(leadCard).join("")}</tbody></table></div></div>`
+        : "";
+      const boards = `<div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px">
+        ${leadTbl("🟢 Leaders — strongest sectors", leaders, "Top names inside the leading sectors (RS-ranked, downtrends excluded) — the actionable watchlist.")}
+        ${leadTbl("🔴 Laggards — weakest sector", laggards, "Names in the weakest sector — avoid, or short candidates.")}
+      </div>`;
+      return cov + secTable + boards;
     }
 
     async function convAction(kind) {
@@ -4057,6 +4157,25 @@
           dot.style.background = "var(--green)";
           return;
         }
+        if (current === "sectors") {
+          const data = await fetch("/api/eod/sectors" + sectorsQuery()).then(r => r.json());
+          if (data.error) throw new Error(data.error);
+          window._lastRows = (data.leaders || []).concat(data.laggards || []);
+          wrap.innerHTML = renderSectors(data);
+          annotateInfo(wrap);
+          wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
+            tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
+          document.getElementById("futMomentum").style.display = "none";
+          eodUpdateStatus(data.coverage);
+          const ss = document.getElementById("secStatus");
+          if (ss) ss.textContent = data.market
+            ? `${fmtNum(data.scanned || 0)} names scored across ${(data.sectors || []).length} sectors`
+            : "";
+          document.getElementById("updated").textContent =
+            "Updated " + new Date().toLocaleTimeString("en-IN");
+          dot.style.background = "var(--green)";
+          return;
+        }
         let url = "/api/" + current + (current === "scanner" ? scannerQuery() : "");
         if (current === "recos")
           url = "/api/recommendations" + (document.getElementById("recoFno").checked ? "?fno=1" : "");
@@ -4788,6 +4907,9 @@
     document.getElementById("cvFno").onchange = load;
     document.getElementById("cvSave").onclick = () => convAction("save");
     document.getElementById("cvDigest").onclick = () => convAction("digest");
+    document.getElementById("secApply").onclick = load;
+    document.getElementById("secNames").onchange = load;
+    document.getElementById("secLead").onchange = load;
     document.getElementById("recoFno").onchange = load;
     document.getElementById("simTake").onclick = async () => {
       const btn = document.getElementById("simTake");
