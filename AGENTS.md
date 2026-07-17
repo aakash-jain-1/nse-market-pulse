@@ -43,6 +43,7 @@ NSE/
 ├── nse_quote.py       # Per-stock quote/chart/depth (NextApi) + OHLCV candles (charting)
 ├── bhavcopy.py        # EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback + backfill(days)
 ├── eod_scanner.py     # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7) — off-hours, pure
+├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
@@ -52,11 +53,12 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (9 strategies)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 507 unit tests across 25 suites (see below)
+├── test_*.py          # 523 unit tests across 26 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_bhavcopy.py                             # EOD UDiFF parsers + fetch walk-back + backfill + price/lot fallback
 │   ├── test_eod_scanner.py                          # full-market swing scanner: features/tags/score/views/scan/status
+│   ├── test_eod_options.py                          # resilient EOD option chain: parse/assemble/chain/summary/analytics
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
 │   ├── test_quote.py / test_quote_more.py / test_book.py   # nse_quote math + parsers + depth
 │   ├── test_ideas.py / test_ideas_journal.py / test_strategies.py / test_paper.py
@@ -379,6 +381,10 @@ with no creds the app is unchanged.
     (call/put IV vs strike) — client-side SVG, spot marker on both.
   - **All-expiry summary** — PCR / max-pain / OI per expiry with a bull/bear
     bias flag, via `get_option_summary()` (`/api/optionchain/<sym>/summary`).
+  - **EOD fallback** (`eod_options.py`) — when the live NextApi chain is empty/
+    blocked (off-hours, 403), the loader auto-switches to the FO-bhavcopy chain
+    (`/api/eod/optionchain/<sym>`) — same PCR/max-pain/OI-walls, shown with a 🌐 EOD
+    badge (no IV/bid-ask/Greeks in the bhavcopy). Works nights/weekends.
   - **Full F&O universe picker** — the symbol box autocompletes across all ~215
     F&O names (`get_fno_universe()` / `/api/fno/universe`), with one-click
     **index chips** (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY/NIFTYNXT50). Index
@@ -471,11 +477,25 @@ with no creds the app is unchanged.
 - ✅ *(done — see below)* `jugaad-data`/`nsefeed`-style fallback for the flaky bits:
   implemented natively as `bhavcopy.py` (EOD UDiFF ingest), no third-party dep.
 - ✅ *(done — see below)* market-wide EOD scanner over the full bhavcopy universe
-  (`eod_scanner.py` + 🌐 EOD Scan tab). Still open: parse FO options (STO/IDO) for
-  resilient EOD max-pain/PCR; a futures rollover tracker.
+  (`eod_scanner.py` + 🌐 EOD Scan tab).
+- ✅ *(done — see below)* resilient EOD option chain (max-pain/PCR/OI walls) from FO
+  bhavcopy options (`eod_options.py`). Still open: a futures rollover tracker;
+  delivery% market-wide (needs the sec_bhavdata_full file).
 
 ## Done recently
 
+- **⛓ EOD option chain (`eod_options.py`)** — the live chain rides NSE's anti-bot
+  NextApi (403s intermittently, empty/stale off-hours). The FO bhavcopy carries every
+  contract's EOD OI/close/volume in a plain static ZIP, so this rebuilds the chain +
+  analytics resiliently. `bhavcopy.parse_fo_options()` (pure) extracts the option rows
+  (STO/IDO) `parse_fo` drops; `eod_options.chain()/summary()` assemble them into the
+  **same shape** as `nse_quote.get_option_chain` (rows/pcr/maxPain/atm/support/
+  resistance) + `{eod,date}` — **max-pain delegated to `nse_quote._max_pain`** (one
+  impl). No IV/bid-ask in the bhavcopy → those legs are None. The ⛓ Option-Chain UI
+  now **auto-falls-back** to EOD when the live chain is empty/blocked, with a 🌐 EOD
+  badge (expiry dropdown + all-expiry summary stay in EOD mode; IV-rank skipped).
+  Verified live (RELIANCE: 3 expiries, PCR 0.59, max-pain 1320). `/api/eod/optionchain/
+  <sym>[?expiry]` + `/summary`. Tests **+16** (suite **507 → 523**).
 - **🌐 Full-market EOD / swing scanner (`eod_scanner.py`)** — the live scanner only
   sees NSE's ~100–150 intraday hot lists and reads all-zeros off-hours, but we
   already persist whole-market daily bars in `db.eod_bars` (from bhavcopy). This new

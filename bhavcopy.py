@@ -222,6 +222,59 @@ def parse_fo(text):
     return {"date": date, "futures": futs, "lots": lots, "underlying": underlying}
 
 
+def parse_fo_options(text, underlying=None):
+    """Parse OPTION rows (STO stock / IDO index) from an FO UDiFF bhavcopy into a
+    per-expiry chain. `parse_fo` drops these to stay light; this pulls them for the
+    resilient EOD option-chain view.
+
+    `underlying` (a symbol) filters to ONE name — cheap, since the FO file has tens
+    of thousands of option rows. Returns:
+        {date, symbol, expiries:[ISO,...] (nearest first),
+         byExpiry: {ISO_expiry: {underlying: spot, rows: {strike: {ce, pe}}}}}
+    Each leg = {oi, chgOi, ltp, change, volume, prevClose}. The bhavcopy has no
+    IV / bid-ask, so the analytics layer fills those as None to match the live
+    `get_option_chain` leg shape.
+    """
+    want = underlying.upper().strip() if underlying else None
+    date = None
+    by = {}
+    for row in csv.DictReader(io.StringIO(text)):
+        tp = (row.get("FinInstrmTp") or "").strip().upper()
+        if tp not in ("STO", "IDO"):
+            continue
+        sym = (row.get("TckrSymb") or "").strip().upper()
+        if not sym or (want and sym != want):
+            continue
+        if date is None:
+            date = (row.get("TradDt") or "").strip() or None
+        ot = (row.get("OptnTp") or "").strip().upper()
+        if ot not in ("CE", "PE"):
+            continue
+        strike = _num(row.get("StrkPric"))
+        if strike is None:
+            continue
+        exp = (row.get("XpryDt") or "").strip()
+        if not exp:
+            continue
+        close = _num(row.get("ClsPric"))
+        prev = _num(row.get("PrvsClsgPric"))
+        leg = {
+            "oi": _num(row.get("OpnIntrst")),
+            "chgOi": _num(row.get("ChngInOpnIntrst")),
+            "ltp": close,
+            "change": (close - prev) if (close is not None and prev is not None) else None,
+            "volume": _num(row.get("TtlTradgVol")),
+            "prevClose": prev,
+        }
+        slot = by.setdefault(exp, {"underlying": None, "rows": {}})
+        if slot["underlying"] is None:
+            slot["underlying"] = _num(row.get("UndrlygPric"))
+        slot["rows"].setdefault(strike, {"ce": None, "pe": None})[ot.lower()] = leg
+    # XpryDt is an ISO date (YYYY-MM-DD), so lexicographic sort == chronological;
+    # options that have expired aren't in the file, so the earliest is the nearest.
+    return {"date": date, "symbol": want, "expiries": sorted(by), "byExpiry": by}
+
+
 # ---------------------------------------------------------------------------
 # network (best-effort; all failures degrade to None/empty)
 # ---------------------------------------------------------------------------
@@ -275,6 +328,24 @@ def fetch_cm(date=None, walk=7):
 def fetch_fo(date=None, walk=7):
     """(date_str, {date, futures, lots, underlying}) for the latest FO bhavcopy."""
     return _fetch("fo", date, walk)
+
+
+def fetch_fo_text(date=None, walk=7):
+    """(date_str, decoded_csv_text) for the latest FO bhavcopy, with the same
+    weekend/holiday walk-back as fetch_fo. Used by the EOD option-chain parser,
+    which needs the option rows parse_fo discards. (date, None) if none found."""
+    for d in _recent_trading_days(date, walk):
+        raw = _download(fo_url(d))
+        if not raw:
+            continue
+        try:
+            text = _unzip(raw)
+        except Exception:
+            log.warning("bhavcopy fo unzip failed for %s", d, exc_info=True)
+            continue
+        if text:
+            return d.strftime("%Y-%m-%d"), text
+    return None, None
 
 
 def latest(force=False):

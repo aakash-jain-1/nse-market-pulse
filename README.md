@@ -77,7 +77,9 @@ layers analytics on top:
   histogram** (1m/5m/15m/1D selector, hover → open/high/low/close, %chg, volume &
   time), key metrics, and buy/sell.
 - **Option chain**: full chain for any equity/index, PCR, Max-Pain, ATM, and
-  **Greeks** (Black-Scholes: delta/gamma/theta/vega), OI walls, IV skew.
+  **Greeks** (Black-Scholes: delta/gamma/theta/vega), OI walls, IV skew. When the
+  live feed is blocked/off-hours it **auto-falls-back to an EOD chain** built from
+  the FO bhavcopy (same PCR/Max-Pain/OI-walls, 🌐 EOD badge; no IV/Greeks).
 - **Market depth**: 5-level bid/ask, with an **order-book pressure** signal — a
   buy/sell imbalance (ΣBid vs ΣAsk) + spread shown on the Live depth panel, the
   detail modal, and as per-row stripes on the Live watchlist. The **Scanner** adds
@@ -242,7 +244,7 @@ flowchart TB
     subgraph API["app.py — routes"]
         direction TB
         R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}<br/>/api/eod/{scan,backfill,status,price,quote,refresh}"]
-        R2["/api/{recommendations,deepdive,quote,<br/>chart,optionchain,fno/universe}"]
+        R2["/api/{recommendations,deepdive,quote,<br/>chart,optionchain,fno/universe}<br/>/api/eod/optionchain/&lt;sym&gt;[/summary]"]
         R3["/api/sim/{strategies,summary,daily,leaderboard,performance,<br/>backtest,backtest_daily,walkforward,strategy_of_day,regime,take,auto,mode,reset}"]
         R4["/api/paper/{portfolio,order,option_order,<br/>futures_order,reset}"]
         R5["/api/log/{status,snapshot,backtest,iv,download}<br/>/api/iv/rank"]
@@ -254,6 +256,7 @@ flowchart TB
         NQ["nse_quote.py<br/>• NextApi gateway<br/>• quote / depth / intraday chart<br/>• option chain + Black-Scholes Greeks"]
         BC["bhavcopy.py<br/>• EOD UDiFF bhavcopy (static archive)<br/>• resilient price / lot fallback<br/>• ingest / backfill → eod_bars/eod_oi"]
         ES["eod_scanner.py<br/>• full-market EOD/swing scan<br/>• breakouts/gaps/vol/MA/NR7<br/>• reads db.eod_bars (off-hours)"]
+        EO["eod_options.py<br/>• EOD option chain (FO bhavcopy)<br/>• PCR / max-pain / OI walls<br/>• live-shape fallback (off-hours)"]
         ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime() (+ India-VIX volState)<br/>• 17 generators"]
         SM["sim.py<br/>• per-strategy ledgers<br/>• take/update/summary<br/>• daily rollup + regime leaderboard"]
         BK["backtest_strategies.py<br/>• virtual-clock replay<br/>• scorecards + equity curves"]
@@ -284,6 +287,8 @@ flowchart TB
     R1 --> ES
     ES -.reads bars.-> DBM
     BC -.history.-> ES
+    R2 -.EOD fallback.-> EO
+    BC -.FO options text.-> EO
 ```
 
 ---
@@ -766,6 +771,7 @@ nse-market-pulse/
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
 ├── bhavcopy.py             # EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback + backfill
 ├── eod_scanner.py          # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7) — off-hours
+├── eod_options.py          # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
 ├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
 ├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
 ├── strategies.py           # 17 strategy generators (incl. regime-adaptive) + regime detector
@@ -780,7 +786,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 507 unit tests, 25 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/eodscanner/db/app+routes/feeds/…)
+├── test_*.py               # 523 unit tests, 26 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/eodscanner/eodoptions/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

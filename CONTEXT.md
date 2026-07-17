@@ -82,6 +82,7 @@ nse_client.py        NSE session mgmt + hot-list fetch/normalize (CORE) + _fetch
 nse_quote.py         Per-stock quote/chart/DEPTH (NextApi) + OHLCV (charting) + get_book_stats
 bhavcopy.py          EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback + backfill(days)
 eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7) — off-hours, pure math
+eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours
 angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
 notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger
@@ -97,7 +98,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 507 across 25 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/eodscanner/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 523 across 26 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/eodscanner/eodoptions/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -159,7 +160,9 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   `/api/eod/price/<sym>`, `/api/eod/quote/<sym>`, `/api/eod/refresh` (POST → ingest
   the whole market into the EOD cache), **`/api/eod/scan?view=&limit=&minPrice=&
   minValueCr=&fno=1`** (full-market swing scanner), **`/api/eod/backfill`** (POST
-  {days} starts a background history load; GET polls progress).
+  {days} starts a background history load; GET polls progress),
+  **`/api/eod/optionchain/<sym>[?expiry]`** + **`/summary`** (resilient EOD option
+  chain from the FO bhavcopy — PCR/max-pain/OI walls, off-hours).
 - Live: `/api/live/config`, `/api/live/watch` (POST), `/api/live/seed/<sym>`, SSE stream.
 - Alerts: **`/api/alerts/status`** (no secrets), **`/api/alerts/test`** (POST).
 - Sim/research: `/api/sim/summary|daily|leaderboard|performance|analytics|regime`,
@@ -187,7 +190,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **507 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **523 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -256,8 +259,14 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   `db.eod_bars` → **works off-hours & weekends** (no live API). New **🌐 EOD Scan**
   tab (view selector + filters + ⬇ Backfill), `/api/eod/scan`, and a background
   `/api/eod/backfill` (POST starts, GET polls) built on `bhavcopy.backfill(days)`.
-  *Still open:* optional option-chain (STO/IDO) parsing for resilient EOD
-  max-pain/PCR; delivery% market-wide (UDiFF CM has no delivery column).
+- ✅ **EOD option chain (`eod_options.py`)** — resilient option chain from the FO
+  bhavcopy option rows (STO/IDO): PCR, max-pain, ATM, OI walls (support/resistance),
+  per-expiry summary — **off-hours & when the live NextApi is blocked**. Returns the
+  **same shape** as `nse_quote.get_option_chain`, so the existing ⛓ Option-Chain UI
+  renders it unchanged; the loader now **auto-falls-back** to EOD when the live chain
+  is empty/blocked, with a 🌐 EOD badge. `/api/eod/optionchain/<sym>[?expiry]` +
+  `/summary`. *Still open:* delivery% market-wide (UDiFF CM has no delivery column);
+  a futures rollover tracker.
 
 **Open (older roadmap, in AGENTS.md):**
 - Route paper-trading fills / `get_price` through the broker feed; extend Live tab
@@ -281,6 +290,32 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — EOD option chain from the FO bhavcopy (`eod_options.py`, suite 507 → 523)
+- **Why:** the live option chain rides NSE's anti-bot NextApi — it 403s
+  intermittently and reads empty/stale off-hours. But the FO bhavcopy carries every
+  contract's EOD OI/close/volume in a plain static ZIP (no anti-bot gate), so we can
+  rebuild the chain + analytics resiliently, off-hours and when the live feed is down.
+- **How:** `bhavcopy.parse_fo_options(text, underlying)` (PURE) extracts the option
+  rows (STO stock / IDO index) that `parse_fo` drops, into a per-expiry chain; new
+  `bhavcopy.fetch_fo_text()` gets the raw FO CSV (same walk-back as `fetch_fo`).
+  `eod_options.chain()/summary()` assemble it into the **exact shape** of
+  `nse_quote.get_option_chain`/`get_option_summary` (rows[{strike,ce,pe}], pcr,
+  maxPain, atmStrike, support/resistance walls) + `{eod:true, date}`. **Max-pain is
+  delegated to `nse_quote._max_pain`** (one implementation, same rows shape). The
+  bhavcopy has no IV/bid-ask/Greeks → those legs come back None (UI shows "—").
+- **Caching:** FO text cached module-side (30-min TTL, lock-guarded so cold callers
+  don't each re-download the ~MBs file); per-(symbol,expiry) chains memoized 15 min
+  (cap 128). Verified end-to-end on the live archive (RELIANCE: 3 expiries, spot
+  1296, 45 strikes, PCR 0.59, max-pain 1320, ATM 1300).
+- **UI:** the ⛓ Option-Chain loader now **auto-falls-back** to `/api/eod/optionchain`
+  when the live chain is empty/blocked (off-hours / NextApi 403), rendering with the
+  SAME renderer + a 🌐 EOD badge; the expiry dropdown and all-expiry summary stay in
+  EOD mode; IV-rank is skipped (no EOD IV).
+- **API:** `/api/eod/optionchain/<sym>[?expiry]` + `/api/eod/optionchain/<sym>/summary`.
+- **Tests +16** (`test_eod_options.py` 12 — helpers/_assemble/chain/summary/caching;
+  +3 bhavcopy parse_fo_options/fetch_fo_text; +1 app route). Suite **507 → 523**,
+  green; lint + JS syntax clean.
 
 ### 2026-07-17 — Full-market EOD / swing scanner (`eod_scanner.py`, suite 475 → 507)
 - **Why:** the live scanner only sees NSE's ~100–150 intraday hot lists and reads

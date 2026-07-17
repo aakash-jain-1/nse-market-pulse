@@ -377,6 +377,22 @@ def test_eod_backfill_get_post_and_busy():
         webapp._eod_backfill["running"] = False
 
 
+def test_eod_option_chain_and_summary():
+    import eod_options
+    seen = {}
+    with _patches(
+        (eod_options, "chain", lambda s, e=None: seen.update(sym=s, exp=e)
+            or {"symbol": s.upper(), "eod": True, "rows": [{"strike": 100}]}),
+        (eod_options, "summary", lambda s: {"symbol": s.upper(), "eod": True,
+                                            "expiries": [{"expiry": "28-Jul-2026"}]}),
+    ):
+        st, j = _json("/api/eod/optionchain/acme?expiry=28-Jul-2026")
+        assert st == 200 and j["symbol"] == "ACME" and j["eod"] is True
+        assert seen == {"sym": "acme", "exp": "28-Jul-2026"}
+        st, j = _json("/api/eod/optionchain/tcs/summary")
+        assert st == 200 and j["symbol"] == "TCS" and j["eod"] is True
+
+
 # ---------------------------------------------------------------------------
 # logger endpoints
 # ---------------------------------------------------------------------------

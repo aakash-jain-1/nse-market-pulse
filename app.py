@@ -397,6 +397,21 @@ def api_eod_backfill():
     return jsonify({**_eod_backfill, "started": True})
 
 
+@app.route("/api/eod/optionchain/<symbol>")
+def api_eod_option_chain(symbol):
+    """Resilient EOD option chain from the FO bhavcopy (works off-hours / when the
+    live NextApi is blocked). Same shape as /api/optionchain plus {eod:true,date}."""
+    import eod_options
+    return jsonify(eod_options.chain(symbol, request.args.get("expiry")))
+
+
+@app.route("/api/eod/optionchain/<symbol>/summary")
+def api_eod_option_summary(symbol):
+    """PCR / max-pain / OI per expiry from the EOD FO bhavcopy."""
+    import eod_options
+    return jsonify(eod_options.summary(symbol))
+
+
 @app.route("/api/chart/<symbol>")
 def api_chart(symbol):
     return jsonify(nse_quote.get_chart(symbol))

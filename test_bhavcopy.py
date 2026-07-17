@@ -259,6 +259,57 @@ def test_parse_fo_lots_and_underlying_maps():
     assert fo["date"] == "2026-07-16"
 
 
+def test_parse_fo_options_builds_chain():
+    rows = [
+        _opt("ACME", "2026-07-28", "100", ot="CE"),   # ClsPric 8 / prev 11 / OI 120900
+        _opt("ACME", "2026-07-28", "100", ot="PE"),
+        _opt("ACME", "2026-08-25", "100", ot="CE"),    # far expiry
+        {"TradDt": "2026-07-16", "FinInstrmTp": "STF", "TckrSymb": "ACME",
+         "XpryDt": "2026-07-28", "ClsPric": "101"},     # a FUTURE row → ignored
+        {"TradDt": "2026-07-16", "FinInstrmTp": "STO", "TckrSymb": "ACME",
+         "XpryDt": "2026-07-28", "StrkPric": "105", "OptnTp": "",
+         "ClsPric": "2", "OpnIntrst": "5"},             # blank OptnTp → skipped
+    ]
+    # give the near CE row a real underlying + change so we can assert them
+    rows[0].update(UndrlygPric="101", PrvsClsgPric="9", ClsPric="8",
+                   ChngInOpnIntrst="10", TtlTradgVol="50")
+    p = b.parse_fo_options(_csv(rows), "acme")           # case-insensitive filter
+    assert p["symbol"] == "ACME"
+    assert p["expiries"] == ["2026-07-28", "2026-08-25"]  # sorted ISO, nearest first
+    near = p["byExpiry"]["2026-07-28"]
+    assert near["underlying"] == 101.0
+    assert set(near["rows"]) == {100.0}                   # blank-OptnTp 105 dropped
+    ce = near["rows"][100.0]["ce"]
+    assert ce["oi"] == 120900.0 and ce["chgOi"] == 10.0
+    assert ce["ltp"] == 8.0 and ce["change"] == -1.0      # 8 - 9
+    assert near["rows"][100.0]["pe"] is not None
+
+
+def test_parse_fo_options_symbol_filter_excludes_others():
+    rows = [
+        _opt("ACME", "2026-07-28", "100", ot="CE"),
+        {"TradDt": "2026-07-16", "FinInstrmTp": "IDO", "TckrSymb": "NIFTY",
+         "XpryDt": "2026-07-28", "StrkPric": "24000", "OptnTp": "PE",
+         "ClsPric": "120", "OpnIntrst": "5000"},
+    ]
+    p = b.parse_fo_options(_csv(rows), "ACME")
+    assert 24000.0 not in p["byExpiry"]["2026-07-28"]["rows"]   # NIFTY filtered out
+    # No filter → both index (IDO) and stock (STO) options are parsed.
+    p2 = b.parse_fo_options(_csv(rows))
+    strikes = p2["byExpiry"]["2026-07-28"]["rows"]
+    assert 100.0 in strikes and 24000.0 in strikes
+
+
+def test_fetch_fo_text_walks_back_and_missing():
+    good = _zip(_csv([_opt("ACME", "2026-07-28", "100", ot="CE")]))
+    with _patch(b, "_download", lambda url: good if "20260715" in url else None):
+        d, text = b.fetch_fo_text(date=date(2026, 7, 16), walk=5)
+    assert d == "2026-07-15" and "ACME" in text
+    with _patch(b, "_download", lambda url: None):
+        d, text = b.fetch_fo_text(date=date(2026, 7, 16), walk=3)
+    assert d is None and text is None
+
+
 def test_parse_fo_skips_blank_symbol_and_keeps_first_nearest():
     # blank symbol row is ignored; a later EQUAL/greater expiry doesn't replace.
     rows = [

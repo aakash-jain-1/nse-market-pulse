@@ -712,7 +712,7 @@
   <div class="overlay" id="ocOverlay">
     <div class="modal" style="width:min(1040px,96vw)">
       <div class="modal-head">
-        <h3>⛓ Option Chain — <span id="ocSym">—</span></h3>
+        <h3>⛓ Option Chain — <span id="ocSym">—</span> <span id="ocSrc"></span></h3>
         <button class="close" id="ocClose">✕</button>
       </div>
       <div class="modal-body">
@@ -4174,33 +4174,43 @@
         loadOptionChain(sym);
       }
     }
-    async function loadOptionChain(sym, expiry) {
+    async function loadOptionChain(sym, expiry, eod) {
       sym = (sym || document.getElementById("ocInput").value || "").toUpperCase().trim().replace(/[^A-Z0-9&.\-]/g, "");
       if (!sym) return;
       document.getElementById("ocSym").textContent = sym;
-      document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Loading ${escapeHtml(sym)} option chain…</div>`;
+      document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Loading ${escapeHtml(sym)} ${eod ? "EOD " : ""}option chain…</div>`;
       document.getElementById("ocSummary").innerHTML = "";
       document.getElementById("ocLevels").innerHTML = "";
       document.getElementById("ocCharts").innerHTML = "";
       document.getElementById("ocMulti").innerHTML = "";
+      const base = eod ? "/api/eod/optionchain/" : "/api/optionchain/";
       try {
-        const url = "/api/optionchain/" + encodeURIComponent(sym) + (expiry ? "?expiry=" + encodeURIComponent(expiry) : "");
+        const url = base + encodeURIComponent(sym) + (expiry ? "?expiry=" + encodeURIComponent(expiry) : "");
         const d = await (await fetch(url)).json();
         if (d.error || !d.rows || !d.rows.length) {
-          document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">No option chain for ${sym}. Use an F&O symbol (e.g. RELIANCE, TCS, TATAMOTORS).</div>`;
+          // Live chain empty/blocked (off-hours, or NextApi 403) → fall back to the
+          // resilient EOD chain from the FO bhavcopy before giving up.
+          if (!eod) { loadOptionChain(sym, expiry, true); return; }
+          document.getElementById("ocSrc").innerHTML = "";
+          document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">No option chain for ${sym} (live or EOD). Use an F&O symbol (e.g. RELIANCE, TCS, TATAMOTORS).</div>`;
           return;
         }
         window._ocData = d;
+        window._ocEod = !!d.eod;
+        document.getElementById("ocSrc").innerHTML = d.eod
+          ? `<span class="badge" style="background:var(--muted);color:#04121f;font-weight:700" title="Live NextApi chain unavailable — showing the End-of-Day chain from NSE's FO bhavcopy (last close ${d.date || ""}). OI/PCR/Max-Pain are real EOD values; IV/bid-ask/Greeks aren't in the bhavcopy.">🌐 EOD ${d.date || ""}</span>`
+          : "";
         renderOCExpiries(d);
         renderOCSummary(d);
-        loadIvRank(d.symbol);
+        if (!d.eod) loadIvRank(d.symbol);   // no IV in the EOD bhavcopy → skip IV rank
         renderOCLevels(d);
         renderOCCharts(d);
         document.getElementById("ocViewToggle").style.display = "flex";
         renderOCTable(d);
         renderOCTradeBox(d);
-        loadOCMulti(sym);
+        loadOCMulti(sym, d.eod);
       } catch (e) {
+        if (!eod) { loadOptionChain(sym, expiry, true); return; }
         document.getElementById("ocTable").innerHTML = `<div class="empty" style="padding:24px">Failed: ${e.message}</div>`;
       }
     }
@@ -4292,11 +4302,12 @@
         <text x="2" y="${h-4}" fill="#8b98a9" font-size="9">${min.toFixed(0)}%</text>
         ${spotLine}${line(ceIV,"#ff5c68")}${line(peIV,"#26d07c")}</svg>`;
     }
-    async function loadOCMulti(sym) {
+    async function loadOCMulti(sym, eod) {
       const el = document.getElementById("ocMulti");
       el.innerHTML = `<div class="chart-note" style="margin-bottom:8px">Loading all-expiry summary…</div>`;
       try {
-        const d = await (await fetch("/api/optionchain/" + encodeURIComponent(sym) + "/summary")).json();
+        const base = eod ? "/api/eod/optionchain/" : "/api/optionchain/";
+        const d = await (await fetch(base + encodeURIComponent(sym) + "/summary")).json();
         const rows = (d.expiries || []).filter(e => e.pcr != null || e.maxPain != null);
         if (!rows.length) { el.innerHTML = ""; return; }
         el.innerHTML = `<h4 style="margin:6px 0 8px;color:var(--muted)">All expiries</h4>
@@ -4647,7 +4658,7 @@
     document.getElementById("ocLoad").onclick = () => loadOptionChain();
     document.getElementById("ocInput").onkeydown = (e) => { if (e.key === "Enter") loadOptionChain(); };
     document.getElementById("ocExpiry").onchange = (e) =>
-      loadOptionChain(document.getElementById("ocInput").value, e.target.value);
+      loadOptionChain(document.getElementById("ocInput").value, e.target.value, window._ocEod);
     document.getElementById("ocClose").onclick =
       () => document.getElementById("ocOverlay").classList.remove("show");
     document.getElementById("ocOverlay").onclick = (e) => {
