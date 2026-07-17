@@ -152,6 +152,25 @@ def test_simulate_capital_frees_up_for_reuse():
     assert r["tradesTaken"] == 2 and r["tradesSkippedSlot"] == 0
 
 
+def test_simulate_mark_to_market_shows_intratrade_drawdown():
+    # A long that dips well below entry mid-hold, then exits a winner. Cost-basis sees
+    # a flat curve (no drawdown); mark-to-market must show the mid-trade dip.
+    trade = _t(entry=100, stop=90, exit_px=110, status="TARGET",
+               opened="2026-07-01", closed="2026-07-05")
+    closes = {"ACME": {"2026-07-01": 100, "2026-07-02": 95, "2026-07-03": 92,
+                       "2026-07-04": 105}}
+    mtm = pb.simulate([trade], start_capital=1_000_000, risk_pct=1.0, closes=closes)
+    cost = pb.simulate([trade], start_capital=1_000_000, risk_pct=1.0)      # no closes
+    # Same realized outcome either way (qty 1,000 × +10 = +10,000)…
+    assert mtm["endCapital"] == cost["endCapital"] == 1_010_000.0
+    # …but only MTM exposes the -8% mark on 2026-07-03 (92 vs 100 entry, 1,000 sh).
+    assert mtm["maxDrawdownPct"] == 0.8
+    assert cost["maxDrawdownPct"] == 0.0
+    # MTM curve walks the intervening trading days; cost-basis only the open+close.
+    assert len(mtm["equityCurve"]) == 5 and len(cost["equityCurve"]) == 2
+    assert mtm["equityCurve"][2]["equity"] == 992_000.0                     # 2026-07-03
+
+
 def test_simulate_rank_key_prefers_higher():
     # Same day, one slot; the higher-conviction trade should be the one taken.
     trades = [

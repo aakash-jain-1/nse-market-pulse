@@ -1020,6 +1020,13 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
         # tagged with openedDate + regimeAtEntry + rMultiple, plus the day→regime map.
         result["trades"] = all_trades
         result["dayRegime"] = day_regime
+        # Daily closes for the symbols that actually traded — lets the portfolio
+        # backtest mark open positions to market each day (true intra-trade drawdown).
+        traded = {t.get("symbol") for t in all_trades}
+        result["closes"] = {
+            sym: {b["d"]: b["close"] for b in hist[sym] if b.get("close") is not None}
+            for sym in traded if sym in hist
+        }
     return result
 
 

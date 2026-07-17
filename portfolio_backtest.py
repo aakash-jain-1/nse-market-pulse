@@ -84,6 +84,20 @@ def _pnl(direction, entry, exit_px, qty):
     return (entry - exit_px) * qty if direction == "SHORT" else (exit_px - entry) * qty
 
 
+def _mark(pos, day_iso, closes):
+    """A position's current equity contribution. With `closes` (mark-to-market) it's
+    reserve + unrealized P&L at today's close; without it, just the reserve (cost basis).
+    LONG: reserve+upnl = qty*close. SHORT: reserve + qty*(entry-close) (margin model).
+    Carries the last seen close forward across gap/holiday days with no bar."""
+    if not closes:
+        return pos["reserve"]
+    px = (closes.get(pos["symbol"]) or {}).get(day_iso)
+    if px is None:
+        px = pos.get("lastMark") or pos["entry"]
+    pos["lastMark"] = px
+    return pos["reserve"] + _pnl(pos["direction"], pos["entry"], px, pos["qty"])
+
+
 def _max_drawdown(equities):
     """Largest peak-to-trough drop in the equity series, as a positive %."""
     peak, worst = None, 0.0
@@ -127,8 +141,13 @@ def _size(sizing, equity, cash, entry, stop, max_positions, max_alloc_pct, risk_
 # the simulator (pure)
 # ---------------------------------------------------------------------------
 def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
-             sizing="risk", max_alloc_pct=25.0, rank_key=None, periods_per_year=252):
+             sizing="risk", max_alloc_pct=25.0, rank_key=None, periods_per_year=252,
+             closes=None):
     """Replay `trades` through a book with finite capital + a concurrent-position cap.
+
+    `closes` (optional `{symbol: {date_iso: close}}`) marks open positions **to market**
+    each day for a true intra-trade equity curve / drawdown; without it, positions are
+    held at cost (equity steps on exits).
 
     Returns {startCapital, endCapital, totalReturnPct, cagrPct, maxDrawdownPct,
     sharpe, winRate, profitFactor, avgWinPct, avgLossPct, tradesTaken,
@@ -171,7 +190,15 @@ def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
         return (-(rk if isinstance(rk, (int, float)) else 0),
                 str(t.get("strategy")), str(t.get("symbol")))
 
-    dates = sorted(set(list(opens.keys()) + [_d(t["closedDate"]) for t in usable]))
+    # Walk every event day; when marking to market, also include the intervening
+    # trading days (from the closes calendar) so the equity curve/drawdown are daily.
+    ev_dates = set(opens.keys()) | {_d(t["closedDate"]) for t in usable}
+    lo, hi = min(ev_dates), max(ev_dates)
+    if closes:
+        cal = {_d(k) for m in closes.values() for k in m}
+        dates = sorted(d for d in (ev_dates | cal) if d and lo <= d <= hi)
+    else:
+        dates = sorted(ev_dates)
 
     cash = start_capital
     open_pos = []                 # list of dicts: qty, entry, exit_px, close_d, direction, reserve
@@ -195,8 +222,10 @@ def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
                 still.append(p)
         open_pos = still
 
-        # 2) open today's signals in priority order, while slots + cash allow
-        equity_now = cash + sum(p["reserve"] for p in open_pos)
+        # 2) open today's signals in priority order, while slots + cash allow.
+        # Size off marked-to-market equity (risk % of what the book is worth NOW).
+        day_iso = day.strftime("%Y-%m-%d")
+        equity_now = cash + sum(_mark(p, day_iso, closes) for p in open_pos)
         for t in sorted(opens.get(day, []), key=_rank):
             if len(open_pos) >= max_positions:
                 skip_slot += 1
@@ -215,13 +244,14 @@ def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
                              "holdDays": t.get("holdDays")})
             taken += 1
 
-        # 3) mark the book (open positions at cost) and record the day
-        deployed = sum(p["reserve"] for p in open_pos)
-        equity = cash + deployed
+        # 3) mark the book to market (or cost) and record the day. Exposure stays the
+        # fraction of CAPITAL committed (reserves), independent of the mark.
+        reserved = sum(p["reserve"] for p in open_pos)
+        equity = cash + sum(_mark(p, day_iso, closes) for p in open_pos)
         max_concurrent = max(max_concurrent, len(open_pos))
-        exposures.append((deployed / equity) if equity > 0 else 0.0)
+        exposures.append((reserved / equity) if equity > 0 else 0.0)
         dd_peak = max(equities + [equity])
-        curve.append({"date": day.strftime("%Y-%m-%d"), "equity": round(equity, 2),
+        curve.append({"date": day_iso, "equity": round(equity, 2),
                       "drawdownPct": round((equity - dd_peak) / dd_peak * 100, 2)
                       if dd_peak > 0 else 0.0})
         equities.append(equity)
@@ -291,9 +321,10 @@ def run(days=60, universe_size=40, source="live", start_capital=1_000_000.0,
     trades = bt.get("trades") or []
     # Rank same-day signal contention by each trade's entry-time conviction (bd attaches
     # `score`) so a finite book picks the STRONGEST signals, not an arbitrary first-N.
+    # `closes` (traded symbols' daily closes) marks open positions to market each day.
     sim_kw = dict(start_capital=start_capital, max_positions=max_positions,
                   risk_pct=risk_pct, sizing=sizing, max_alloc_pct=max_alloc_pct,
-                  rank_key="score")
+                  rank_key="score", closes=bt.get("closes"))
     overall = simulate(trades, **sim_kw)
 
     out = {

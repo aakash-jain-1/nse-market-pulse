@@ -101,7 +101,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 615 across 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 616 across 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -244,7 +244,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **615 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **616 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -357,8 +357,9 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   sizing) → equity curve + CAGR / max-DD / Sharpe / profit-factor, overall + per
   strategy. Turns per-trade R into "could I actually have traded this?". Pure
   `simulate()`; `run()` sources trades from `bd.run(_collect=True)`; same-day signal
-  contention is **conviction-ranked** (every `bd` trade carries an entry-time
-  `score`). *Still open:* daily mark-to-market (currently cost-basis).
+  contention is **conviction-ranked** (every `bd` trade carries an entry-time `score`);
+  open positions are **marked to market** on daily closes (`bd` also returns traded
+  symbols' `closes`) for true intra-trade drawdown. *Feature complete.*
 
 **Open (older roadmap, in AGENTS.md):**
 - Route paper-trading fills / `get_price` through the broker feed; extend Live tab
@@ -382,6 +383,21 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Portfolio mark-to-market (suite 615 → 616)
+- **Why:** open positions were held at **cost**, so equity only stepped on exits and the
+  curve hid all intra-trade heat (drawdown looked artificially small).
+- **What:** `bd.run(_collect=True)` now also returns `closes` = traded symbols' daily
+  closes. `simulate(closes=…)` marks each open position to market every day (contribution
+  = reserve + unrealized P&L; LONG = qty×close, SHORT = margin + qty×(entry−close)),
+  carrying the last close forward across gap days. The date axis is expanded to the full
+  trading calendar (not just open/close days) so the curve is daily. Sizing uses the
+  marked equity. `closes=None` → unchanged cost-basis behaviour (keeps pure tests simple).
+- **Result (EOD, same run):** max-DD **4.6% → 5.5%** (the honest intra-trade number),
+  Sharpe 0.76 → 0.60, curve now daily. Realized end-capital unchanged — only the *path*.
+- **Tests:** +1 (**615 → 616**): a long that dips to −8% mid-hold then exits a winner —
+  MTM shows the 0.8% drawdown + daily curve; cost-basis shows 0. Portfolio engine now
+  feature-complete. Lint clean.
 
 ### 2026-07-17 — Conviction-ranked portfolio selection (suite 612 → 615)
 - **Why:** the fresh portfolio backtest exposed the real problem — with 5 slots the book

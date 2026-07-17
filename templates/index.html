@@ -3096,7 +3096,7 @@
         ${pfEquitySvg(o.equityCurve, o.startCapital)}
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${metrics}</div>
         ${psTable}
-        <div class="chart-note" style="margin-top:8px">Realistic book: capital is finite and tied up while a position is open, and only ${p.maxPositions} can be held at once — when more signals fire, the extras are <b>skipped</b> (that's the ${fmtNum(o.tradesSkippedSlot)} slot + ${fmtNum(o.tradesSkippedCapital)} capital skips above). Open positions are marked at cost, so the curve steps on exits. Same daily-bar caveats as the daily backtest; shorts model margin as full notional. Educational — not advice.</div>
+        <div class="chart-note" style="margin-top:8px">Realistic book: capital is finite and tied up while a position is open, and only ${p.maxPositions} can be held at once — when more signals fire, the highest-<b>conviction</b> ones win the slots and the rest are <b>skipped</b> (that's the ${fmtNum(o.tradesSkippedSlot)} slot + ${fmtNum(o.tradesSkippedCapital)} capital skips above). Open positions are <b>marked to market</b> on daily closes, so the drawdown is the real intra-trade heat. Same daily-bar caveats as the daily backtest; shorts model margin as full notional. Educational — not advice.</div>
       </div>`;
     }
 

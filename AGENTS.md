@@ -56,7 +56,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 615 unit tests across 29 suites (see below)
+├── test_*.py          # 616 unit tests across 29 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -514,11 +514,17 @@ with no creds the app is unchanged.
   scheduled/auto EOD backfill + auto-digest after close.
 - ✅ *(done — see below)* portfolio-level backtest (`portfolio_backtest.py`) — replays the
   daily-backtest trades through a real book (finite capital, concurrent-position cap,
-  risk/equal sizing, **conviction-ranked** same-day picks) → equity curve + CAGR / max-DD
-  / Sharpe. Still open: mark-to-market open positions on daily closes (currently at cost).
+  risk/equal sizing, **conviction-ranked** same-day picks, **daily mark-to-market**) →
+  equity curve + CAGR / max-DD / Sharpe. *Feature complete.*
 
 ## Done recently
 
+- **📉 Portfolio mark-to-market** — open positions were held at **cost**, so the equity
+  curve only stepped on exits and hid intra-trade heat. `bd.run(_collect=True)` now also
+  returns traded symbols' daily `closes`; `simulate(closes=…)` marks each open position to
+  market daily (reserve + unrealized P&L) over the full trading calendar. Honest result:
+  max-DD **4.6% → 5.5%**, Sharpe 0.76 → 0.60, daily curve; realized end-capital unchanged.
+  Portfolio engine **feature-complete**. Tests **+1** (suite **615 → 616**); lint clean.
 - **🎯 Conviction-ranked portfolio picks** — the portfolio book took an *arbitrary* 74 of
   5,712 signals with 5 slots (neutral order) and lost. Now every `backtest_daily` trade
   carries an entry-time **conviction `score` (0-100)** from its own trigger magnitude
