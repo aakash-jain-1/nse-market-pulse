@@ -27,6 +27,30 @@ import eod_conviction as ec
 # helpers
 # ---------------------------------------------------------------------------
 @contextlib.contextmanager
+def _no_options():
+    """Stub the option-chain fuse so board() tests stay offline/deterministic."""
+    import eod_options
+    orig = eod_options.oi_map
+    eod_options.oi_map = lambda force=False: ("2026-07-15", {})
+    try:
+        yield
+    finally:
+        eod_options.oi_map = orig
+
+
+@contextlib.contextmanager
+def _options(omap):
+    """Stub the option-chain fuse to a fixed {SYMBOL: analytics} map."""
+    import eod_options
+    orig = eod_options.oi_map
+    eod_options.oi_map = lambda force=False: ("2026-07-15", omap)
+    try:
+        yield
+    finally:
+        eod_options.oi_map = orig
+
+
+@contextlib.contextmanager
 def _temp_db():
     import db
     d = tempfile.mkdtemp(prefix="nse_conv_test_")
@@ -177,6 +201,62 @@ def test_pillars_short_sector_lagging_adds_pillar():
 
 
 # ---------------------------------------------------------------------------
+# option-chain overlay (max-pain / PCR / OI walls confirm or soft-veto)
+# ---------------------------------------------------------------------------
+def _opt(**kw):
+    base = {"maxPain": None, "pcr": None, "resistance": [], "support": []}
+    base.update(kw)
+    return base
+
+
+def test_nearest_wall_above_and_below():
+    res = [{"strike": 110, "oi": 9}, {"strike": 130, "oi": 8}, {"strike": 95, "oi": 7}]
+    assert ec._nearest_wall(res, 100, above=True)["strike"] == 110   # first ≥ entry
+    sup = [{"strike": 90, "oi": 9}, {"strike": 70, "oi": 8}, {"strike": 105, "oi": 7}]
+    assert ec._nearest_wall(sup, 100, above=False)["strike"] == 90   # first ≤ entry
+    assert ec._nearest_wall([], 100, above=True) is None
+    assert ec._nearest_wall([{"strike": 80, "oi": 0}], 100, above=False) is None  # no OI
+
+
+def test_overlay_long_confirms_below_maxpain_with_room():
+    ov = ec._option_overlay("LONG", 100.0, 125.0,
+                            _opt(maxPain=110.0, pcr=1.4,
+                                 resistance=[{"strike": 130.0, "oi": 9000}]))
+    joined = " | ".join(ov["confirms"])
+    assert "below max-pain" in joined and "room to call OI wall ₹130" in joined
+    assert "put-heavy" in joined and ov["warns"] == []
+
+
+def test_overlay_long_warns_above_maxpain_into_wall():
+    ov = ec._option_overlay("LONG", 100.0, 120.0,
+                            _opt(maxPain=90.0, pcr=0.8,
+                                 resistance=[{"strike": 110.0, "oi": 9000}]))
+    joined = " | ".join(ov["warns"])
+    assert "above max-pain" in joined and "runs into call OI wall ₹110" in joined
+    assert ov["confirms"] == []
+
+
+def test_overlay_short_mirror():
+    ov = ec._option_overlay("SHORT", 100.0, 80.0,
+                            _opt(maxPain=90.0, pcr=0.5,
+                                 support=[{"strike": 70.0, "oi": 9000}]))
+    joined = " | ".join(ov["confirms"])
+    assert "above max-pain" in joined and "room to put OI wall ₹70" in joined
+    assert "call-heavy" in joined
+    warn = ec._option_overlay("SHORT", 100.0, 60.0,
+                              _opt(maxPain=90.0, support=[{"strike": 70.0, "oi": 9000}]))
+    assert any("runs into put OI wall ₹70" in w for w in warn["warns"])
+
+
+def test_overlay_none_without_chain_or_entry():
+    assert ec._option_overlay("LONG", 100.0, 110.0, None) is None
+    assert ec._option_overlay("LONG", None, 110.0, _opt(maxPain=100.0)) is None
+    # a chain with nothing decisive → present but empty
+    flat = ec._option_overlay("LONG", 100.0, 101.0, _opt(pcr=1.0))
+    assert flat["confirms"] == [] and flat["warns"] == []
+
+
+# ---------------------------------------------------------------------------
 # plan
 # ---------------------------------------------------------------------------
 def test_avg_range_pct():
@@ -239,6 +319,30 @@ def test_pick_carries_sector_and_extra_confirmation():
     assert plain["sector"] is None
 
 
+def test_pick_option_confirm_adds_pillar():
+    f = _feat(pctFromHigh=0.5, trend="up", delivPct=70.0)
+    bars = [_bar(d, 100.0) for d in _dates(14)]
+    opt = _opt(maxPain=120.0, pcr=1.5, resistance=[{"strike": 140.0, "oi": 9000}])
+    base = ec._pick(dict(f), bars, None, None, [])
+    conf = ec._pick(dict(f), bars, None, None, [], None, opt)
+    assert conf["confirmations"] == base["confirmations"] + 1   # options = one more pillar
+    assert conf["conviction"] > base["conviction"]
+    assert any("option chain" in r for r in conf["reasons"])
+    assert conf["options"]["confirms"] and not conf["options"]["warns"]
+    assert base["options"] is None and base["warnings"] == []
+
+
+def test_pick_option_warning_shaves_conviction_not_pillars():
+    f = _feat(pctFromHigh=0.5, trend="up", delivPct=70.0)
+    bars = [_bar(d, 100.0) for d in _dates(14)]     # _plan target ≈ 106 (>101 wall)
+    opt = _opt(maxPain=90.0, pcr=0.8, resistance=[{"strike": 101.0, "oi": 9000}])
+    base = ec._pick(dict(f), bars, None, None, [])
+    warned = ec._pick(dict(f), bars, None, None, [], None, opt)
+    assert warned["confirmations"] == base["confirmations"]     # warnings aren't pillars
+    assert warned["conviction"] < base["conviction"]            # but they shave conviction
+    assert warned["warnings"] and warned["options"]["warns"]
+
+
 # ---------------------------------------------------------------------------
 # board() / save() against a seeded DB
 # ---------------------------------------------------------------------------
@@ -262,7 +366,7 @@ def _seed(db):
 
 
 def test_board_ranks_stacked_first_and_filters():
-    with _temp_db() as db:
+    with _temp_db() as db, _no_options():
         _seed(db)
         b = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2)
     assert b["date"] == "2026-07-15" and b["universe"] == 3
@@ -277,7 +381,7 @@ def test_board_ranks_stacked_first_and_filters():
 
 
 def test_board_min_pillars_gate():
-    with _temp_db() as db:
+    with _temp_db() as db, _no_options():
         _seed(db)
         strict = ec.board(min_price=20, min_value_cr=1.0, min_pillars=6)
     # 6 independent confirmations is a very high bar; STACKED has ~4 → empty.
@@ -298,7 +402,7 @@ def _seed_sectors(db):
 
 
 def test_board_adds_sector_pillar_for_leading_name():
-    with _temp_db() as db:
+    with _temp_db() as db, _no_options():
         _seed_sectors(db)
         b = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2)
     tcs = next((p for p in b["longs"] if p["symbol"] == "TCS"), None)
@@ -307,14 +411,27 @@ def test_board_adds_sector_pillar_for_leading_name():
     assert any("leading sector" in r for r in tcs["reasons"])
 
 
+def test_board_fuses_option_chain():
+    # A confirming chain for the breakout name (well below max-pain, wall far above).
+    omap = {"TCS": {"expiry": "31-Jul-2026", "maxPain": 999.0, "pcr": 1.6,
+                    "resistance": [{"strike": 999.0, "oi": 9000}], "support": []}}
+    with _temp_db() as db, _options(omap):
+        _seed_sectors(db)
+        b = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2)
+    assert b["withOptions"] is True
+    tcs = next((p for p in b["longs"] if p["symbol"] == "TCS"), None)
+    assert tcs and tcs["options"] and tcs["options"]["confirms"]
+    assert any("option chain" in r for r in tcs["reasons"])
+
+
 def test_board_empty_db_has_note():
-    with _temp_db():
+    with _temp_db(), _no_options():
         b = ec.board()
     assert b["count"] == 0 and b["universe"] == 0 and b["note"]
 
 
 def test_save_persists_and_skips_existing():
-    with _temp_db() as db:
+    with _temp_db() as db, _no_options():
         _seed(db)
         b = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2)
         res = ec.save(b)

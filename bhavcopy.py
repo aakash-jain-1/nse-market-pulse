@@ -292,6 +292,50 @@ def parse_fo_options(text, underlying=None):
     return {"date": date, "symbol": want, "expiries": sorted(by), "byExpiry": by}
 
 
+def parse_fo_options_all(text):
+    """Like `parse_fo_options` but for EVERY underlying in ONE pass — for the
+    conviction board's market-wide option fuse (max-pain / PCR / OI walls per name),
+    so we parse the big FO file once instead of once per pick. Returns
+        {SYMBOL: {date, symbol, expiries:[ISO,...] (nearest first),
+                  byExpiry:{ISO:{underlying: spot, rows:{strike:{ce, pe}}}}}}.
+    Heavier than the single-symbol parse (it holds the whole option book), so
+    callers should cache the result."""
+    out = {}
+    for row in csv.DictReader(io.StringIO(text)):
+        tp = (row.get("FinInstrmTp") or "").strip().upper()
+        if tp not in ("STO", "IDO"):
+            continue
+        sym = (row.get("TckrSymb") or "").strip().upper()
+        ot = (row.get("OptnTp") or "").strip().upper()
+        if not sym or ot not in ("CE", "PE"):
+            continue
+        strike = _num(row.get("StrkPric"))
+        exp = (row.get("XpryDt") or "").strip()
+        if strike is None or not exp:
+            continue
+        close = _num(row.get("ClsPric"))
+        prev = _num(row.get("PrvsClsgPric"))
+        leg = {
+            "oi": _num(row.get("OpnIntrst")),
+            "chgOi": _num(row.get("ChngInOpnIntrst")),
+            "ltp": close,
+            "change": (close - prev) if (close is not None and prev is not None) else None,
+            "volume": _num(row.get("TtlTradgVol")),
+            "prevClose": prev,
+        }
+        d = out.setdefault(sym, {"date": None, "byExpiry": {}})
+        if d["date"] is None:
+            d["date"] = (row.get("TradDt") or "").strip() or None
+        slot = d["byExpiry"].setdefault(exp, {"underlying": None, "rows": {}})
+        if slot["underlying"] is None:
+            slot["underlying"] = _num(row.get("UndrlygPric"))
+        slot["rows"].setdefault(strike, {"ce": None, "pe": None})[ot.lower()] = leg
+    for sym, d in out.items():
+        d["symbol"] = sym
+        d["expiries"] = sorted(d["byExpiry"])
+    return out
+
+
 def parse_sec_delivery(text, series=EQUITY_SERIES):
     """Parse an NSE `sec_bhavdata_full` (security-wise delivery position) CSV into
     {SYMBOL: {delivQty, delivPct}} — the delivery data the UDiFF CM bhavcopy omits.

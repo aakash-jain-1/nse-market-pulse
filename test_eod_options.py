@@ -38,8 +38,10 @@ def _patch(obj, name, value):
 def _reset_caches():
     tsaved = dict(eo._text_cache)
     csaved = dict(eo._chain_cache)
+    msaved = dict(eo._map_cache)
     eo._text_cache.update(ts=0.0, text=None, date=None)
     eo._chain_cache.clear()
+    eo._map_cache.update(ts=0.0, map=None, date=None)
     try:
         yield
     finally:
@@ -47,6 +49,8 @@ def _reset_caches():
         eo._text_cache.update(tsaved)
         eo._chain_cache.clear()
         eo._chain_cache.update(csaved)
+        eo._map_cache.clear()
+        eo._map_cache.update(msaved)
 
 
 def _csv(rows):
@@ -209,6 +213,40 @@ def test_summary_empty_when_no_text():
     with _reset_caches(), _patch(bhavcopy, "fetch_fo_text", lambda: (None, None)):
         s = eo.summary("ACME")
     assert s["expiries"] == [] and s["eod"] is True
+
+
+# ---------------------------------------------------------------------------
+# oi_map() — market-wide analytics in one parse (the conviction-board fuse)
+# ---------------------------------------------------------------------------
+def test_oi_map_all_underlyings_one_parse():
+    import bhavcopy
+    with _reset_caches(), _patch(bhavcopy, "fetch_fo_text",
+                                 lambda: ("2026-07-16", _acme_chain_text())):
+        date, m = eo.oi_map()
+    assert date == "2026-07-16"
+    assert {"ACME", "NIFTY"} <= set(m)               # every underlying, one pass
+    a = m["ACME"]
+    assert a["expiry"] == "28-Jul-2026"              # nearest, display fmt
+    assert a["maxPain"] == 100.0 and a["pcr"] == round(3200 / 2900, 2)
+    assert a["resistance"][0]["strike"] == 110.0     # biggest CALL OI = resistance
+    assert a["support"][0]["strike"] == 90.0         # biggest PUT OI = support
+
+
+def test_oi_map_cached_then_empty_without_text():
+    import bhavcopy
+    calls = {"n": 0}
+
+    def fake():
+        calls["n"] += 1
+        return "2026-07-16", _acme_chain_text()
+
+    with _reset_caches(), _patch(bhavcopy, "fetch_fo_text", fake):
+        eo.oi_map()
+        eo.oi_map()
+        assert calls["n"] == 1                        # 15-min map cache → one parse
+    with _reset_caches(), _patch(bhavcopy, "fetch_fo_text", lambda: (None, None)):
+        date, m = eo.oi_map()
+        assert m == {}                                # no text → empty, no crash
 
 
 def test_status_shape():

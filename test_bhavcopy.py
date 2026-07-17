@@ -300,6 +300,28 @@ def test_parse_fo_options_symbol_filter_excludes_others():
     assert 100.0 in strikes and 24000.0 in strikes
 
 
+def test_parse_fo_options_all_groups_by_symbol():
+    rows = [
+        _opt("ACME", "2026-07-28", "100", ot="CE"),
+        _opt("ACME", "2026-07-28", "100", ot="PE"),
+        _opt("ACME", "2026-08-25", "100", ot="CE"),            # far expiry
+        {"TradDt": "2026-07-16", "FinInstrmTp": "IDO", "TckrSymb": "NIFTY",
+         "XpryDt": "2026-07-28", "StrkPric": "24000", "OptnTp": "CE",
+         "ClsPric": "120", "OpnIntrst": "5000", "UndrlygPric": "24010"},
+        {"TradDt": "2026-07-16", "FinInstrmTp": "STF", "TckrSymb": "ACME",
+         "XpryDt": "2026-07-28", "ClsPric": "101"},             # a FUTURE row → ignored
+    ]
+    allp = b.parse_fo_options_all(_csv(rows))
+    assert set(allp) == {"ACME", "NIFTY"}                       # grouped per underlying
+    assert allp["ACME"]["expiries"] == ["2026-07-28", "2026-08-25"]   # nearest first
+    assert allp["NIFTY"]["expiries"] == ["2026-07-28"]
+    # unlike the no-filter single-dict parse, per-symbol strikes never collide
+    assert set(allp["ACME"]["byExpiry"]["2026-07-28"]["rows"]) == {100.0}
+    assert set(allp["NIFTY"]["byExpiry"]["2026-07-28"]["rows"]) == {24000.0}
+    assert allp["NIFTY"]["byExpiry"]["2026-07-28"]["underlying"] == 24010.0
+    assert allp["ACME"]["byExpiry"]["2026-07-28"]["rows"][100.0]["ce"]["oi"] == 120900.0
+
+
 def test_fetch_fo_text_walks_back_and_missing():
     good = _zip(_csv([_opt("ACME", "2026-07-28", "100", ot="CE")]))
     with _patch(b, "_download", lambda url: good if "20260715" in url else None):

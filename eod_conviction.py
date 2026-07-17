@@ -53,6 +53,13 @@ _OI_BUILD = 8.0           # near-month OI change% that counts as a meaningful bu
 _MIN_WINDOW = 10          # need this much history before trusting a "breakout"
 _SECTOR_W = 14            # weight of the "leading/lagging sector" confirmation pillar
 
+# Option-chain fuse (max-pain / PCR / OI walls from the EOD FO bhavcopy).
+_OPT_W = 12               # weight of the "option chain confirms the direction" pillar
+_OPT_WARN = 8             # conviction shaved per option-chain warning (a soft veto)
+_PIN_TOL = 3.0            # % from max-pain beyond which price has a tail/head-wind
+_PCR_BULL = 1.20          # PCR at/above this = put-heavy (supportive for longs)
+_PCR_BEAR = 0.60          # PCR at/below this = call-heavy (supportive for shorts)
+
 _CR = 1e7                 # ₹1 crore (turnover filter; value is in rupees)
 
 
@@ -61,6 +68,13 @@ _CR = 1e7                 # ₹1 crore (turnover filter; value is in rupees)
 # ---------------------------------------------------------------------------
 def _clip(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
+
+
+def _rp(x):
+    """Round a price/strike for a label — int when whole, else 2dp."""
+    if x is None:
+        return x
+    return int(x) if float(x).is_integer() else round(x, 2)
 
 
 def _today():
@@ -227,7 +241,66 @@ def _rating(conviction, confirmations):
     return "Low"
 
 
-def _pick(f, bars, oi, deal_side, deal_list, sector=None):
+def _nearest_wall(walls, entry, above):
+    """The closest OI wall on one side of `entry` — the first resistance ABOVE (for a
+    long) or support BELOW (for a short) that price must clear on the way to target."""
+    cands = [w for w in (walls or [])
+             if w.get("strike") is not None and w.get("oi")
+             and (w["strike"] >= entry if above else w["strike"] <= entry)]
+    if not cands:
+        return None
+    return min(cands, key=lambda w: w["strike"]) if above else max(cands, key=lambda w: w["strike"])
+
+
+def _option_overlay(direction, entry, target, opt):
+    """Fuse the EOD option chain (max-pain / PCR / OI walls) with a directional pick.
+
+    Returns {maxPain, pcr, wall, confirms:[…], warns:[…]} or None when there's no
+    usable chain. `confirms` back the trade (→ one extra pillar); `warns` fight it
+    (→ conviction shaved, a transparent soft veto rather than a silent drop):
+      • max-pain: near expiry price gravitates to it, so a long UNDER max-pain (short
+        OVER it) has a tail-wind; the opposite side is a head-wind.
+      • OI wall: a target BEYOND the nearest call (long) / put (short) OI wall must
+        punch through heavy option interest — flagged; a wall past the target = room.
+      • PCR: a put-heavy chain supports longs, a call-heavy one supports shorts.
+    """
+    if not opt or not entry:
+        return None
+    mp, pcr = opt.get("maxPain"), opt.get("pcr")
+    long = direction == "LONG"
+    confirms, warns = [], []
+
+    if mp:
+        gap = (entry - mp) / mp * 100.0            # +ve = above max-pain
+        if long and gap <= -_PIN_TOL:
+            confirms.append(f"below max-pain ₹{_rp(mp)} (expiry pull ↑)")
+        elif long and gap >= _PIN_TOL:
+            warns.append(f"{gap:.0f}% above max-pain ₹{_rp(mp)} (expiry pull ↓)")
+        elif (not long) and gap >= _PIN_TOL:
+            confirms.append(f"above max-pain ₹{_rp(mp)} (expiry pull ↓)")
+        elif (not long) and gap <= -_PIN_TOL:
+            warns.append(f"{abs(gap):.0f}% below max-pain ₹{_rp(mp)} (expiry pull ↑)")
+
+    wall = _nearest_wall(opt.get("resistance") if long else opt.get("support"),
+                         entry, above=long)
+    if wall and target:
+        ws = wall["strike"]
+        if (long and target > ws) or ((not long) and target < ws):
+            warns.append(f"target runs into {'call' if long else 'put'} OI wall ₹{_rp(ws)}")
+        else:
+            confirms.append(f"room to {'call' if long else 'put'} OI wall ₹{_rp(ws)}")
+
+    if pcr is not None:
+        if long and pcr >= _PCR_BULL:
+            confirms.append(f"PCR {pcr} (put-heavy → support)")
+        elif (not long) and pcr <= _PCR_BEAR:
+            confirms.append(f"PCR {pcr} (call-heavy → resistance)")
+
+    return {"maxPain": mp, "pcr": pcr, "wall": (wall["strike"] if wall else None),
+            "confirms": confirms, "warns": warns}
+
+
+def _pick(f, bars, oi, deal_side, deal_list, sector=None, opt=None):
     """Build the best (LONG or SHORT) conviction pick for one name, or None.
     Chooses the side with more confirming pillars (higher score breaks ties)."""
     longs = _pillars_long(f, oi, deal_side, sector)
@@ -239,8 +312,20 @@ def _pick(f, bars, oi, deal_side, deal_list, sector=None):
         direction, pillars, raw = "LONG", longs, lscore
     else:
         direction, pillars, raw = "SHORT", shorts, sscore
-    conviction = round(_clip(raw, 0, 100), 1)
     plan = _plan(f.get("close"), direction, bars)
+
+    # Fuse the EOD option chain: a confirming chain adds a pillar; a conflicting one
+    # (target through an OI wall / pinned against max-pain) shaves conviction.
+    reasons = [lbl for lbl, _ in pillars]
+    confirmations = len(pillars)
+    ov = _option_overlay(direction, f.get("close"), plan.get("target"), opt)
+    if ov and ov["confirms"]:
+        reasons.append("🎯 option chain: " + "; ".join(ov["confirms"][:2]))
+        confirmations += 1
+        raw += _OPT_W
+    warnings = list(ov["warns"]) if ov else []
+    raw -= _OPT_WARN * len(warnings)
+    conviction = round(_clip(raw, 0, 100), 1)
     return {
         "symbol": f.get("symbol"),
         "direction": direction,
@@ -262,10 +347,14 @@ def _pick(f, bars, oi, deal_side, deal_list, sector=None):
                     "leading": sector.get("leading"),
                     "lagging": sector.get("lagging")}
                    if sector else None),
+        "options": ({"maxPain": ov["maxPain"], "pcr": ov["pcr"], "wall": ov["wall"],
+                     "confirms": ov["confirms"], "warns": ov["warns"]}
+                    if ov else None),
         "conviction": conviction,
-        "confirmations": len(pillars),
-        "reasons": [lbl for lbl, _ in pillars],
-        "rating": _rating(conviction, len(pillars)),
+        "confirmations": confirmations,
+        "reasons": reasons,
+        "warnings": warnings,
+        "rating": _rating(conviction, confirmations),
         **plan,
     }
 
@@ -274,7 +363,8 @@ def _pick(f, bars, oi, deal_side, deal_list, sector=None):
 # board (impure: reads db.eod_bars / db.eod_oi / deals)
 # ---------------------------------------------------------------------------
 def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
-          with_deals=True, fno_only=False, lookback=_es.LOOKBACK):
+          with_deals=True, fno_only=False, lookback=_es.LOOKBACK,
+          with_options=True):
     """Rank the whole ingested EOD universe by STACKED conviction.
 
     A name makes the board only when at least `min_pillars` INDEPENDENT signals
@@ -308,6 +398,17 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         log.warning("board: sector-strength cross-reference failed", exc_info=True)
         _ss = None
 
+    # Option-chain map (one parse of the FO bhavcopy): max-pain / PCR / OI walls per
+    # F&O name → confirm or (soft-)veto a directional pick. Best-effort / off-hours.
+    omap = {}
+    if with_options:
+        try:
+            import eod_options
+            _, omap = eod_options.oi_map()
+        except Exception:
+            log.warning("board: option-chain fuse failed", exc_info=True)
+            omap = {}
+
     fno = None
     if fno_only:
         try:
@@ -332,7 +433,7 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         oi = _oi_state(oi_all.get(sym), price_up)
         dlist = deal_map.get(sym) or []
         sctx = _ss.context(smap, sym) if (_ss and smap) else None
-        pick = _pick(f, bars, oi, _deal_side(dlist), dlist, sctx)
+        pick = _pick(f, bars, oi, _deal_side(dlist), dlist, sctx, omap.get(sym))
         if not pick or pick["confirmations"] < min_pillars:
             continue
         picks.append(pick)
@@ -349,9 +450,11 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         "universe": len(grouped),
         "scanned": scanned,
         "withDeals": bool(deal_map),
+        "withOptions": bool(omap),
         "filters": {"minPrice": min_price, "minValueCr": min_value_cr,
                     "minPillars": min_pillars, "fnoOnly": bool(fno_only),
-                    "withDeals": bool(with_deals), "limit": limit},
+                    "withDeals": bool(with_deals), "withOptions": bool(with_options),
+                    "limit": limit},
         "coverage": _es.status(),
         "note": None if grouped else (
             "No EOD history yet — load it first (⬇ Backfill history on the EOD "
@@ -371,7 +474,8 @@ def _to_idea_row(p, day, now):
         "entry": p.get("entry"), "stop": p.get("stop"), "target": p.get("target"),
         "stopPct": p.get("stopPct"), "targetPct": p.get("targetPct"), "rr": p.get("rr"),
         "conviction": p.get("conviction"), "rating": p.get("rating"),
-        "reasons": ["🏆 EOD conviction (%d signals)" % p["confirmations"], *p["reasons"]],
+        "reasons": ["🏆 EOD conviction (%d signals)" % p["confirmations"], *p["reasons"],
+                    *[f"⚠️ {w}" for w in (p.get("warnings") or [])]],
         "fno": bool(p.get("oi")), "pChange": p.get("pChange"),
         "firstSeenAt": now, "lastSeenAt": now, "ltp": p.get("close"),
         "movePct": m0, "maxMovePct": m0, "minMovePct": m0,

@@ -34,9 +34,13 @@ _TEXT_TTL = 1800        # 30 min — the FO bhavcopy changes at most once a day
 _CHAIN_TTL = 900        # 15 min — per-symbol assembled chain
 _CHAIN_MAX = 128        # cap the memo so a long session can't grow unbounded
 
+_MAP_TTL = 900         # 15 min — the market-wide OI map (all underlyings, one parse)
+
 _text_cache = {"ts": 0.0, "text": None, "date": None}
 _text_lock = threading.Lock()
 _chain_cache = {}       # (symbol, expiry_arg) -> (ts, chain)
+_map_cache = {"ts": 0.0, "date": None, "map": None}
+_map_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +173,50 @@ def chain(symbol, expiry=None):
         _chain_cache.clear()
     _chain_cache[ck] = (time.time(), out)
     return out
+
+
+def _analytics(slot):
+    """max-pain / PCR / ATM / OI walls for one {underlying, rows} expiry slot (pure).
+    Same numbers `_assemble` computes, minus the full per-strike rows."""
+    import nse_quote
+    rows = [{"strike": k, "ce": _norm_leg(v.get("ce")), "pe": _norm_leg(v.get("pe"))}
+            for k, v in sorted(slot["rows"].items())]
+    ce_tot = sum((r["ce"] or {}).get("oi") or 0 for r in rows)
+    pe_tot = sum((r["pe"] or {}).get("oi") or 0 for r in rows)
+    u = slot.get("underlying")
+    return {
+        "underlying": u,
+        "pcr": round(pe_tot / ce_tot, 2) if ce_tot else None,
+        "maxPain": nse_quote._max_pain(rows),
+        "atmStrike": _atm(rows, u),
+        "resistance": _walls(rows, "ce"),      # top CALL-OI strikes = resistance
+        "support": _walls(rows, "pe"),         # top PUT-OI strikes = support
+        "ceTotOI": ce_tot,
+        "peTotOI": pe_tot,
+    }
+
+
+def oi_map(force=False):
+    """{SYMBOL: nearest-expiry {expiry, underlying, pcr, maxPain, atmStrike,
+    resistance, support, …}} for ALL F&O underlyings from ONE parse of the FO
+    bhavcopy — so the conviction board can fuse max-pain / PCR / OI walls into every
+    pick without a parse per name. Cached (15-min TTL). Returns (date, map)."""
+    with _map_lock:
+        if (not force and _map_cache["map"] is not None
+                and (time.time() - _map_cache["ts"]) < _MAP_TTL):
+            return _map_cache["date"], _map_cache["map"]
+    date, text = _fo_text(force=force)
+    out = {}
+    if text:
+        import bhavcopy
+        for sym, d in bhavcopy.parse_fo_options_all(text).items():
+            exps = d.get("expiries") or []
+            if not exps:
+                continue
+            out[sym] = {"expiry": _fmt_expiry(exps[0]), **_analytics(d["byExpiry"][exps[0]])}
+    with _map_lock:
+        _map_cache.update(ts=time.time(), date=date, map=out)
+    return date, out
 
 
 def summary(symbol):

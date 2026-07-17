@@ -45,7 +45,7 @@ NSE/
 ├── deals.py           # Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status
 ├── eod_scanner.py     # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure
 ├── eod_conviction.py  # EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals agreeing; save→ideas / digest→notify
-├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
+├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape; oi_map() = market-wide analytics in one parse (the Conviction option fuse)
 ├── eod_scheduler.py   # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
 ├── sectors.py         # Curated NSE symbol→sector map (17 sectors, ~303 names) — static data + sector_of()/all_sectors()
 ├── sector_scan.py     # Sector relative-strength board over db.eod_bars — cross-sectional RS vs market, ranks sectors + leaders/laggards; strength_map/context = the reusable sector pillar the EOD Scan + Conviction boards fold in
@@ -59,7 +59,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 667 unit tests across 32 suites (see below)
+├── test_*.py          # 678 unit tests across 32 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -525,6 +525,17 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🎯 Option chain fused into the Conviction board** — max-pain / PCR / OI walls (already
+  computed off the FO bhavcopy) now confirm or **soft-veto** each directional pick. New
+  `bhavcopy.parse_fo_options_all()` (one pass → every underlying's per-expiry chain) +
+  `eod_options.oi_map()` (cached `{SYMBOL: nearest-expiry maxPain/PCR/ATM/OI-walls}`) so the
+  board parses the big FO file **once**, not per name. `eod_conviction._option_overlay()`:
+  a long UNDER max-pain / short OVER it, with room to the nearest OI wall, and a supportive
+  PCR → one extra **🎯 pillar** (+12); a target that runs **into** a call/put OI wall or a
+  price **pinned against** max-pain → a **⚠️ warning** that shaves conviction (`_OPT_WARN`) but
+  is shown, not silently dropped. `board(with_options=True)` builds the map once; picks carry
+  `options` + `warnings`; saved ideas keep the ⚠️ lines. UI: 🎯 max-pain/PCR chip + red ⚠️
+  block on each card. Tests **+11** (suite **667 → 678**); lint clean.
 - **🧭 Sector RS wired into the Conviction board + EOD scanner** — the new sector strength is
   now an **extra confirmation pillar** everywhere, so a breakout **in a leading sector ranks
   higher** than the same breakout in a laggard. `sector_scan.py` grew a reusable

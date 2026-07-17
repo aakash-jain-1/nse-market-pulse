@@ -418,8 +418,9 @@ def api_eod_deals():
 @app.route("/api/eod/conviction")
 def api_eod_conviction():
     """Stacked-conviction board ('tomorrow's watchlist'): fuses breakout + delivery%
-    + bulk/block deals + F&O OI buildup, ranked by how many independent signals
-    agree. Off-hours. ?limit=&minPrice=&minValueCr=&minPillars=&fno=1&deals=0."""
+    + bulk/block deals + F&O OI buildup + sector RS + option chain, ranked by how many
+    independent signals agree. Off-hours.
+    ?limit=&minPrice=&minValueCr=&minPillars=&fno=1&deals=0&options=0."""
     import eod_conviction
 
     def fnum(name, default):
@@ -435,7 +436,8 @@ def api_eod_conviction():
         min_value_cr=fnum("minValueCr", 2.0),
         min_pillars=int(fnum("minPillars", 2)),
         fno_only=request.args.get("fno") == "1",
-        with_deals=request.args.get("deals") != "0",   # on by default
+        with_deals=request.args.get("deals") != "0",     # on by default
+        with_options=request.args.get("options") != "0",  # on by default
     ))
 
 
@@ -457,7 +459,8 @@ def api_eod_conviction_save():
         limit=int(num("limit", 25)), min_price=num("minPrice", 20.0),
         min_value_cr=num("minValueCr", 2.0), min_pillars=int(num("minPillars", 2)),
         fno_only=(body.get("fno") or request.args.get("fno")) == "1",
-        with_deals=(body.get("deals", request.args.get("deals")) != "0"))
+        with_deals=(body.get("deals", request.args.get("deals")) != "0"),
+        with_options=(body.get("options", request.args.get("options")) != "0"))
     return jsonify(eod_conviction.save(b))
 
 

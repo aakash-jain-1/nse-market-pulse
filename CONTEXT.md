@@ -84,7 +84,7 @@ bhavcopy.py          EOD UDiFF bhavcopy ingest (static archive) + sec_bhavdata_f
 deals.py             Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status, off-hours
 eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure math
 eod_conviction.py    EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals that agree; save→ideas / digest→notify
-eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours
+eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours; oi_map() = market-wide analytics in one parse (the Conviction option fuse)
 eod_scheduler.py     Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest), persists last-run in eod_meta
 sectors.py           Curated NSE symbol→sector map (17 sectors, ~303 names) — dependency-free static data + sector_of()/all_sectors()
 sector_scan.py       Sector relative-strength (rotation) board over db.eod_bars — cross-sectional RS vs market median, ranks sectors + surfaces leaders/laggards; strength_map()/context() = the reusable sector pillar the EOD Scan + Conviction boards fold in
@@ -104,7 +104,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 667 across 32 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 678 across 32 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -252,7 +252,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **667 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **678 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -391,6 +391,41 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Option chain fused into the Conviction board (suite 667 → 678)
+- **Why:** we already assemble max-pain / PCR / OI walls off the FO bhavcopy, but only
+  on the option tab. Those levels are exactly what should confirm or *veto* a directional
+  swing pick — a long into a fat call OI wall, or pinned above max-pain into expiry, is a
+  worse bet than the same breakout with clear air above.
+- **What:** `bhavcopy.parse_fo_options_all(text)` — ONE pass over the FO file grouping by
+  `(symbol, expiry)` (the existing single-symbol parser merges strikes across symbols when
+  unfiltered, so it can't feed per-name analytics). `eod_options.oi_map()` — cached (15-min)
+  `{SYMBOL: {expiry, underlying, pcr, maxPain, atmStrike, resistance, support, …}}` for the
+  **nearest** expiry of every F&O underlying, so the board parses the big file **once** and
+  reuses `nse_quote._max_pain` / `_walls` (one implementation).
+- **Fuse** (`eod_conviction`): `_option_overlay(direction, entry, target, opt)` →
+  `{maxPain, pcr, wall, confirms[], warns[]}`.
+  * max-pain: long UNDER it (short OVER it) = tail-wind → confirm; the wrong side by
+    ≥`_PIN_TOL` (3%) = head-wind → warn.
+  * OI wall: nearest call (long) / put (short) OI strike between entry and target — target
+    BEYOND it must punch through heavy interest → warn; a wall past the target = room → confirm.
+  * PCR: put-heavy supports longs, call-heavy supports shorts (weak, labelled).
+  A non-empty `confirms` adds ONE **🎯 pillar** (`_OPT_W = 12`, lifts confirmation count +
+  conviction); each warn shaves `_OPT_WARN = 8` (a transparent **soft veto** — the name stays
+  on the board with a ⚠️, never silently dropped). `board(with_options=True)` builds the map
+  once and threads `opt=omap.get(sym)` into `_pick`; picks gain `options` + `warnings`, and
+  saved ideas carry the ⚠️ lines.
+- **Perf/resilience:** one FO fetch per board call (15-min cached); best-effort — if the FO
+  text is unavailable / NSE blocked, `omap = {}` and the board is unchanged.
+- **UI:** 🎯 max-pain/PCR chip on each conviction card + a red ⚠️ warnings block; tab/legend
+  copy updated.
+- **Smoke:** ACME nearest-expiry maxPain 100 / PCR 1.02 / call wall 110 / put wall 90; a long
+  below max-pain with room + high PCR picks up the 🎯 pillar, one above max-pain into a wall
+  gets two ⚠️ and lower conviction.
+- **Tests:** +11 (**667 → 678**): `parse_fo_options_all` (per-symbol grouping, no strike
+  collision), `oi_map` (all underlyings one parse + cache + empty), `_nearest_wall`,
+  `_option_overlay` (long/short confirm + warn + none), `_pick` (confirm adds a pillar / warn
+  shaves conviction), seeded `board()` fusion. Lint clean.
 
 ### 2026-07-17 — Sector RS wired into Conviction + EOD scanner (suite 655 → 667)
 - **Why:** we built a sector RS board but it sat on its own tab. A breakout **in a

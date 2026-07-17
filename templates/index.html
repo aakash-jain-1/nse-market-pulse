@@ -180,6 +180,7 @@
     .conv-plan { font-size: 11px; color: var(--text); opacity: .9; margin-bottom: 4px; }
     .conv-reasons { margin: 4px 0 0; padding-left: 16px; font-size: 11px; color: var(--muted); }
     .conv-reasons li { margin: 1px 0; }
+    .conv-warns { margin: 3px 0 0; font-size: 11px; color: #fca5a5; }
     .fut-toggle { font-size: 12px; padding: 5px 12px; border-radius: 6px; }
     .fut-toggle.active { background: var(--accent); border-color: var(--accent); color: #fff; }
     .fut-mom { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
@@ -610,7 +611,7 @@
         <span id="eodScanStatus" style="color:var(--muted);font-size:11px"></span>
       </div>
       <div id="convBar" class="scan-filters" style="display:none">
-        <label title="A pick makes the board only when at least this many INDEPENDENT signals agree (breakout / delivery / volume / trend / OI buildup / bulk-deal / leading sector).">Min signals
+        <label title="A pick makes the board only when at least this many INDEPENDENT signals agree (breakout / delivery / volume / trend / OI buildup / bulk-deal / leading sector / option-chain).">Min signals
           <select id="cvPillars">
             <option value="2">2+ (broad)</option>
             <option value="3" selected>3+ (recommended)</option>
@@ -867,7 +868,7 @@
       { key: "eod",        label: "🌐 EOD Scan", title: "Full-Market EOD / Swing Scanner",
         desc: "Scans the WHOLE cash market (~2400 names, not just the live hot lists) from NSE's End-of-Day bhavcopy history for swing setups — breakouts/breakdowns of the recent high/low, gaps, unusual volume, trend vs 20/50-day MAs and NR7 squeezes. Works off-hours & weekends. Click ‘Backfill history’ once to load recent daily bars. Educational — NOT advice." },
       { key: "conviction", label: "🏆 Conviction", title: "EOD Conviction Board — tomorrow's watchlist",
-        desc: "FUSES the independent end-of-day signals — breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint and F&O OI buildup — into one ranked watchlist. Names are ranked by how many signals AGREE (confirmation stacking), so a setup confirmed 4 ways beats a single strong signal. Save it to the Ideas history or push a digest to your phone. Works off-hours. Educational — NOT advice." },
+        desc: "FUSES the independent end-of-day signals — breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint, F&O OI buildup, leading/lagging sector and the option chain (max-pain / PCR / OI walls) — into one ranked watchlist. Names are ranked by how many signals AGREE (confirmation stacking), so a setup confirmed 4 ways beats a single strong signal; a chain conflict (target into an OI wall, or pinned against max-pain) shows a ⚠️ and shaves conviction. Save it to the Ideas history or push a digest to your phone. Works off-hours. Educational — NOT advice." },
       { key: "sectors",    label: "🧭 Sectors", title: "Sector Relative-Strength — where's the money rotating?",
         desc: "Ranks the ~16 sectors by RELATIVE STRENGTH (each sector's median momentum vs the whole market) so you can see which sectors money is rotating INTO and OUT of, then surfaces the leading names inside the strongest sectors — the actionable watchlist. Cross-sectional RS from the EOD bhavcopy history; works off-hours. The more days you backfill, the better it works. Educational — NOT advice." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
@@ -1198,21 +1199,25 @@
       const deal = p.deal ? ` · <span style="color:var(--accent)">🐋 ${escapeHtml(p.deal.side)}${p.deal.client ? " (" + escapeHtml(p.deal.client) + ")" : ""}</span>` : "";
       const deliv = (p.delivPct != null) ? ` · Deliv ${p.delivPct.toFixed(0)}%` : "";
       const sec = p.sector ? ` · <span style="color:${p.sector.leading ? "var(--green)" : p.sector.lagging ? "var(--red)" : "var(--muted)"}" title="Sector relative strength · rank #${p.sector.rank || "?"}/${p.sector.total || "?"}">🧭 ${escapeHtml(p.sector.name)}${p.sector.rank ? " #" + p.sector.rank : ""}</span>` : "";
+      const opt = p.options ? ` · <span title="EOD option chain (max-pain / PCR / OI walls)">🎯 MP ₹${fmtPrice(p.options.maxPain)}${p.options.pcr != null ? " · PCR " + p.options.pcr : ""}</span>` : "";
+      const warns = (p.warnings && p.warnings.length)
+        ? `<div class="conv-warns">${p.warnings.map(w => "⚠️ " + escapeHtml(w)).join(" · ")}</div>` : "";
       return `<div class="conv-card" data-sym="${p.symbol}" style="border-left:4px solid ${col}">
         <div class="conv-head">
           <span class="conv-sym">${escapeHtml(p.symbol)}</span>
           <span class="conv-badge" style="background:${col}">${p.confirmations}✓ ${long ? "LONG" : "SHORT"}</span>
           <span class="conv-rating">${escapeHtml(p.rating)} · conv ${p.conviction}</span>
         </div>
-        <div class="conv-sub">₹${fmtPrice(p.close)} · ${p.pChange >= 0 ? "+" : ""}${(p.pChange || 0).toFixed(2)}%${deliv}${p.volMult ? " · " + p.volMult + "x vol" : ""}${oi}${deal}${sec}</div>
+        <div class="conv-sub">₹${fmtPrice(p.close)} · ${p.pChange >= 0 ? "+" : ""}${(p.pChange || 0).toFixed(2)}%${deliv}${p.volMult ? " · " + p.volMult + "x vol" : ""}${oi}${deal}${sec}${opt}</div>
         <div class="conv-plan">Entry <b>${fmtPrice(p.entry)}</b> · SL ${fmtPrice(p.stop)} (${p.stopPct}%) · Tgt ${fmtPrice(p.target)} (${p.targetPct}%) · R:R ${p.rr}</div>
+        ${warns}
         <ul class="conv-reasons">${reasons}</ul>
       </div>`;
     }
 
     function renderConviction(data) {
       const longs = data.longs || [], shorts = data.shorts || [];
-      const cov = `<div class="chart-note" style="margin:0 0 8px">🏆 <b>Stacked-conviction board</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names scanned · ${longs.length} long / ${shorts.length} short setups where <b>≥${data.filters ? data.filters.minPillars : 3} independent signals agree</b>. ${data.withDeals ? "Bulk/block deals cross-referenced. " : ""}🧭 = the name sits in a leading/lagging sector. Prices are the last EOD <b>close</b> (not live).</div>`;
+      const cov = `<div class="chart-note" style="margin:0 0 8px">🏆 <b>Stacked-conviction board</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names scanned · ${longs.length} long / ${shorts.length} short setups where <b>≥${data.filters ? data.filters.minPillars : 3} independent signals agree</b>. ${data.withDeals ? "Bulk/block deals cross-referenced. " : ""}${data.withOptions ? "Option chain (max-pain/PCR/OI walls) fused. " : ""}🧭 = leading/lagging sector · 🎯 = option-chain view · ⚠️ = a chain conflict (near max-pain / into an OI wall). Prices are the last EOD <b>close</b> (not live).</div>`;
       if (!longs.length && !shorts.length) {
         const hint = data.note || "No names cleared the confirmation bar — lower ‘Min signals’, loosen the price/value filters, or backfill more history (breakouts need ~20+ sessions).";
         return cov + `<div class="empty">${escapeHtml(hint)}</div>`;
