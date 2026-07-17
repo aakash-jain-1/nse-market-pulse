@@ -505,6 +505,25 @@ def eod_oi_symbols():
         return [r[0] for r in c.execute("SELECT DISTINCT symbol FROM eod_oi")]
 
 
+def eod_oi_all(since=None):
+    """ALL futures-OI rows grouped {SYMBOL: [row,...]} ascending by date, across
+    EVERY expiry (each backfilled day carries that session's near-month contract,
+    so the concatenation is a continuous near-month OI series). `since`
+    (YYYY-MM-DD, inclusive) trims to recent history. Lets the full-universe EOD
+    backtest build an OI% series for every F&O name in ONE query instead of a
+    per-(symbol,expiry) fetch."""
+    q, args = "SELECT * FROM eod_oi", ()
+    if since:
+        q += " WHERE d >= ?"
+        args = (since,)
+    q += " ORDER BY symbol, d"
+    out = {}
+    with _conn() as c:
+        for r in c.execute(q, args):
+            out.setdefault(r["symbol"], []).append(dict(r))
+    return out
+
+
 def eod_bars_put(symbol, bars):
     """Upsert daily bars (each needs a clean 'd' YYYY-MM-DD). Past bars are
     immutable; REPLACE handles the occasional revision + the newest day."""

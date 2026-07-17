@@ -22,6 +22,19 @@ near-month futures' daily open-interest history (foCPV). VWAP / ORB / iVWAP and
 the live-only F&O edges (Futures-Basis, PCR-Contrarian, Max-Pain) have no daily
 equivalent and are left to the live sim / context backtest. Sizing matches the
 live sim: fixed RISK_PER_TRADE, outcomes in R-multiples.
+
+TWO DATA SOURCES (same strategy pipeline, chosen with `source=`):
+  - "live" (default) — pull daily history per symbol from NSE for a curated liquid
+    universe (~40-260 names). Rate-limited, needs the network, best during/after
+    hours; capped so a cold run doesn't stampede NSE.
+  - "eod" — read the WHOLE ingested bhavcopy universe (~2400 cash names + ~210 F&O
+    OI) straight from SQLite (`db.eod_bars` / `db.eod_oi`, populated by
+    `bhavcopy.backfill`). No network, works nights/weekends, and the leaderboards
+    become statistically trustworthy (thousands of trades vs a few hundred). The
+    trade-off: no delivery% (bhavcopy omits it, so that one signal goes quiet) and
+    no minute re-resolution (daily exits only — the intrabar pass needs per-symbol
+    NSE fetches, which would defeat the off-hours premise). Run
+    `bhavcopy.backfill(days=N)` first to give it history.
 """
 import concurrent.futures as cf
 import threading
@@ -43,6 +56,16 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # are immutable and kept forever; the TTL only governs how often we re-hit NSE to
 # pick up the newest day. Full-universe repeat runs (same day) are then instant.
 CACHE_TTL_HOURS = 12
+
+# Full-universe EOD source: read the ingested bhavcopy universe from SQLite. The
+# cash market is ~2400 names, so allow the whole thing (still bounded so a
+# pathological DB can't blow the run up). Liquidity floors mirror the EOD scanner
+# so illiquid/penny names don't pollute the leaderboard, and we need at least a
+# next bar to resolve a signal.
+EOD_UNIVERSE_CAP = 3000
+EOD_MIN_PRICE = 20.0
+EOD_MIN_VALUE_CR = 1.0
+EOD_MIN_BARS = 2
 
 # Strategies reconstructable from a single daily-history call, with their
 # fixed stop/target (% of entry). RR is roughly comparable to the live ideas.
@@ -315,6 +338,84 @@ def _universe(size):
         stride = max(1, len(rest) // max(1, size - len(base)))
         base += rest[::stride][: size - len(base)]
     return base[:size]
+
+
+# ----------------------------------------------------------------------------
+# Data sources. Both return (hist, ois, meta) where hist = {sym: [bars asc]},
+# ois = {sym: {date: oiPct}}, meta carries source-specific stats. Everything
+# downstream (_regime_map / _backtest_symbol / leaderboards / scorecards) is pure
+# over hist/ois, so the two sources share the whole analysis pipeline.
+# ----------------------------------------------------------------------------
+def _load_live(universe_size, chunks, chunk_days, include_oi, force):
+    """LIVE source: pull daily history per symbol from NSE for a curated universe.
+    Rate-limited (fanned out over a small pool) and cached per symbol in SQLite."""
+    symbols = _universe(universe_size)
+    expiry = _near_expiry() if include_oi else None
+    hist, ois = {}, {}
+    cache = {"barsHit": 0, "barsFetched": 0}
+
+    def _pull(sym):
+        bars, bhit = _cached_bars(sym, chunks, chunk_days, force)
+        if include_oi and expiry:
+            oi_rows, _ = _cached_oi_rows(sym, expiry, force)
+            oi = _oi_map_from_rows(oi_rows)
+        else:
+            oi = {}
+        return sym, bars, oi, bhit
+
+    with cf.ThreadPoolExecutor(max_workers=6) as pool:
+        for sym, bars, oi, bhit in pool.map(_pull, symbols):
+            cache["barsHit" if bhit else "barsFetched"] += 1
+            if bars:
+                hist[sym] = bars
+                ois[sym] = oi
+    return hist, ois, {"expiry": expiry, "cache": cache,
+                       "universeRequested": universe_size}
+
+
+def _load_eod(universe_size, days, include_oi, min_price, min_value_cr):
+    """EOD source: read the WHOLE ingested bhavcopy universe from SQLite — no
+    network, works off-hours, whole market. Applies a liquidity floor (recent
+    price/turnover) and keeps the top `universe_size` names by turnover so the
+    sample stays tradable. OI% comes from the continuous near-month OI series."""
+    # Bound the read to the trade window + enough lookback for the longest feature
+    # (the 60-bar high proximity / 20-bar breakout), regardless of backfill depth.
+    since = (datetime.now(IST) - timedelta(days=int(days) + 160)).strftime("%Y-%m-%d")
+    all_bars = db.eod_bars_all(since=since)
+    min_val = (min_value_cr or 0) * 1e7          # crore rupees -> rupees (value col)
+    ranked = []
+    for sym, bars in all_bars.items():
+        if len(bars) < EOD_MIN_BARS:
+            continue
+        last = bars[-1]
+        px = last.get("close")
+        if px is None or px < min_price:
+            continue
+        val = last.get("value")
+        if val is not None and val < min_val:
+            continue
+        ranked.append((val or 0.0, sym, bars))
+    ranked.sort(key=lambda t: t[0], reverse=True)   # most-liquid first
+    if universe_size and len(ranked) > universe_size:
+        ranked = ranked[:universe_size]
+
+    hist = {}
+    for _val, sym, bars in ranked:
+        for b in bars:
+            b.setdefault("symbol", sym)
+        hist[sym] = bars
+
+    ois = {}
+    if include_oi and hist:
+        oi_all = db.eod_oi_all(since=since)
+        for sym in hist:
+            rows = oi_all.get(sym)
+            if rows:
+                ois[sym] = _oi_map_from_rows(rows)
+    return hist, ois, {"expiry": None,
+                       "cache": {"barsHit": len(hist), "barsFetched": 0},
+                       "universeRequested": universe_size,
+                       "universeAvailable": len(all_bars)}
 
 
 def _features(bars):
@@ -754,49 +855,52 @@ def _scorecard(trades):
 
 
 def run(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
-        include_oi=True, force=False, resolve="daily", _collect=False):
+        include_oi=True, force=False, resolve="daily", _collect=False,
+        source="live", min_price=EOD_MIN_PRICE, min_value_cr=EOD_MIN_VALUE_CR):
     """Public entry — serialised so concurrent callers can't stampede NSE
     (AUDIT.md M2). One backtest runs at a time; others queue on `_run_lock`.
 
-    `_collect=True` also returns the flat `trades` list + `dayRegime` map (for the
-    walk-forward validator) — omitted from the normal API payload to keep it lean."""
+    `source="eod"` runs the whole ingested bhavcopy universe from SQLite (no
+    network, off-hours, statistically robust); "live" pulls a curated universe
+    from NSE. `_collect=True` also returns the flat `trades` list + `dayRegime`
+    map (for the walk-forward validator) — omitted from the normal API payload."""
     with _run_lock:
         return _run_impl(days=days, universe_size=universe_size, max_hold=max_hold,
                          chunks=chunks, chunk_days=chunk_days, include_oi=include_oi,
-                         force=force, resolve=resolve, _collect=_collect)
+                         force=force, resolve=resolve, _collect=_collect,
+                         source=source, min_price=min_price, min_value_cr=min_value_cr)
 
 
 def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
-              include_oi=True, force=False, resolve="daily", _collect=False):
+              include_oi=True, force=False, resolve="daily", _collect=False,
+              source="live", min_price=EOD_MIN_PRICE, min_value_cr=EOD_MIN_VALUE_CR):
     db.init()
+    source = "eod" if str(source).lower() == "eod" else "live"
     days = max(5, min(int(days), 120))
-    universe_size = max(5, min(int(universe_size), 260))
+    cap = EOD_UNIVERSE_CAP if source == "eod" else 260
+    universe_size = max(5, min(int(universe_size), cap))
     max_hold = max(1, min(int(max_hold), 15))
+    # The intrabar re-resolution needs per-symbol minute fetches from NSE, which
+    # would defeat the EOD source's off-hours/no-network premise — force daily.
+    if source == "eod":
+        resolve = "daily"
 
-    symbols = _universe(universe_size)
-    expiry = _near_expiry() if include_oi else None
-    hist = {}
-    ois = {}
-    cache = {"barsHit": 0, "barsFetched": 0}
-
-    def _pull(sym):
-        bars, bhit = _cached_bars(sym, chunks, chunk_days, force)
-        if include_oi and expiry:
-            oi_rows, _ = _cached_oi_rows(sym, expiry, force)
-            oi = _oi_map_from_rows(oi_rows)
-        else:
-            oi = {}
-        return sym, bars, oi, bhit
-
-    with cf.ThreadPoolExecutor(max_workers=6) as pool:
-        for sym, bars, oi, bhit in pool.map(_pull, symbols):
-            cache["barsHit" if bhit else "barsFetched"] += 1
-            if bars:
-                hist[sym] = bars
-                ois[sym] = oi
-
-    if not hist:
-        return {"message": "No history returned from NSE (rate-limited or off-hours). Try again."}
+    if source == "eod":
+        hist, ois, meta = _load_eod(universe_size, days, include_oi,
+                                    min_price, min_value_cr)
+        if not hist:
+            return {"message": "No EOD history ingested yet — load the bhavcopy "
+                    "first (⬇ Load EOD, or POST /api/eod/backfill {days}), then "
+                    "re-run. The full-market EOD backtest reads db.eod_bars.",
+                    "source": source, "store": db.eod_stats()}
+    else:
+        hist, ois, meta = _load_live(universe_size, chunks, chunk_days,
+                                     include_oi, force)
+        if not hist:
+            return {"message": "No history returned from NSE (rate-limited or "
+                    "off-hours). Try again.", "source": source}
+    expiry = meta.get("expiry")
+    cache = meta.get("cache") or {"barsHit": 0, "barsFetched": 0}
 
     # cutoff = last available bar date minus `days` calendar days
     last_iso = max(b["d"] for bars in hist.values() for b in bars)
@@ -864,6 +968,7 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
     bars_counts = [len(b) for b in hist.values()]
     result = {
         "mode": "daily",
+        "source": source,
         "resolve": resolve,
         "resolved": resolved,
         "days": days,
@@ -872,6 +977,7 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
         "riskPerTrade": RISK_PER_TRADE,
         "universeRequested": universe_size,
         "universeWithData": len(hist),
+        "universeAvailable": meta.get("universeAvailable"),
         "barsMedian": _median(bars_counts),
         "oiExpiry": expiry,
         "oiNames": sum(1 for v in ois.values() if v),
@@ -899,16 +1005,18 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
 # Strategy of the day — read today's LIVE regime, then surface the strategy with
 # the best HISTORICAL edge on that kind of day (from the daily-bar leaderboard).
 # ----------------------------------------------------------------------------
-def cached_regime_leaderboard(days=60, universe_size=60, resolve="daily"):
-    """Memoised regime leaderboard for strategy-of-the-day (recomputed <=1/6h)."""
-    key = (int(days), int(universe_size), resolve)
+def cached_regime_leaderboard(days=60, universe_size=60, resolve="daily",
+                              source="live"):
+    """Memoised regime leaderboard for strategy-of-the-day (recomputed <=1/6h).
+    Keyed by source so the live (curated) and full-market EOD boards coexist."""
+    key = (int(days), int(universe_size), resolve, source)
     c = _sod_cache
     if c["key"] == key and c["data"] and (time.time() - c["ts"]) < _SOD_TTL_S:
         return c["data"]
     with _sod_lock:
         if c["key"] == key and c["data"] and (time.time() - c["ts"]) < _SOD_TTL_S:
             return c["data"]
-        r = run(days=days, universe_size=universe_size, resolve=resolve)
+        r = run(days=days, universe_size=universe_size, resolve=resolve, source=source)
         data = {
             "regimeLeaderboard": r.get("regimeLeaderboard") or {"order": [], "rows": []},
             "volLeaderboard": r.get("volLeaderboard") or {"order": [], "rows": []},
@@ -946,10 +1054,11 @@ _wf_lock = threading.Lock()
 UNTRUSTED_VERDICTS = frozenset({"overfit", "no-edge"})
 
 
-def cached_walkforward(days=120, universe_size=60, resolve="daily"):
+def cached_walkforward(days=120, universe_size=60, resolve="daily", source="live"):
     """Memoised walk-forward report (recomputed <=1/6h). Lazy import to dodge the
-    walkforward↔backtest_daily cycle; serialised through the shared run lock."""
-    key = (int(days), int(universe_size), resolve)
+    walkforward↔backtest_daily cycle; serialised through the shared run lock.
+    Keyed by source so live and full-market EOD verdicts coexist."""
+    key = (int(days), int(universe_size), resolve, source)
     c = _wf_cache
     if c["key"] == key and c["data"] and (time.time() - c["ts"]) < _WF_TTL_S:
         return c["data"]
@@ -957,7 +1066,8 @@ def cached_walkforward(days=120, universe_size=60, resolve="daily"):
         if c["key"] == key and c["data"] and (time.time() - c["ts"]) < _WF_TTL_S:
             return c["data"]
         import walkforward as wf
-        data = wf.run(days=days, universe_size=universe_size, resolve=resolve)
+        data = wf.run(days=days, universe_size=universe_size, resolve=resolve,
+                      source=source)
         _wf_cache.update(key=key, ts=time.time(), data=data)
         return data
 
@@ -1026,9 +1136,10 @@ def _vol_cells(vol_lb, vol_state):
     return (row or {}).get("cells") or {}
 
 
-def strategy_of_day(days=60, universe_size=60, min_closed=5):
+def strategy_of_day(days=60, universe_size=60, min_closed=5, source="live"):
     """Today's live regime + the strategy with the best historical expectancy on
-    that regime. Falls back to the a-priori regimeFit design when history is thin."""
+    that regime. Falls back to the a-priori regimeFit design when history is thin.
+    `source="eod"` reads the full-market bhavcopy leaderboard (far more samples)."""
     try:
         regime = sim.current_regime() or {}
     except Exception:
@@ -1036,7 +1147,8 @@ def strategy_of_day(days=60, universe_size=60, min_closed=5):
     label = regime.get("label")
 
     try:
-        lb_data = cached_regime_leaderboard(days=days, universe_size=universe_size)
+        lb_data = cached_regime_leaderboard(days=days, universe_size=universe_size,
+                                            source=source)
     except Exception:
         lb_data = {"regimeLeaderboard": {"order": [], "rows": []}, "regimeDist": {},
                    "days": days, "range": None, "universeWithData": 0}
@@ -1075,7 +1187,7 @@ def strategy_of_day(days=60, universe_size=60, min_closed=5):
     robustness, wf_meta, skipped = {}, None, None
     if ranked:
         try:
-            wf_data = cached_walkforward()
+            wf_data = cached_walkforward(universe_size=universe_size, source=source)
             robustness = robustness_map(wf_data)
             if wf_data and wf_data.get("ok"):
                 wf_meta = {"ok": True, "trainCut": wf_data.get("trainCut"),
@@ -1121,6 +1233,7 @@ def strategy_of_day(days=60, universe_size=60, min_closed=5):
 
     return {
         "regime": regime,
+        "source": source,
         "basis": basis,
         "pick": pick,
         "ranked": ranked,

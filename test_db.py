@@ -260,6 +260,26 @@ def test_eod_latest_date_and_oi_symbols():
         assert db.eod_oi_symbols() == ["ACME"]         # only names with futures OI
 
 
+def test_eod_oi_all_grouped_and_since():
+    with _temp_db():
+        assert db.eod_oi_all() == {}                    # empty DB
+        # Two expiries for ACME (a rollover) → one continuous series per symbol.
+        db.eod_oi_put("ACME", "31-JUL-2026",
+                      [{"d": "2026-07-15", "oi": 100, "changeOi": 10},
+                       {"d": "2026-07-30", "oi": 120, "changeOi": 5}])
+        db.eod_oi_put("ACME", "28-AUG-2026",
+                      [{"d": "2026-08-01", "oi": 130, "changeOi": 8}])
+        db.eod_oi_put("BETA", "31-JUL-2026", [{"d": "2026-07-15", "oi": 55, "changeOi": 5}])
+        allo = db.eod_oi_all()
+        assert set(allo) == {"ACME", "BETA"}
+        # ACME rows span BOTH expiries, ascending by date (continuous near-month).
+        assert [r["d"] for r in allo["ACME"]] == ["2026-07-15", "2026-07-30", "2026-08-01"]
+        # `since` trims older rows across every expiry.
+        recent = db.eod_oi_all(since="2026-08-01")
+        assert [r["d"] for r in recent["ACME"]] == ["2026-08-01"]
+        assert "BETA" not in recent
+
+
 # ---------------------------------------------------------------------------
 # minute bars
 # ---------------------------------------------------------------------------

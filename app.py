@@ -616,15 +616,31 @@ def api_sim_backtest():
 
 @app.route("/api/sim/backtest_daily")
 def api_sim_backtest_daily():
-    """Daily-bar historical backtest over REAL NSE end-of-day history."""
+    """Daily-bar historical backtest. `source=eod` runs the WHOLE ingested
+    bhavcopy universe from SQLite (off-hours, thousands of trades); the default
+    `source=live` pulls a curated universe from NSE. minPrice/minValueCr filter
+    the EOD universe."""
     import backtest_daily as btd
     resolve = request.args.get("resolve", "daily")
+    source = "eod" if request.args.get("source") == "eod" else "live"
+    default_uni = 2500 if source == "eod" else 40
+
+    def fnum(name, default):
+        v = request.args.get(name)
+        try:
+            return float(v) if v not in (None, "") else default
+        except ValueError:
+            return default
+
     return jsonify(btd.run(
         days=int(request.args.get("days", 30)),
-        universe_size=int(request.args.get("universe", 40)),
+        universe_size=int(request.args.get("universe", default_uni)),
         max_hold=int(request.args.get("maxHold", 5)),
         force=request.args.get("refresh") in ("1", "true", "yes"),
         resolve="intrabar" if resolve == "intrabar" else "daily",
+        source=source,
+        min_price=fnum("minPrice", btd.EOD_MIN_PRICE),
+        min_value_cr=fnum("minValueCr", btd.EOD_MIN_VALUE_CR),
     ))
 
 
@@ -636,24 +652,32 @@ def api_sim_regime():
 
 @app.route("/api/sim/strategy_of_day")
 def api_sim_strategy_of_day():
-    """Today's live regime + the historically best strategy for that regime."""
+    """Today's live regime + the historically best strategy for that regime.
+    `source=eod` reads the full-market bhavcopy leaderboard (far more samples)."""
     import backtest_daily as btd
+    source = "eod" if request.args.get("source") == "eod" else "live"
+    default_uni = 2500 if source == "eod" else 60
     return jsonify(btd.strategy_of_day(
         days=int(request.args.get("days", 60)),
-        universe_size=int(request.args.get("universe", 60)),
+        universe_size=int(request.args.get("universe", default_uni)),
+        source=source,
     ))
 
 
 @app.route("/api/sim/walkforward")
 def api_sim_walkforward():
     """Walk-forward out-of-sample validation: does each strategy's (and the
-    regime-adaptive selection's) edge survive out-of-sample, or is it curve-fit?"""
+    regime-adaptive selection's) edge survive out-of-sample, or is it curve-fit?
+    `source=eod` validates over the full-market bhavcopy universe."""
     import walkforward as wf
+    source = "eod" if request.args.get("source") == "eod" else "live"
+    default_uni = 2500 if source == "eod" else 60
     return jsonify(wf.run(
         days=int(request.args.get("days", 120)),
-        universe_size=int(request.args.get("universe", 60)),
+        universe_size=int(request.args.get("universe", default_uni)),
         max_hold=int(request.args.get("maxHold", 5)),
         folds=int(request.args.get("folds", 4)),
+        source=source,
     ))
 
 

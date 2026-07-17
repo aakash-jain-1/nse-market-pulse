@@ -51,9 +51,9 @@ NSE/
 ├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
 ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
-├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (9 strategies)
+├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 523 unit tests across 26 suites (see below)
+├── test_*.py          # 530 unit tests across 26 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_bhavcopy.py                             # EOD UDiFF parsers + fetch walk-back + backfill + price/lot fallback
@@ -479,11 +479,31 @@ with no creds the app is unchanged.
 - ✅ *(done — see below)* market-wide EOD scanner over the full bhavcopy universe
   (`eod_scanner.py` + 🌐 EOD Scan tab).
 - ✅ *(done — see below)* resilient EOD option chain (max-pain/PCR/OI walls) from FO
-  bhavcopy options (`eod_options.py`). Still open: a futures rollover tracker;
-  delivery% market-wide (needs the sec_bhavdata_full file).
+  bhavcopy options (`eod_options.py`).
+- ✅ *(done — see below)* full-universe EOD backtest (`backtest_daily.py source="eod"`)
+  — the 9 EOD strategies over the whole ingested bhavcopy universe from SQLite, so the
+  leaderboards / `strategy_of_day` / walk-forward are statistically trustworthy.
+  Still open: delivery% market-wide (needs the sec_bhavdata_full file); a futures
+  rollover tracker; a scheduled/auto EOD backfill.
 
 ## Done recently
 
+- **📊 Full-universe EOD backtest (`backtest_daily.py source="eod"`)** — the daily
+  backtest (and everything it feeds: regime/vol leaderboards, `strategy_of_day`,
+  walk-forward) ran over a curated ~40–260-name universe pulled one symbol at a time
+  from NSE — slow, network-bound, and a *flattering* sample. Now `source="eod"` reads
+  the WHOLE ingested bhavcopy universe straight from SQLite (`db.eod_bars`/`db.eod_oi`,
+  via `bhavcopy.backfill`): **no network, off-hours, thousands of trades** (verified:
+  1561 liquid names → 5144 trades in 0.3s vs 156 on the curated 40 — and the
+  whole-market expectancy honestly sits near breakeven where the curated run looked
+  rosy). Data layer split into `_load_live` / `_load_eod` sharing the whole analysis
+  pipeline; new `db.eod_oi_all()` builds a continuous near-month OI% series across
+  rollovers; liquidity floors (`minPrice`/`minValueCr`) keep the sample tradable;
+  `resolve` forced to daily (minute re-resolution needs per-symbol NSE fetches).
+  `?source=eod` on `/api/sim/backtest_daily|strategy_of_day|walkforward`; Sim-tab
+  **Backtest source** selector (Live NSE ↔ Full-market EOD) with a source badge +
+  coverage/thin-history hint. Trade-off: Delivery% goes quiet (bhavcopy omits it).
+  Tests **+7** (suite **523 → 530**).
 - **⛓ EOD option chain (`eod_options.py`)** — the live chain rides NSE's anti-bot
   NextApi (403s intermittently, empty/stale off-hours). The FO bhavcopy carries every
   contract's EOD OI/close/volume in a plain static ZIP, so this rebuilds the chain +
@@ -918,6 +938,20 @@ with no creds the app is unchanged.
     max_pain, pdhl) are in `NOT_COVERED`. This is a daily-bar APPROXIMATION (lower
     fidelity than the live sim / context backtest) — the UI says so; don't conflate
     its numbers with the intraday strategies.
+    **Full-universe EOD source** (`?source=eod`, Sim-tab "Backtest source" selector):
+    instead of the per-symbol NSE pull above, read the WHOLE ingested bhavcopy
+    universe straight from SQLite (`db.eod_bars`/`db.eod_oi`, populated by
+    `bhavcopy.backfill`). No network, works off-hours, and runs **thousands of
+    trades** (~1500 liquid names → ~5k trades in <1s) so the regime/vol leaderboards,
+    `strategy_of_day` and walk-forward become statistically trustworthy — the curated
+    ~40-name run flatters the strategies; the whole market is the honest test. The
+    data layer is split into `_load_live` / `_load_eod` (both return `(hist, ois,
+    meta)`) so the entire analysis pipeline is shared. `_load_eod` applies liquidity
+    floors (`minPrice`/`minValueCr`), keeps the top-N by turnover, and builds a
+    continuous near-month OI% series via `db.eod_oi_all()`. `resolve` is forced to
+    daily (minute re-resolution needs per-symbol fetches); **Delivery% goes quiet**
+    (the UDiFF CM bhavcopy has no delivery column). `source` also threads through
+    `strategy_of_day`/`walkforward` (`?source=eod`), keyed separately in their caches.
     **Persistent EOD cache** (`db.eod_bars` / `eod_oi` / `eod_meta`): daily bars are
     immutable once a session closes, so we store them in SQLite forever and only
     re-hit NSE per a freshness TTL (`CACHE_TTL_HOURS=12`, tracked in `eod_meta`).
@@ -1032,7 +1066,8 @@ with no creds the app is unchanged.
     time-to-exit stats. On demand via `/api/ohlc/<sym>?from=&to=` (baked epochs);
     no storage — trades are within NSE's ~30-40 day 1-min retention.
   - Routes: `/api/sim/{strategies,summary[?strategy=],daily,leaderboard,performance,
-    backtest[?resolve=intrabar|ltp],backtest_daily[?days=&universe=&maxHold=&refresh=&resolve=daily|intrabar],
+    backtest[?resolve=intrabar|ltp],backtest_daily[?days=&universe=&maxHold=&refresh=&resolve=daily|intrabar&source=live|eod&minPrice=&minValueCr=],
+    strategy_of_day[?source=eod],walkforward[?source=eod],
     regime,take,auto,mode,reset}`. Still SEPARATE from the manual paper account.
 - **Futures paper trading** (`place_futures_order()`): margin-based (~15% of
   notional), long **and** short with netting/flip-through-zero, MTM on live

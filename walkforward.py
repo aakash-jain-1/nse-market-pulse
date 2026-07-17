@@ -243,10 +243,12 @@ def analyze(trades, folds=4, train_frac=0.6, min_test=8, min_regime_samples=4):
 
 
 def run(days=120, universe_size=60, max_hold=5, folds=4, train_frac=0.6,
-        resolve="daily"):
-    """Public entry: ONE long daily backtest (cached), then the pure analysis."""
+        resolve="daily", source="live"):
+    """Public entry: ONE long daily backtest (cached), then the pure analysis.
+    `source="eod"` validates over the full-market bhavcopy universe (far more
+    out-of-sample trades → a much stronger overfit check)."""
     bt = bd.run(days=days, universe_size=universe_size, max_hold=max_hold,
-                resolve=resolve, _collect=True)
+                resolve=resolve, _collect=True, source=source)
     if bt.get("message"):
         return {"ok": False, "reason": bt["message"]}
     out = analyze(list(bt.get("trades") or []), folds=folds, train_frac=train_frac)
@@ -254,5 +256,6 @@ def run(days=120, universe_size=60, max_hold=5, folds=4, train_frac=0.6,
     out["universeWithData"] = bt.get("universeWithData")
     out["daysRequested"] = days
     out["resolve"] = resolve
+    out["source"] = source
     out["generatedAt"] = bd._now()
     return out

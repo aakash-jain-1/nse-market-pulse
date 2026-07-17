@@ -481,6 +481,17 @@ flowchart LR
   (avg max favorable / adverse excursion per trade) alongside Tgt% / Profit% — a big
   MFE with low Tgt% flags targets set too far, MAE near the stop flags stops getting
   tagged.
+  - **🌐 Full-market EOD source** (Sim-tab **Backtest source** selector /
+    `?source=eod`): instead of pulling a curated ~40–260-name universe from NSE one
+    symbol at a time, read the **whole ingested bhavcopy universe** (~2400 cash +
+    ~210 F&O OI) straight from SQLite (`db.eod_bars` / `db.eod_oi`, loaded by
+    **⬇ Load EOD**). No network, works off-hours, and runs **thousands of trades**
+    (~1500 liquid names → ~5k trades in well under a second) — so the regime/vol
+    leaderboards, Strategy-of-the-Day and walk-forward become **statistically
+    trustworthy** rather than a flattering read off a handful of liquid favourites.
+    Liquidity floors (`minPrice`/`minValueCr`) keep the sample tradable; exits stay
+    daily-only and **Delivery% goes quiet** (the bhavcopy has no delivery column).
+    The same `?source=eod` applies to `/api/sim/strategy_of_day` and `/walkforward`.
   - **Minute-accurate mode** ("minute-accurate" checkbox / `resolve=intrabar`):
     re-resolves each trade on **real 1-minute candles** (`intrabar.py`) so exits
     follow the true intraday path — which-came-first, wick timing, MFE/MAE — rather
@@ -749,10 +760,10 @@ python nse_demand.py losers     # top losers
 | `GET /api/sim/strategies · /summary[?strategy=] · /daily · /leaderboard · /regime` | Sim reads (`/daily` also returns `perf`: date-wise realized P&L + a today card with open-book MTM). All accept `?book=cash\|fno` (default `cash`) to pick the all-market vs dedicated F&O book. |
 | `GET /api/sim/day?date=YYYY-MM-DD[&book=]` | One day's individual trades (closed that day + opened-that-day still open) — the Daily-P&L row drill-down |
 | `GET /api/sim/performance[?book=]` | All-time, cross-session scorecard per strategy (ranked by expectancy R) |
-| `GET /api/sim/strategy_of_day[?days=60&universe=60]` | Today's live regime + the historically best strategy for it (memoised daily-backtest leaderboard) |
+| `GET /api/sim/strategy_of_day[?days=60&universe=60&source=live\|eod]` | Today's live regime + the historically best strategy for it (memoised daily-backtest leaderboard); `source=eod` reads the whole-market bhavcopy leaderboard |
 | `GET /api/sim/walkforward[?days=120&universe=60&folds=4&maxHold=5]` | Walk-forward out-of-sample validation: per-strategy in-sample vs OOS expectancy + overfit verdict, plus the regime-adaptive-selection test (does it beat a fixed strategy OOS?) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
-| `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar]` | Daily-bar historical backtest over real NSE EOD (9 strategies); SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves exits on real 1-min candles |
+| `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar&source=live\|eod&minPrice=&minValueCr=]` | Daily-bar historical backtest, 9 strategies; `source=live` (curated NSE, SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves on 1-min candles) or `source=eod` (whole bhavcopy universe from SQLite, off-hours, thousands of trades) |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls (`take`/`reset` accept `{book}` — reset a specific book, or omit to wipe everything) |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
@@ -778,7 +789,7 @@ nse-market-pulse/
 ├── sim.py                  # Multi-strategy forward-tester + regime leaderboard
 ├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
 ├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
-├── backtest_daily.py        # Daily-bar historical backtest over real NSE EOD data
+├── backtest_daily.py        # Daily-bar historical backtest — source=live (curated NSE) or source=eod (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py          # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── notify.py               # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger
 ├── paper.py                # Paper-trading engine (equity + long/short options + long/short futures)
@@ -786,7 +797,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 523 unit tests, 26 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/eodscanner/eodoptions/db/app+routes/feeds/…)
+├── test_*.py               # 530 unit tests, 26 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/eodscanner/eodoptions/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

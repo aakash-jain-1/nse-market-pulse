@@ -270,15 +270,26 @@ def test_sim_backtest_arg_parsing():
         client.get("/api/sim/backtest_daily?days=10&universe=20&maxHold=4&refresh=1&resolve=intrabar")
     assert seen2["days"] == 10 and seen2["universe_size"] == 20
     assert seen2["max_hold"] == 4 and seen2["force"] is True and seen2["resolve"] == "intrabar"
+    assert seen2["source"] == "live"                     # default source
+
+    # Full-market EOD source: whole-universe default + liquidity floors.
+    seen3 = {}
+    with _patch(btd, "run", lambda **k: seen3.update(k) or {"mode": "daily"}):
+        client.get("/api/sim/backtest_daily?source=eod&minPrice=50&minValueCr=3")
+    assert seen3["source"] == "eod" and seen3["universe_size"] == 2500
+    assert seen3["min_price"] == 50.0 and seen3["min_value_cr"] == 3.0
 
 
 def test_sim_strategy_of_day():
     import backtest_daily as btd
     seen = {}
-    with _patch(btd, "strategy_of_day",
-                lambda days=60, universe_size=60: seen.update(days=days, u=universe_size) or {"pick": None}):
+    with _patch(btd, "strategy_of_day", lambda **k: seen.update(k) or {"pick": None}):
         client.get("/api/sim/strategy_of_day?days=30&universe=25")
-    assert seen["days"] == 30 and seen["u"] == 25
+    assert seen["days"] == 30 and seen["universe_size"] == 25 and seen["source"] == "live"
+    seen2 = {}
+    with _patch(btd, "strategy_of_day", lambda **k: seen2.update(k) or {"pick": None}):
+        client.get("/api/sim/strategy_of_day?source=eod")
+    assert seen2["source"] == "eod" and seen2["universe_size"] == 2500   # whole market
 
 
 def test_sim_walkforward_arg_parsing():
@@ -288,7 +299,11 @@ def test_sim_walkforward_arg_parsing():
         st, j = _json("/api/sim/walkforward?days=90&universe=50&maxHold=6&folds=5")
     assert st == 200 and j == {"ok": True}
     assert seen["days"] == 90 and seen["universe_size"] == 50
-    assert seen["max_hold"] == 6 and seen["folds"] == 5
+    assert seen["max_hold"] == 6 and seen["folds"] == 5 and seen["source"] == "live"
+    seen2 = {}
+    with _patch(wf, "run", lambda **k: seen2.update(k) or {"ok": True}):
+        _json("/api/sim/walkforward?source=eod")
+    assert seen2["source"] == "eod" and seen2["universe_size"] == 2500
 
 
 # ---------------------------------------------------------------------------

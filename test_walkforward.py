@@ -173,6 +173,17 @@ def test_run_handles_no_history():
     assert out["ok"] is False and "No history" in out["reason"]
 
 
+def test_run_forwards_source():
+    fake = {"trades": _dataset(), "range": {"from": "2026-07-01", "to": "2026-07-10"},
+            "universeWithData": 2400}
+    seen = {}
+    with _patch(bd, "run", lambda **k: seen.update(k) or fake):
+        out = wf.run(days=120, source="eod")
+    assert seen["source"] == "eod"          # forwarded to the backtest
+    assert out["source"] == "eod"           # echoed in the report
+    assert out["universeWithData"] == 2400
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

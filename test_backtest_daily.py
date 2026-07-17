@@ -501,6 +501,123 @@ def test_run_includes_vol_axis():
     assert any(t["strategy"] == "momentum" for t in out["trades"])
 
 
+# ---------------------------------------------------------------------------
+# Full-market EOD source: read the whole ingested bhavcopy universe from SQLite
+# (no network) and run the same pipeline. Hermetic: temp DB seeded with bars.
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _temp_db():
+    tmp = tempfile.mkdtemp(prefix="nse_bd_eodsrc_")
+    saved = (db.DATA_DIR, db.DB_FILE, db._initialized)
+    db.DATA_DIR = tmp
+    db.DB_FILE = os.path.join(tmp, "market.db")
+    db._initialized = False
+    db.init()
+    try:
+        yield
+    finally:
+        db.DATA_DIR, db.DB_FILE, db._initialized = saved[0], saved[1], False
+        gc.collect()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _recent_iso(n):
+    """`n` recent weekday ISO dates (oldest first) so the EOD source's rolling
+    `since` window (now − ~months) always covers them regardless of the clock."""
+    from datetime import timedelta
+    out, cur = [], bd.datetime.now(bd.IST).date()
+    while len(out) < n:
+        if cur.weekday() < 5:
+            out.append(cur.strftime("%Y-%m-%d"))
+        cur -= timedelta(days=1)
+    return list(reversed(out))
+
+
+def _seed_eod(sym, dates, o, c, h, l, v, value=1e8):
+    rows = []
+    for i, d in enumerate(dates):
+        rows.append({"symbol": sym, "d": d, "date": d, "iso": d,
+                     "open": o[i], "high": h[i], "low": l[i], "close": c[i],
+                     "prevClose": c[i - 1] if i else c[i], "volume": v[i],
+                     "value": value})
+    db.eod_bars_put_bulk(rows)
+
+
+def _firing_eod(sym, value=1e8):
+    """A 4-bar momentum setup (ret+4.5%, vol 1.8x, closes near the high) that
+    fires momentum LONG on bar 2 and tags the +6% target on bar 3."""
+    d = _recent_iso(4)
+    _seed_eod(sym, d,
+              o=[100, 100, 100, 105], c=[100, 100, 104.5, 111],
+              h=[101, 101, 105.5, 112], l=[99, 99, 100, 105],
+              v=[1000, 1000, 1800, 1500], value=value)
+    return d
+
+
+def test_load_eod_filters_and_ranks():
+    with _temp_db():
+        d = _recent_iso(4)
+        _firing_eod("LIQBIG", value=5e8)     # ₹50 cr turnover, ~₹100 stock
+        _firing_eod("LIQSML", value=2e7)     # ₹2 cr turnover, ~₹100 stock
+        # PENNY: liquid turnover but sub-₹20 price → dropped by the price floor.
+        _seed_eod("PENNY", d, o=[5] * 4, c=[5] * 4, h=[5.2] * 4, l=[4.8] * 4,
+                  v=[9e6] * 4, value=5e8)
+        # ILLIQ: fine price but ₹0.1 cr turnover → dropped by the value floor.
+        _seed_eod("ILLIQ", d, o=[300] * 4, c=[300] * 4, h=[303] * 4, l=[297] * 4,
+                  v=[10] * 4, value=1e6)
+        hist, ois, meta = bd._load_eod(universe_size=10, days=30, include_oi=False,
+                                       min_price=20.0, min_value_cr=1.0)
+        assert set(hist) == {"LIQBIG", "LIQSML"}      # PENNY (price) + ILLIQ (value) dropped
+        assert meta["universeAvailable"] == 4         # all seeded names counted
+        # cap keeps the most-liquid names first
+        hist2, _o, _m = bd._load_eod(universe_size=1, days=30, include_oi=False,
+                                     min_price=20.0, min_value_cr=1.0)
+        assert set(hist2) == {"LIQBIG"}               # highest turnover wins the single slot
+
+
+def test_load_eod_builds_oi_series():
+    with _temp_db():
+        d = _firing_eod("FUT1")
+        # two expiries (a rollover) → one continuous OI% series
+        db.eod_oi_put("FUT1", "2026-07-31",
+                      [{"d": d[0], "oi": 110, "changeOi": 10},
+                       {"d": d[1], "oi": 120, "changeOi": 10}])
+        db.eod_oi_put("FUT1", "2026-08-28",
+                      [{"d": d[2], "oi": 130, "changeOi": 10},
+                       {"d": d[3], "oi": 140, "changeOi": 10}])
+        hist, ois, meta = bd._load_eod(universe_size=10, days=60, include_oi=True,
+                                       min_price=20.0, min_value_cr=1.0)
+        assert "FUT1" in ois
+        assert ois["FUT1"][d[0]] == 10.0              # 110 vs prev 100 → +10%
+        assert len(ois["FUT1"]) == 4
+
+
+def test_run_source_eod_end_to_end():
+    with _temp_db():
+        _firing_eod("X")
+        out = bd.run(days=60, source="eod", include_oi=False, _collect=True)
+    assert out.get("source") == "eod"
+    assert out["universeWithData"] == 1
+    assert out["resolve"] == "daily"
+    assert {"regimeLeaderboard", "volLeaderboard", "strategies"} <= set(out)
+    assert any(t["strategy"] == "momentum" for t in out["trades"])
+
+
+def test_run_source_eod_empty_store_message():
+    with _temp_db():
+        out = bd.run(days=30, source="eod")
+    assert out.get("source") == "eod"
+    assert "message" in out and "store" in out           # helpful "load bhavcopy first"
+
+
+def test_run_eod_forces_daily_resolve():
+    # intrabar re-resolution needs per-symbol NSE fetches → forced off for EOD.
+    with _temp_db():
+        _firing_eod("X")
+        out = bd.run(days=60, source="eod", include_oi=False, resolve="intrabar")
+    assert out["resolve"] == "daily"
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

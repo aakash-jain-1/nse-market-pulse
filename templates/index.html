@@ -497,6 +497,12 @@
         <label class="chk"><input type="checkbox" id="simAuto"> Auto (market hours)</label>
         <button id="simReset" class="sell" style="padding:6px 12px">Reset</button>
         <button id="simBacktest" style="padding:6px 12px">⏮ Backtest history</button>
+        <label title="Live = pull a curated universe from NSE per symbol (needs network, best in/after hours). Full-market EOD = read the WHOLE ingested bhavcopy universe (~2400 names) from the local cache — no network, works off-hours, thousands of trades so the leaderboards are statistically trustworthy. Load history first with ⬇ Load EOD.">Backtest source
+          <select id="simBtSource">
+            <option value="live">Live NSE (curated)</option>
+            <option value="eod">Full-market EOD (~2400)</option>
+          </select>
+        </label>
         <label>Daily universe
           <select id="simBtUniverse">
             <option value="40">Top 40</option>
@@ -2894,12 +2900,30 @@
         <td class="${(t.realizedPnl||0)>=0?'pos':'neg'}">${_sgn(t.realizedPnl)}₹${fmtNum(t.realizedPnl)}</td>
         <td colspan="2"></td></tr>`;
       const nc = (bt.notCovered || []).map(x => `<b>${x.name}</b> (${x.reason})`).join("; ");
+      const eod = bt.source === "eod";
+      const store = (bt.cache && bt.cache.store && bt.cache.store.bars) || {};
+      const thin = (bt.barsMedian || 0) < 40;
+      const srcBadge = eod
+        ? `<span class="badge" style="background:var(--accent);color:#04121f;font-weight:700;padding:2px 8px;border-radius:4px">🌐 FULL-MARKET EOD</span>`
+        : `<span class="badge" style="background:var(--border);color:var(--text);padding:2px 8px;border-radius:4px">📡 LIVE NSE</span>`;
+      const title = eod
+        ? `🌐 Full-market EOD backtest — whole bhavcopy universe, last ${bt.days} days`
+        : `📅 Daily-bar historical backtest — real NSE end-of-day, last ${bt.days} days`;
+      const cover = eod
+        ? `${srcBadge} <b>${fmtNum(bt.universeWithData)}</b> liquid names${bt.universeAvailable ? ` of ${fmtNum(bt.universeAvailable)} ingested` : ""} · ${bt.range.from} → ${bt.range.to} · ~${bt.barsMedian} bars/name · hold ≤${bt.maxHold}d · risk ₹${fmtNum(bt.riskPerTrade)}/trade${bt.oiNames ? ` · OI on ${bt.oiNames} F&amp;O names` : ""}.`
+        : `${srcBadge} <b>${bt.universeWithData}</b> liquid F&amp;O names · ${bt.range.from} → ${bt.range.to} · ~${bt.barsMedian} bars/name · hold ≤${bt.maxHold} trading days · risk ₹${fmtNum(bt.riskPerTrade)}/trade${bt.oiExpiry ? ` · OI from ${bt.oiExpiry} futures (${bt.oiNames} names)` : ""}.`;
+      const cacheNote = eod
+        ? `<div class="chart-note" style="opacity:.8">🗃️ Local EOD store: <b>${fmtNum(store.symbols || 0)}</b> names · ${fmtNum(store.rows || 0)} bars${store.from ? ` (${store.from}→${store.to})` : ""}. Pure off-hours read — no network. ${thin ? `<b>⚠ Thin history</b> (~${bt.barsMedian} bars/name) — hit <b>⬇ Load EOD</b> with more sessions for statistically firmer stats (longer-lookback signals like breakouts/52w need depth).` : "Deeper backfill = more sessions = firmer stats."}</div>`
+        : (bt.cache ? `<div class="chart-note" style="opacity:.8">🗃️ Cache: <b>${bt.cache.barsHit}</b> from disk · <b>${bt.cache.barsFetched}</b> freshly pulled · TTL ${bt.cache.ttlHours}h · store holds ${fmtNum(store.symbols)} names${store.from ? ` (${store.from}→${store.to})` : ""}. Past bars are permanent, so wider windows (60/90d) need no re-fetch — tick <i>force refresh</i> to re-pull.</div>` : "");
+      const resolveNote = eod
+        ? `<div class="chart-note" style="opacity:.7">Exits on <b>daily high/low</b> (a bar piercing both = stop). Minute-accurate re-resolution needs per-symbol NSE fetches, so it's N/A for the off-hours EOD source.</div>`
+        : (bt.resolve === "intrabar" ? `<div class="chart-note" style="opacity:.85">🎯 <b>Minute-accurate exits</b>: ${bt.resolved.intrabar} trade(s) resolved on real 1-min candles (true intraday path); ${bt.resolved.daily} fell back to daily bars (beyond NSE's ~30-40d minute retention).${bt.cache.minCache ? ` Minute cache: ${bt.cache.minCache.hit} hit / ${bt.cache.minCache.fetched} fetched, ${fmtNum(bt.cache.store.min.rows)} candles stored.` : ""}</div>`
+          : `<div class="chart-note" style="opacity:.7">Exits resolved on <b>daily high/low</b>. Tick <i>minute-accurate</i> for true intraday-path resolution (last ~30–40 days).</div>`);
       return `<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:12px">
-        <h3 class="reco-colhead">📅 Daily-bar historical backtest — real NSE end-of-day, last ${bt.days} days</h3>
-        <div class="chart-note"><b>${bt.universeWithData}</b> liquid F&amp;O names · ${bt.range.from} → ${bt.range.to} · ~${bt.barsMedian} bars/name · hold ≤${bt.maxHold} trading days · risk ₹${fmtNum(bt.riskPerTrade)}/trade${bt.oiExpiry ? ` · OI from ${bt.oiExpiry} futures (${bt.oiNames} names)` : ""}.</div>
-        ${bt.cache ? `<div class="chart-note" style="opacity:.8">🗃️ Cache: <b>${bt.cache.barsHit}</b> from disk · <b>${bt.cache.barsFetched}</b> freshly pulled · TTL ${bt.cache.ttlHours}h · store holds ${fmtNum(bt.cache.store.bars.symbols)} names${bt.cache.store.bars.from ? ` (${bt.cache.store.bars.from}→${bt.cache.store.bars.to})` : ""}. Past bars are permanent, so wider windows (60/90d) need no re-fetch — tick <i>force refresh</i> to re-pull.</div>` : ""}
-        ${bt.resolve === "intrabar" ? `<div class="chart-note" style="opacity:.85">🎯 <b>Minute-accurate exits</b>: ${bt.resolved.intrabar} trade(s) resolved on real 1-min candles (true intraday path); ${bt.resolved.daily} fell back to daily bars (beyond NSE's ~30-40d minute retention).${bt.cache.minCache ? ` Minute cache: ${bt.cache.minCache.hit} hit / ${bt.cache.minCache.fetched} fetched, ${fmtNum(bt.cache.store.min.rows)} candles stored.` : ""}</div>`
-          : `<div class="chart-note" style="opacity:.7">Exits resolved on <b>daily high/low</b>. Tick <i>minute-accurate</i> for true intraday-path resolution (last ~30–40 days).</div>`}
+        <h3 class="reco-colhead">${title}</h3>
+        <div class="chart-note">${cover}</div>
+        ${cacheNote}
+        ${resolveNote}
         <table class="tbl"><thead><tr>
           <th>Strategy</th><th title="All reconstructed trades in the window">Trades</th><th>Closed</th>
           <th title="Target hit">✓Tgt</th><th title="Stop hit">✗Stop</th><th title="Time-expired at horizon close">⏱Exp</th>
@@ -2914,7 +2938,7 @@
           <th title="Average trading days held">Hold</th><th>Equity</th>
         </tr></thead><tbody>${rows}${totRow}</tbody></table>
         <div class="chart-note" style="margin-top:8px">📊 <b>How to read it:</b> <b>Tgt%</b> = ran to the full target; <b>Profit%</b> = ended positive (many trades time-expire in partial profit, so Profit% ≫ Tgt%). <b>Exp. R</b> is the real edge (avg R/trade); <b>Realized ₹</b> just sums every trade at ₹${fmtNum(bt.riskPerTrade)} risk — it's <i>not</i> a portfolio you'd hold (you'd never run all these at once), so judge by Exp. R, not the rupee total. <b>MFE/MAE</b> = avg best/worst excursion: a big MFE with low Tgt% means winners give it back (exit sooner / trail), while MAE hugging the stop means stops are getting tagged.</div>
-        <div class="chart-note" style="margin-top:6px">⚠️ <b>Daily-bar approximation</b>, not the exact intraday logic: entries at the signal day's <b>close</b>, exits resolved on subsequent daily high/low (a bar piercing both stop &amp; target counts as a <b>stop</b>). A small liquid sample over a short window — read it as directional, not statistically final. Not covered here: ${nc}. The live sim (auto, every session) accumulates the pure, intrabar-accurate version over time.</div>
+        <div class="chart-note" style="margin-top:6px">⚠️ <b>Daily-bar approximation</b>, not the exact intraday logic: entries at the signal day's <b>close</b>, exits resolved on subsequent daily high/low (a bar piercing both stop &amp; target counts as a <b>stop</b>). ${eod ? `<b>Whole-market sample</b> (~${fmtNum(bt.universeWithData)} names) — statistically far firmer than the curated Live run, but <b>Delivery% goes quiet</b> (the bhavcopy omits delivery, so that signal needs the Live source or the separate delivery file).` : `A small liquid sample over a short window — read it as directional, not statistically final.`} Not covered here: ${nc}. The live sim (auto, every session) accumulates the pure, intrabar-accurate version over time.</div>
         ${renderDailyRegime(bt)}
       </div>`;
     }
@@ -4553,31 +4577,64 @@
     };
     document.getElementById("simBacktestDaily").onclick = async () => {
       const btn = document.getElementById("simBacktestDaily");
+      const source = (document.getElementById("simBtSource") || {}).value || "live";
       const uni = document.getElementById("simBtUniverse").value || "40";
       const refresh = document.getElementById("simBtRefresh").checked;
       const intrabar = document.getElementById("simBtIntrabar").checked;
-      const big = parseInt(uni, 10) >= 150;
-      const label = parseInt(uni, 10) >= 210 ? "all ~210 F&O names" : "top " + uni + " names";
-      const eta = intrabar ? "pulling 1-min candles too — heavier, cached after the first run"
-                : refresh ? "forcing a fresh pull — " + (big ? "~1-3 min" : "~20-40s")
-                          : (big ? "instant if cached, else ~1-3 min cold" : "instant if cached, else ~20-40s");
-      btn.disabled = true; btn.textContent = "⏳ Pulling EOD history…";
-      setBtHtml("btDailyResult", "_btDailyHtml", `<div class="loading" style="margin-top:12px">Loading ${label}' ${intrabar ? "daily + 1-min" : "daily"} history + OI and reconstructing strategies… ${eta}. (The dashboard keeps refreshing meanwhile.)</div>`);
+      btn.disabled = true;
+      let url, loading;
+      if (source === "eod") {
+        // Full-market EOD: pure local DB read of the whole ingested bhavcopy
+        // universe — no per-symbol NSE pull (universe/refresh/intrabar N/A).
+        url = "/api/sim/backtest_daily?days=60&source=eod";
+        btn.textContent = "⏳ Scanning EOD universe…";
+        loading = `<div class="loading" style="margin-top:12px">Running the 9 EOD strategies across the WHOLE ingested bhavcopy universe (~2400 names) from the local cache — no network, works off-hours. Reads db.eod_bars, so it's fast once history is loaded. If nothing shows, hit <b>⬇ Load EOD</b> first (a deeper backfill = more sessions = more trustworthy stats). (The dashboard keeps refreshing meanwhile.)</div>`;
+      } else {
+        const big = parseInt(uni, 10) >= 150;
+        const label = parseInt(uni, 10) >= 210 ? "all ~210 F&O names" : "top " + uni + " names";
+        const eta = intrabar ? "pulling 1-min candles too — heavier, cached after the first run"
+                  : refresh ? "forcing a fresh pull — " + (big ? "~1-3 min" : "~20-40s")
+                            : (big ? "instant if cached, else ~1-3 min cold" : "instant if cached, else ~20-40s");
+        url = "/api/sim/backtest_daily?days=30&universe=" + uni + (refresh ? "&refresh=1" : "") + (intrabar ? "&resolve=intrabar" : "");
+        btn.textContent = "⏳ Pulling EOD history…";
+        loading = `<div class="loading" style="margin-top:12px">Loading ${label}' ${intrabar ? "daily + 1-min" : "daily"} history + OI and reconstructing strategies… ${eta}. (The dashboard keeps refreshing meanwhile.)</div>`;
+      }
+      setBtHtml("btDailyResult", "_btDailyHtml", loading);
       try {
-        const bt = await fetch("/api/sim/backtest_daily?days=30&universe=" + uni + (refresh ? "&refresh=1" : "") + (intrabar ? "&resolve=intrabar" : "")).then(r => r.json());
+        const bt = await fetch(url).then(r => r.json());
         setBtHtml("btDailyResult", "_btDailyHtml", renderDailyBacktest(bt));
       } catch (e) {
         setBtHtml("btDailyResult", "_btDailyHtml", `<div class="chart-note">Daily backtest failed: ${e}</div>`);
       }
       btn.disabled = false; btn.textContent = "📅 Daily backtest (real EOD)";
     };
+    // The curated-universe / refresh / minute-accurate controls only apply to the
+    // Live source; grey them out for the full-market EOD source.
+    (function () {
+      const src = document.getElementById("simBtSource");
+      if (!src) return;
+      const toggle = () => {
+        const eod = src.value === "eod";
+        ["simBtUniverse", "simBtRefresh", "simBtIntrabar"].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) { el.disabled = eod; if (el.closest("label")) el.closest("label").style.opacity = eod ? 0.4 : 1; }
+        });
+      };
+      src.addEventListener("change", toggle);
+      toggle();
+    })();
     document.getElementById("simWalkforward").onclick = async () => {
       const btn = document.getElementById("simWalkforward");
+      const source = (document.getElementById("simBtSource") || {}).value || "live";
       const uni = document.getElementById("simBtUniverse").value || "60";
       btn.disabled = true; btn.textContent = "⏳ Validating out-of-sample…";
-      setBtHtml("btWfResult", "_btWfHtml", `<div class="loading" style="margin-top:12px">Running a wide daily backtest (120 sessions) and splitting it into train/test folds to check whether each strategy — and the regime-adaptive selection — survives out-of-sample. Instant if the EOD history is already cached, else ~1-3 min cold. (The dashboard keeps refreshing meanwhile.)</div>`);
+      const url = source === "eod"
+        ? "/api/sim/walkforward?days=120&source=eod"
+        : "/api/sim/walkforward?days=120&universe=" + uni;
+      const scope = source === "eod" ? "the whole ingested bhavcopy universe (~2400 names — far more out-of-sample trades)" : "a curated NSE universe";
+      setBtHtml("btWfResult", "_btWfHtml", `<div class="loading" style="margin-top:12px">Running a wide daily backtest (120 sessions) over ${scope} and splitting it into train/test folds to check whether each strategy — and the regime-adaptive selection — survives out-of-sample. ${source === "eod" ? "Reads the local EOD cache (load history first with ⬇ Load EOD)." : "Instant if the EOD history is already cached, else ~1-3 min cold."} (The dashboard keeps refreshing meanwhile.)</div>`);
       try {
-        const wf = await fetch("/api/sim/walkforward?days=120&universe=" + uni).then(r => r.json());
+        const wf = await fetch(url).then(r => r.json());
         setBtHtml("btWfResult", "_btWfHtml", renderWalkforward(wf));
       } catch (e) {
         setBtHtml("btWfResult", "_btWfHtml", `<div class="chart-note">Walk-forward validation failed: ${e}</div>`);
