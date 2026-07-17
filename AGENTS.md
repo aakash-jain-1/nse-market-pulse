@@ -51,7 +51,7 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (9 strategies)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 470 unit tests across 24 suites (see below)
+├── test_*.py          # 475 unit tests across 24 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_bhavcopy.py                             # EOD UDiFF parsers + fetch walk-back + price/lot fallback
@@ -462,6 +462,16 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🎯 Vol-conditioned strategy selection** — closed the loop on the volatility
+  axis: `strategy_of_day` and the live adaptive playbook (`_regime_playbook_pick`)
+  now pick using a **blend of the regime-bucket and vol-bucket marginal
+  expectancies** (`blendedR = 0.6·regimeR + 0.4·volR`, `backtest_daily._blend_r` /
+  `_vol_cells`; `cached_regime_leaderboard` now exposes `volLeaderboard`/`volDist`).
+  We blend the two **marginal** leaderboards rather than keying on a joint
+  regime×vol bucket (which would starve sample sizes). The pick is still
+  walk-forward-gated; the SoD card shows a 🌊 "vol agrees/disagrees → blended R"
+  line. Backward compatible: with no vol overlay `blendedR == regimeR`. Tests +5
+  (suite **470 → 475**).
 - **🌊 Volatility-aware regime board (India VIX axis)** — the regime engine was
   momentum-only (NIFTY %, breadth, prior-day move; VIX never fetched, PCR unused).
   Added an **orthogonal volatility axis** kept *separate* from the 6 directional
@@ -914,6 +924,13 @@ with no creds the app is unchanged.
     with the best HISTORICAL expectancy R on that regime, from
     `cached_regime_leaderboard()` (a `run(days=60, universe=60)` memoised
     in-process for `_SOD_TTL_S=6h` behind `_sod_lock`; `min_closed=5` per cell).
+    **Vol-conditioned:** the ranking is by `blendedR = _blend_r(regimeR, volR)`
+    (`_VOL_BLEND_W=0.4`) — the regime-bucket edge blended with the *current* India-VIX
+    bucket's edge (`_vol_cells` over the now-exposed `volLeaderboard`), so the pick
+    reflects both direction and volatility; each candidate carries `volExpectancyR`/
+    `blendedR` and the reason notes vol agree/disagree. The same blend feeds the live
+    adaptive playbook (`_regime_playbook_pick(regime_label, vol_state)`). Walk-forward
+    still gates the final choice; with no vol overlay `blendedR == regimeR`.
     Falls back to the a-priori `regimeFit` design when the regime is thin
     (`basis: history|fit|none`); `pick.fits` flags a pick winning OUTSIDE its
     designed regime. Pre-warmed in a daemon thread at startup (app.py `__main__`)

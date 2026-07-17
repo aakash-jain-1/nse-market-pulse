@@ -2499,8 +2499,13 @@
         const skip = sod.skippedOverfit
           ? `<div style="margin-top:5px;color:var(--warn,#e0a500);font-size:11px">↩ Skipped <b>${sod.skippedOverfit.name}</b> (${_sgn(sod.skippedOverfit.expectancyR)}${sod.skippedOverfit.expectancyR}R in-sample) — flagged ${sod.skippedOverfit.robustness || "overfit"} out-of-sample.</div>`
           : "";
+        // Vol-conditioned overlay: how the current volatility bucket rates this pick.
+        const volLine = (p.volExpectancyR != null && rg.volState)
+          ? `<div class="pick-reason" style="margin-top:5px;font-size:11px">🌊 <b>${rg.volState}</b> vol ${p.volExpectancyR >= 0 ? "agrees" : "disagrees"}: <span class="${p.volExpectancyR>=0?'pos':'neg'}">${_sgn(p.volExpectancyR)}${p.volExpectancyR}R</span>${p.volClosed != null ? ` over ${p.volClosed}t` : ""}${smp.volDays != null ? ` · ${smp.volDays}d in sample` : ""} → blended <b class="${(p.blendedR||0)>=0?'pos':'neg'}">${_sgn(p.blendedR)}${p.blendedR}R</b> <span style="color:var(--muted)">(picked on regime+vol)</span></div>`
+          : "";
         body = `<div class="pick-name">${p.name} ${er}${_wfBadge(p.robustness)}</div>
           <div class="pick-reason">Best historical edge on <b>${ico} ${rg.label}</b> days — ${p.winRate}% full-target win over ${p.closed} trades.${warn}</div>
+          ${volLine}
           ${skip}
           ${chips ? `<div style="margin-top:5px;color:var(--muted);font-size:11px">Next best: ${chips}</div>` : ""}`;
       } else if (p && sod.basis === "fit") {

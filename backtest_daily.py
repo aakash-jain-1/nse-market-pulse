@@ -911,7 +911,9 @@ def cached_regime_leaderboard(days=60, universe_size=60, resolve="daily"):
         r = run(days=days, universe_size=universe_size, resolve=resolve)
         data = {
             "regimeLeaderboard": r.get("regimeLeaderboard") or {"order": [], "rows": []},
+            "volLeaderboard": r.get("volLeaderboard") or {"order": [], "rows": []},
             "regimeDist": r.get("regimeDist") or {},
+            "volDist": r.get("volDist") or {},
             "days": r.get("days"),
             "range": r.get("range"),
             "universeWithData": r.get("universeWithData"),
@@ -995,6 +997,35 @@ def _prefer_robust(ranked, robustness):
     return ranked[0], None                      # everything is untrusted — keep top
 
 
+# ----------------------------------------------------------------------------
+# Vol-conditioned selection. The regime leaderboard says which strategy has the
+# edge on THIS KIND OF DAY (direction); the vol leaderboard says which has the
+# edge in THIS VOLATILITY (Calm/Normal/Elevated). We blend the two MARGINAL
+# expectancies (never a joint regime×vol key — that would starve samples) into
+# one score, so the pick reflects both axes. Regime stays primary; vol is a
+# weighted second opinion. Walk-forward still gates the final choice.
+# ----------------------------------------------------------------------------
+_VOL_BLEND_W = 0.4                               # vol axis weight; regime gets the rest
+
+
+def _blend_r(reg_r, vol_r, w=_VOL_BLEND_W):
+    """Blend a strategy's regime-bucket and vol-bucket expectancy. Either may be
+    None (bucket unseen); falls back to whichever exists, None if both absent."""
+    if reg_r is None:
+        return vol_r
+    if vol_r is None:
+        return reg_r
+    return (1 - w) * reg_r + w * vol_r
+
+
+def _vol_cells(vol_lb, vol_state):
+    """{sid: cell} for the current volatility bucket from a vol leaderboard."""
+    if not vol_lb or not vol_state:
+        return {}
+    row = next((r for r in vol_lb.get("rows", []) if r.get("volState") == vol_state), None)
+    return (row or {}).get("cells") or {}
+
+
 def strategy_of_day(days=60, universe_size=60, min_closed=5):
     """Today's live regime + the strategy with the best historical expectancy on
     that regime. Falls back to the a-priori regimeFit design when history is thin."""
@@ -1012,19 +1043,32 @@ def strategy_of_day(days=60, universe_size=60, min_closed=5):
     lb = lb_data["regimeLeaderboard"]
     names = {s["id"]: s["name"] for s in STRATS}
 
+    # Vol-conditioned overlay: today's volatility bucket + its per-strategy edge,
+    # blended into the ranking so the pick reflects BOTH direction and volatility.
+    vol_state = regime.get("volState")
+    vol_cells = _vol_cells(lb_data.get("volLeaderboard"), vol_state)
+
     row = next((r for r in lb.get("rows", []) if r["regime"] == label), None)
     ranked = []
     if row:
         for sid in lb.get("order", []):
             c = (row["cells"] or {}).get(sid)
             if c and c["closed"] >= min_closed:
+                vc = vol_cells.get(sid)
+                vol_r = vc["expectancyR"] if vc else None
                 ranked.append({
                     "id": sid, "name": names.get(sid, sid),
                     "expectancyR": c["expectancyR"], "winRate": c["winRate"],
                     "avgPnlPct": c["avgPnlPct"], "closed": c["closed"],
+                    "volExpectancyR": vol_r,
+                    "volClosed": vc["closed"] if vc else None,
+                    "blendedR": _blend_r(c["expectancyR"], vol_r),
                     "fits": label in _regime_fit(sid),
                 })
-        ranked.sort(key=lambda x: x["expectancyR"], reverse=True)
+        # Rank by the blended (regime+vol) score; falls back to pure regime R when
+        # there's no vol overlay yet (blendedR == expectancyR then).
+        ranked.sort(key=lambda x: (x["blendedR"] if x["blendedR"] is not None else -1e9),
+                    reverse=True)
 
     # Walk-forward robustness overlay: annotate every candidate + prefer a robust
     # pick over a higher-but-overfit in-sample edge.
@@ -1056,6 +1100,11 @@ def strategy_of_day(days=60, universe_size=60, min_closed=5):
             reason += f" ⚠ walk-forward: {rob} (edge did not survive out-of-sample)."
         elif rob:
             reason += f" Walk-forward: {rob}."
+        if top.get("volExpectancyR") is not None and vol_state:
+            vr = top["volExpectancyR"]
+            reason += (f" {vol_state} vol {'agrees' if vr >= 0 else 'disagrees'}: "
+                       f"{vr:+.2f}R over {top.get('volClosed', 0)} trades "
+                       f"(blended {top['blendedR']:+.2f}R).")
         pick = {**top, "reason": reason}
         basis = "history"
     else:
@@ -1080,6 +1129,7 @@ def strategy_of_day(days=60, universe_size=60, min_closed=5):
         "sample": {"days": lb_data.get("days"),
                    "universeWithData": lb_data.get("universeWithData"),
                    "range": lb_data.get("range"),
-                   "regimeDays": (lb_data.get("regimeDist") or {}).get(label)},
+                   "regimeDays": (lb_data.get("regimeDist") or {}).get(label),
+                   "volDays": (lb_data.get("volDist") or {}).get(vol_state)},
         "generatedAt": _now(),
     }

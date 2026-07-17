@@ -623,6 +623,24 @@ def test_playbook_pick_none_for_unknown_regime():
         assert S._regime_playbook_pick(None) == (None, None, None)
 
 
+def test_playbook_pick_vol_conditioned():
+    import backtest_daily as btd
+    data = {"regimeLeaderboard": {"rows": [
+        {"regime": "Trend-Up", "best": "momentum", "cells": {
+            "momentum": {"expectancyR": 0.30, "closed": 20},
+            "meanrev": {"expectancyR": 0.20, "closed": 20}}}]},
+        "volLeaderboard": {"rows": [
+            {"volState": "Elevated", "cells": {
+                "momentum": {"expectancyR": -0.20, "closed": 20},
+                "meanrev": {"expectancyR": 0.60, "closed": 20}}}]}}
+    with _patch(btd, "peek_regime_leaderboard", lambda: data), \
+         _patch(btd, "peek_walkforward", lambda: None):
+        # Elevated vol flips the pick: blended meanrev 0.36 > momentum 0.10
+        assert S._regime_playbook_pick("Trend-Up", "Elevated")[0] == "meanrev"
+        # without a vol_state it's regime-only → the higher regime edge wins
+        assert S._regime_playbook_pick("Trend-Up")[0] == "momentum"
+
+
 def test_conviction_mult_edge_bands():
     assert S._conviction_mult("history", {"expectancyR": 0.4, "closed": 20}) == 1.5
     assert S._conviction_mult("history", {"expectancyR": 0.2, "closed": 6}) == 1.25
@@ -668,7 +686,7 @@ def test_gen_adaptive_delegates_and_annotates():
         "regime": {"label": "Mixed", "niftyPct": 0.1, "breadthAdv": 10, "breadthDec": 10},
         "volgainers": [{"symbol": "A", "week1volChange": 10, "pChange": 2.0, "ltp": 100}],
     }
-    with _patch(S, "_regime_playbook_pick", lambda label: ("vol_breakout", "fit", None)):
+    with _patch(S, "_regime_playbook_pick", lambda label, vol=None: ("vol_breakout", "fit", None)):
         out = S.gen_adaptive(ctx)
     assert out and out[0]["via"] == "vol_breakout"
     assert "sizeMult" in out[0]
@@ -676,7 +694,7 @@ def test_gen_adaptive_delegates_and_annotates():
 
 
 def test_gen_adaptive_empty_when_no_pick():
-    with _patch(S, "_regime_playbook_pick", lambda label: (None, None, None)):
+    with _patch(S, "_regime_playbook_pick", lambda label, vol=None: (None, None, None)):
         assert S.gen_adaptive({"regime": {"label": "Nope"}}) == []
 
 

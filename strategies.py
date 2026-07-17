@@ -946,10 +946,12 @@ def gen_pdhl(ctx):
     return ideas
 
 
-def _regime_playbook_pick(regime_label):
+def _regime_playbook_pick(regime_label, vol_state=None):
     """Which base strategy to follow in this regime: the historical best from the
     daily-backtest leaderboard when it's warm, else the first strategy DESIGNED
     for the regime (a-priori). Never triggers a (blocking) backtest compute.
+    When today's `vol_state` (Calm/Normal/Elevated) is known, the ranking blends
+    the volatility-bucket edge with the regime edge (vol-conditioned selection).
     Returns (strategy_id, basis, cell) where basis is 'history'|'fit'|None and
     cell is the winning leaderboard cell (expectancyR/closed/...) or None."""
     if regime_label:
@@ -962,12 +964,17 @@ def _regime_playbook_pick(regime_label):
                             if r.get("regime") == regime_label), None)
                 if row:
                     cells = row.get("cells") or {}
+                    vol_cells = btd._vol_cells(data.get("volLeaderboard"), vol_state)
                     ranked = sorted(
-                        [{"id": sid, "expectancyR": c["expectancyR"], "cell": c}
+                        [{"id": sid, "expectancyR": c["expectancyR"],
+                          "blendedR": btd._blend_r(
+                              c["expectancyR"], (vol_cells.get(sid) or {}).get("expectancyR")),
+                          "cell": c}
                          for sid, c in cells.items()
                          if c and c.get("expectancyR") is not None
                          and (c.get("closed") or 0) >= 3],
-                        key=lambda x: x["expectancyR"], reverse=True)
+                        key=lambda x: (x["blendedR"] if x["blendedR"] is not None else -1e9),
+                        reverse=True)
                     if ranked:
                         # Prefer a walk-forward-robust strategy over a higher-but-
                         # overfit in-sample edge (non-blocking peek; falls back to
@@ -1061,14 +1068,15 @@ def gen_adaptive(ctx):
     historical edge in today's regime (the strategy-of-the-day). This is the
     sim's 'follow the playbook' track — it measures whether regime-switching
     beats any single fixed strategy over time."""
-    regime_label = (ctx.get("regime") or {}).get("label")
-    sid, basis, cell = _regime_playbook_pick(regime_label)
+    regime = ctx.get("regime") or {}
+    regime_label = regime.get("label")
+    vol_state = regime.get("volState")
+    sid, basis, cell = _regime_playbook_pick(regime_label, vol_state)
     if not sid or sid == "adaptive":
         return []
     meta = STRATEGY_MAP.get(sid)
     if not meta:
         return []
-    regime = ctx.get("regime") or {}
     mult = conviction_mult(basis, cell, regime)
     # Walk-forward verdict for the delegated strategy (non-blocking; may be absent).
     verdict = None
@@ -1078,7 +1086,8 @@ def gen_adaptive(ctx):
             verdict = btd.robustness_map(btd.peek_walkforward()).get(sid)
         except Exception:
             verdict = None
-    lead = (f"Regime playbook: {regime_label} day → {meta['name']}"
+    lead = (f"Regime playbook: {regime_label} day"
+            + (f" · {vol_state} vol" if vol_state else "") + f" → {meta['name']}"
             + (" (best historical edge)" if basis == "history" else " (designed fit)")
             + (f", walk-forward {verdict}" if verdict else ""))
     edge_txt = ""

@@ -96,7 +96,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 470 across 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 475 across 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -184,7 +184,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **470 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **475 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -234,8 +234,11 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   volatility axis (`volState` Calm/Normal/Elevated + 52-wk percentile) orthogonal
   to the 6 directional labels, mirrored by a realized-vol proxy in the backtest;
   every sim + backtest trade now tagged `volAtEntry`, plus a vol × strategy
-  leaderboard. *Still open:* vol-*conditioned* selection (data-driven, once samples
-  build), more researched edges.
+  leaderboard.
+- ✅ **Engine sharpening — vol-conditioned selection** — `strategy_of_day` + the
+  live adaptive playbook now pick using a **blend of the regime and vol marginal
+  expectancies** (`blendedR`, vol weight 0.4), walk-forward-gated. *Still open:*
+  more researched edges; a joint regime×vol view once samples are deep enough.
 - ✅ **#4 Data resilience + broaden universe (`bhavcopy.py`)** — native EOD UDiFF
   bhavcopy ingest from NSE's static archive (no anti-bot gate). Prices ANY listed
   symbol (last-resort in `get_price`, works off-hours + when the live API is down),
@@ -267,6 +270,31 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Vol-conditioned strategy selection (suite 470 → 475)
+- **Why:** the volatility axis was surfaced/attributed but selection still keyed
+  only on the directional regime. This closes the loop — the pick now uses **both**
+  axes, data-driven from the vol leaderboard we already build.
+- **How (marginal-blend, never a joint key):** for the current regime *and* vol
+  bucket, blend each strategy's two **marginal** expectancies into one score —
+  `blendedR = (1−w)·regimeR + w·volR` with `w=_VOL_BLEND_W=0.4` (regime primary,
+  vol a weighted second opinion; falls back to whichever axis exists). We do NOT
+  key on `(regime,vol)` jointly — that would starve samples; blending marginals
+  keeps both buckets well-populated.
+  - `backtest_daily`: new `_blend_r` + `_vol_cells`; `cached_regime_leaderboard`
+    now also exposes `volLeaderboard`/`volDist`; `strategy_of_day` ranks by
+    `blendedR`, annotates each candidate with `volExpectancyR`/`volClosed`/
+    `blendedR`, and the pick reason notes whether the current vol "agrees"/
+    "disagrees". Walk-forward `_prefer_robust` still gates the final choice.
+  - `strategies._regime_playbook_pick(regime_label, vol_state=None)` blends the
+    vol bucket into the LIVE adaptive pick (non-blocking peek); `gen_adaptive`
+    passes today's `volState` and mentions it in the reasoning.
+  - UI: Strategy-of-the-Day card shows a 🌊 line — "Elevated vol agrees/disagrees:
+    +x.xxR → blended +y.yyR (picked on regime+vol)".
+- **Backward compatible:** with no vol overlay (thin/absent), `blendedR == regimeR`
+  and the pick is unchanged (existing tests untouched).
+- **Tests +5** (`_blend_r`, `_vol_cells`, SoD vol flip, SoD no-overlay control,
+  playbook vol pick). Suite **470 → 475**, green.
 
 ### 2026-07-17 — Volatility-aware regime board (India VIX axis, suite 456 → 470)
 - **Why:** the regime engine was **momentum-only** — NIFTY %, breadth, prior-day

@@ -417,7 +417,13 @@ flowchart LR
   Normal / Elevated + 52-wk percentile, shown as a badge on the card and the Sim
   regime banner) — and surfaces the strategy with the best **historical**
   expectancy on that kind of day, drawn from the ~60-session daily-backtest
-  leaderboard (far richer evidence than the young forward-test ledger). **Walk-forward overlay:**
+  leaderboard (far richer evidence than the young forward-test ledger).
+  **Vol-conditioned pick:** the ranking blends the regime-bucket edge with the
+  *current* volatility-bucket edge (`blendedR = 0.6·regimeR + 0.4·volR`, from the
+  two **marginal** leaderboards — never a joint regime×vol key that would starve
+  samples), so on, say, an Elevated-vol Trend-Up day it can favour the strategy
+  that actually holds up in high vol. The card shows a 🌊 "vol agrees/disagrees →
+  blended R" line, and the same blend drives the live Regime-Adaptive track. **Walk-forward overlay:**
   the pick now *prefers a walk-forward-robust* strategy and **skips one flagged
   overfit** out-of-sample — every candidate carries a colour-coded `WF:` verdict
   (robust / improving / decaying / overfit / no-edge), and when a higher in-sample
@@ -768,7 +774,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 470 unit tests, 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/…)
+├── test_*.py               # 475 unit tests, 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

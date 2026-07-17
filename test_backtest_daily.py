@@ -285,6 +285,27 @@ def test_vol_leaderboard_buckets_by_volatility():
 
 
 # ---------------------------------------------------------------------------
+# vol-conditioned selection: blend regime + vol expectancy
+# ---------------------------------------------------------------------------
+def test_blend_r():
+    assert bd._blend_r(None, None) is None
+    assert bd._blend_r(0.5, None) == 0.5            # vol missing → regime only
+    assert bd._blend_r(None, 0.5) == 0.5            # regime missing → vol only
+    assert abs(bd._blend_r(1.0, 0.0) - 0.6) < 1e-9  # 0.6*reg + 0.4*vol
+    assert abs(bd._blend_r(0.0, 1.0) - 0.4) < 1e-9
+
+
+def test_vol_cells_lookup():
+    vol_lb = {"order": ["m"], "rows": [
+        {"volState": "Calm", "cells": {"m": {"expectancyR": 0.2, "closed": 5}}},
+        {"volState": "Elevated", "cells": {"m": {"expectancyR": -0.1, "closed": 8}}}]}
+    assert bd._vol_cells(vol_lb, "Elevated")["m"]["expectancyR"] == -0.1
+    assert bd._vol_cells(vol_lb, "Calm")["m"]["closed"] == 5
+    assert bd._vol_cells(vol_lb, "Normal") == {}     # bucket not present
+    assert bd._vol_cells(None, "Calm") == {} and bd._vol_cells(vol_lb, None) == {}
+
+
+# ---------------------------------------------------------------------------
 # leaderboard / gate / scorecard
 # ---------------------------------------------------------------------------
 def _closed(strategy, status, r, pct, regime="Trend-Up"):
@@ -368,6 +389,50 @@ def test_strategy_of_day_prefers_robust_over_overfit():
         out = bd.strategy_of_day()
     assert out["pick"]["id"] == "meanrev" and out["pick"]["robustness"] == "robust"
     assert out["skippedOverfit"]["id"] == "momentum"
+
+
+def test_strategy_of_day_vol_conditioned_flip():
+    # On Trend-Up days momentum edges meanrev in-sample, but the CURRENT vol bucket
+    # (Elevated) strongly favours meanrev → the blended pick flips to meanrev.
+    fake_lb = {
+        "regimeLeaderboard": {"order": ["momentum", "meanrev"], "rows": [
+            {"regime": "Trend-Up", "best": "momentum", "cells": {
+                "momentum": {"closed": 10, "winRate": 60.0, "avgPnlPct": 2.0, "expectancyR": 0.30},
+                "meanrev": {"closed": 10, "winRate": 55.0, "avgPnlPct": 1.4, "expectancyR": 0.20}}}]},
+        "volLeaderboard": {"order": ["momentum", "meanrev"], "rows": [
+            {"volState": "Elevated", "best": "meanrev", "cells": {
+                "momentum": {"closed": 10, "winRate": 40.0, "avgPnlPct": -1.0, "expectancyR": -0.20},
+                "meanrev": {"closed": 10, "winRate": 65.0, "avgPnlPct": 2.5, "expectancyR": 0.60}}}]},
+        "regimeDist": {"Trend-Up": 12}, "volDist": {"Elevated": 8},
+        "days": 60, "range": None, "universeWithData": 40}
+    regime = {"label": "Trend-Up", "volState": "Elevated"}
+    with _patch(bd.sim, "current_regime", lambda: regime), \
+         _patch(bd, "cached_regime_leaderboard", lambda **k: fake_lb), \
+         _patch(bd, "cached_walkforward",
+                lambda **k: _wf_report(momentum="robust", meanrev="robust")):
+        out = bd.strategy_of_day()
+    # blended: momentum 0.6*0.30+0.4*(-0.20)=0.10 ; meanrev 0.6*0.20+0.4*0.60=0.36
+    assert out["pick"]["id"] == "meanrev"
+    assert out["pick"]["volExpectancyR"] == 0.60
+    assert abs(out["pick"]["blendedR"] - 0.36) < 1e-9
+    assert [r["id"] for r in out["ranked"]][0] == "meanrev"   # re-ranked by blend
+    assert out["sample"]["volDays"] == 8
+
+
+def test_strategy_of_day_no_vol_overlay_keeps_regime_pick():
+    # Same regime edges, but NO vol leaderboard → blended == regime, momentum wins.
+    fake_lb = {"regimeLeaderboard": {"order": ["momentum", "meanrev"], "rows": [
+        {"regime": "Trend-Up", "best": "momentum", "cells": {
+            "momentum": {"closed": 10, "winRate": 60.0, "avgPnlPct": 2.0, "expectancyR": 0.30},
+            "meanrev": {"closed": 10, "winRate": 55.0, "avgPnlPct": 1.4, "expectancyR": 0.20}}}]},
+        "regimeDist": {"Trend-Up": 12}, "days": 60, "range": None, "universeWithData": 40}
+    with _patch(bd.sim, "current_regime", lambda: {"label": "Trend-Up", "volState": "Calm"}), \
+         _patch(bd, "cached_regime_leaderboard", lambda **k: fake_lb), \
+         _patch(bd, "cached_walkforward", lambda **k: _wf_report(momentum="robust")):
+        out = bd.strategy_of_day()
+    assert out["pick"]["id"] == "momentum"
+    assert out["pick"]["volExpectancyR"] is None
+    assert out["pick"]["blendedR"] == 0.30           # falls back to regime R
 
 
 def test_strategy_of_day_fit_fallback():
