@@ -63,7 +63,7 @@ layers analytics on top:
 | 🧪 **Sim** | The multi-strategy forward-test + regime leaderboard + offline backtest (see [below](#strategy-sim-regimes--backtest)). |
 | 🎯 **F&O Sim** | The **same** forward-test as Sim, but a dedicated **parallel book that only trades F&O-eligible names** (ones you can actually take with futures/leverage). Same strategies, same live signals, same ₹2k/trade sizing — so you can compare F&O-only performance against the all-market book side by side. |
 | 🔎 **Scanner** | One ranked board combining volume spikes, money flow, momentum & OI buildup, with filters (direction, %chg, volume ×avg, value, OI signal, F&O-only). |
-| 🌐 **EOD Scan** | The **market-wide, off-hours** scanner: ranks the whole EOD bhavcopy universe (up to **~2400** cash names + F&O, not just the ~100–150 live hot lists) for swing setups — breakouts/breakdowns of the recent N-day high/low, gaps, unusual volume, trend vs 20/50-day MAs, NR7 squeezes, and **high delivery% accumulation** (real buying vs intraday churn, with a "+Npp vs avg" spike hint). A **🐋 deals** toggle cross-references the latest **bulk/block deals** (institutional footprint) and flags rows a big player just traded. Works nights/weekends. Click **⬇ Backfill history** once to load recent daily bars (also merges delivery%). Prices are the last EOD close. |
+| 🌐 **EOD Scan** | The **market-wide, off-hours** scanner: ranks the whole EOD bhavcopy universe (up to **~2400** cash names + F&O, not just the ~100–150 live hot lists) for swing setups — breakouts/breakdowns of the recent N-day high/low, gaps, unusual volume, trend vs 20/50-day MAs, NR7 squeezes, and **high delivery% accumulation** (real buying vs intraday churn, with a "+Npp vs avg" spike hint). A **🐋 deals** toggle cross-references the latest **bulk/block deals** (institutional footprint) and flags rows a big player just traded. Works nights/weekends. Click **⬇ Backfill history** once to load recent daily bars (also merges delivery%) — or let it **auto-refresh** shortly after the 15:30 close (see *Auto EOD refresh* below). Prices are the last EOD close. |
 | 🏆 **Conviction** | The **synthesis board** — fuses the independent EOD signals (breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint, F&O OI buildup, volume, trend) into ONE ranked **"tomorrow's watchlist"** via **confirmation stacking**: names are ranked by how many independent signals *agree*, so a setup confirmed 4 ways outranks a lone strong signal. Each pick carries a volatility-scaled 2R plan. **💾 Save to Ideas** keeps the board as a durable watchlist in the Ideas history; **🔔 Send digest** pushes the top picks to your phone (Telegram/webhook). Works off-hours. |
 | ★ **Demand Score** | Composite ranking — stocks appearing across gainers, money-flow & volume spikes float to the top. |
 | **Volume Gainers** | Stocks trading far above their average volume. |
@@ -778,6 +778,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/eod/conviction?limit=&minPrice=&minValueCr=&minPillars=&fno=1&deals=0` | **Stacked-conviction board** — fuses breakout + delivery + deals + OI buildup, ranked by how many independent signals agree |
 | `POST /api/eod/conviction/save` | Persist the current conviction board into the Ideas history (dated to the EOD session; never clobbers a live idea) |
 | `POST /api/eod/conviction/digest` | Push the conviction digest (top longs/shorts) to the configured off-screen channel (Telegram/webhook) |
+| `GET /api/eod/scheduler` · `POST /api/eod/scheduler/run` | Auto post-close EOD refresh: state (enabled/runAt/lastRun/dueToday) · trigger a backfill+deals+digest now (off-thread) |
 | `GET·POST /api/eod/backfill[{days}]` | Load the last N sessions' bhavcopies (+ delivery%) into the local history cache; POST starts a background job, GET polls progress |
 | `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
 | `GET /api/live/config` | Live feed status: provider (angel/dhan)? configured? connected? market-open? watchlist (never returns secrets) |
@@ -816,6 +817,7 @@ nse-market-pulse/
 ├── eod_scanner.py          # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours
 ├── eod_conviction.py       # EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals agreeing; save→ideas / digest→notify
 ├── eod_options.py          # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
+├── eod_scheduler.py        # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
 ├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
 ├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
 ├── strategies.py           # 17 strategy generators (incl. regime-adaptive) + regime detector
@@ -831,7 +833,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 618 unit tests, 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/…)
+├── test_*.py               # 631 unit tests, 30 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
@@ -891,6 +893,19 @@ the dashboard shows a **live countdown banner** ("NSE has temporarily rate-limit
 this network… showing cached/EOD… auto-resuming in *m:ss*"), and `/api/quote/<sym>`
 transparently **falls back to the EOD bhavcopy close** (`stale:true`,
 `source:"eod-bhavcopy"`) so the stock modal keeps working while NSE is paused.
+
+**Auto EOD refresh.** `eod_scheduler.py` runs **one paced, block-aware refresh**
+(bhavcopy backfill → deals → optional conviction digest) shortly after the 15:30
+close on trading days, so the EOD scanner / conviction board / backtests are fresh
+the next morning without clicking **Load EOD**. The scheduling decision is a pure
+`should_run(now, last_run, blocked)` (weekday · ≥16:00 IST · not already run today ·
+not in a WAF cooldown); the last-run date is persisted so the dev reloader's
+restarts don't re-trigger it, and a block mid-run leaves the day un-recorded to
+retry after cooldown. One gentle daily pass is the safe pattern (the WAF trips on
+*bursty repeated* backfills, not this). Env: `NSE_EOD_AUTO=0` to disable,
+`NSE_EOD_AUTO_HOUR`/`MIN` (default 16:00), `NSE_EOD_AUTO_DAYS` (default 5),
+`NSE_EOD_AUTO_DIGEST=0` to skip the digest. State/trigger: `GET`/`POST
+/api/eod/scheduler[/run]`.
 
 ---
 

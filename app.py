@@ -447,6 +447,29 @@ def api_eod_conviction_digest():
     return jsonify(notify.send_digest())
 
 
+@app.route("/api/eod/scheduler")
+def api_eod_scheduler():
+    """State of the auto post-close EOD refresh (enabled? when? last run + result)."""
+    import eod_scheduler
+    return jsonify(eod_scheduler.status())
+
+
+@app.route("/api/eod/scheduler/run", methods=["POST"])
+def api_eod_scheduler_run():
+    """Trigger the post-close refresh now (backfill → deals → optional digest).
+    Runs off-thread since a backfill is dozens of archive fetches; poll
+    /api/eod/scheduler for the result."""
+    import eod_scheduler
+    import threading
+    days = request.args.get("days")
+    kw = {"days": int(days)} if days else {}
+    if eod_scheduler._state.get("running"):
+        return jsonify({"started": False, "reason": "already running",
+                        "status": eod_scheduler.status()})
+    threading.Thread(target=eod_scheduler.run_job, kwargs=kw, daemon=True).start()
+    return jsonify({"started": True, "status": eod_scheduler.status()})
+
+
 # Backfill runs off-thread (dozens of ~1-2s archive fetches); the UI polls the
 # GET for progress. Module state is fine — a single serving worker, and the
 # heavy work is serialized inside bhavcopy.backfill()'s own lock.
@@ -876,8 +899,10 @@ def api_health():
     or "NSE session dead" without reading logs (AUDIT.md M5).
     """
     import db
+    import eod_scheduler
     import nse_client as nse
     h = snaplog.health()
+    sch = eod_scheduler.status()
     try:
         dbsize = os.path.getsize(db.DB_FILE) if os.path.exists(db.DB_FILE) else 0
     except Exception:
@@ -895,6 +920,9 @@ def api_health():
         # WAF cooldown (Akamai "Access Denied"): >0 → live NSE is paused and the app is
         # serving cached / EOD data. Powers the dashboard's "NSE cooling down" banner.
         "nse": {"blockedForSec": nse.blocked_for()},
+        # Auto post-close EOD refresh (bhavcopy + deals + optional digest).
+        "autoEod": {"enabled": sch.get("enabled"), "runAt": sch.get("runAt"),
+                    "lastRunDate": sch.get("lastRunDate"), "running": sch.get("running")},
         "db": {"path": db.DB_FILE, "bytes": dbsize,
                "mb": round(dbsize / 1_048_576, 1)},
         "posture": {"debug": DEBUG, "host": HOST,
@@ -1023,6 +1051,17 @@ if __name__ == "__main__":
                 log.warning("EOD bhavcopy pre-warm failed", exc_info=True)
 
         threading.Thread(target=_warm_eod, daemon=True).start()
+
+        # Auto EOD backfill after the 15:30 close: one paced, block-aware refresh
+        # (bhavcopy + deals + optional digest) per trading day, so the EOD scanner /
+        # conviction board / backtests are fresh without clicking "Load EOD". Opt-out
+        # via NSE_EOD_AUTO=0. Persists its last-run date, so reloader restarts don't
+        # re-trigger it.
+        try:
+            import eod_scheduler
+            eod_scheduler.start()
+        except Exception:
+            log.warning("auto-EOD scheduler failed to start", exc_info=True)
 
         # Show the phone-friendly URLs once (in the serving worker).
         ip = _lan_ip() if HOST == "0.0.0.0" else HOST

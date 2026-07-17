@@ -85,6 +85,7 @@ deals.py             Bulk/block deals (institutional footprint) from nsearchives
 eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure math
 eod_conviction.py    EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals that agree; save→ideas / digest→notify
 eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours
+eod_scheduler.py     Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest), persists last-run in eod_meta
 angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
 notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger
@@ -101,7 +102,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 618 across 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 631 across 30 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -249,7 +250,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **618 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **631 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -388,6 +389,31 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Auto EOD backfill after close (suite 618 → 631)
+- **Why:** the EOD scanner, conviction board, and daily/portfolio backtests all read the
+  ingested bhavcopy universe (`eod_bars`/`eod_oi` + delivery + deals), which only refreshed
+  when the user clicked **"Load EOD"**. So the "tomorrow's watchlist" was stale unless you
+  remembered to load it.
+- **What:** `eod_scheduler.py` — a daemon that runs **one paced, block-aware refresh**
+  (`bhavcopy.backfill` → refresh `deals` → optional `notify.send_digest`) shortly after the
+  15:30 close on trading days. The decision `should_run(now, last_run_date, blocked)` is a
+  **pure function** (weekday + at/after 16:00 IST + not already run today + not in a WAF
+  cooldown), so it's fully unit-testable without sleeping/NSE. The last-run date is persisted
+  in `db.eod_meta` (`__AUTOEOD__`/`lastrun`) so the dev auto-reloader's frequent restarts
+  don't re-trigger it, and a block mid-run leaves the day **un-recorded** so it retries once
+  the cooldown clears. Digest only fires when a genuinely new session landed (`backfill.days>0`)
+  and we weren't blocked — no re-sending yesterday's picks on a holiday.
+- **Config (env):** `NSE_EOD_AUTO` (default **on**; `=0` to disable), `NSE_EOD_AUTO_HOUR`/`MIN`
+  (default 16:00), `NSE_EOD_AUTO_DAYS` (default 5 — small since it runs daily + is idempotent),
+  `NSE_EOD_AUTO_DIGEST` (default on; self-noops if notify unconfigured).
+- **Endpoints:** `GET /api/eod/scheduler` (state: enabled/runAt/days/digest/dueToday/lastRun),
+  `POST /api/eod/scheduler/run?days=N` (trigger now, off-thread). `/api/health` gains an
+  `autoEod` summary. Safe by design — one gentle daily pass is the pattern the WAF *doesn't*
+  trip on (bursty repeated backfills are).
+- **Tests:** +13 (**618 → 631**): the pure decision (time/weekend/blocked/done/boundary), job
+  orchestration (backfill→deals→digest, digest skipped on block/no-op/flag), `_tick` records
+  the day only on a clean run, and the two routes. Lint clean.
 
 ### 2026-07-17 — Block-resilience UX (suite 616 → 618)
 - **Why:** closes the loop on the Akamai incident. The backoff already *stopped us

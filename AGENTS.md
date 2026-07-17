@@ -46,6 +46,7 @@ NSE/
 ├── eod_scanner.py     # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure
 ├── eod_conviction.py  # EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals agreeing; save→ideas / digest→notify
 ├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
+├── eod_scheduler.py   # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
@@ -56,7 +57,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 618 unit tests across 29 suites (see below)
+├── test_*.py          # 631 unit tests across 30 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -65,6 +66,7 @@ NSE/
 │   ├── test_eod_scanner.py                          # full-market swing scanner: features/tags/score/views/scan/status + delivery view + deals xref
 │   ├── test_eod_conviction.py                       # conviction board: OI-state quadrants / pillars / 2R plan / stacked ranking / save-skip
 │   ├── test_eod_options.py                          # resilient EOD option chain: parse/assemble/chain/summary/analytics
+│   ├── test_eod_scheduler.py                        # auto post-close refresh: pure should_run gating / job orchestration / tick recording / routes
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
 │   ├── test_quote.py / test_quote_more.py / test_book.py   # nse_quote math + parsers + depth
 │   ├── test_ideas.py / test_ideas_journal.py / test_strategies.py / test_paper.py
@@ -510,8 +512,8 @@ with no creds the app is unchanged.
   footprint feed + an Accumulation scanner view.
 - ✅ *(done — see below)* EOD conviction board (`eod_conviction.py`) — fuses breakout +
   delivery + deals + OI buildup into one confirmation-stacked "tomorrow's watchlist";
-  save→Ideas history + off-screen digest. Still open: a futures rollover tracker; a
-  scheduled/auto EOD backfill + auto-digest after close.
+  save→Ideas history + off-screen digest. ✅ scheduled/auto EOD backfill + auto-digest
+  after close (`eod_scheduler.py`, see Done recently). Still open: a futures rollover tracker.
 - ✅ *(done — see below)* portfolio-level backtest (`portfolio_backtest.py`) — replays the
   daily-backtest trades through a real book (finite capital, concurrent-position cap,
   risk/equal sizing, **conviction-ranked** same-day picks, **daily mark-to-market**) →
@@ -519,6 +521,16 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🗓️ Auto EOD backfill after close** — the EOD scanner / conviction board / backtests
+  read the ingested bhavcopy universe, which only refreshed on a manual "Load EOD". New
+  `eod_scheduler.py` runs **one paced, block-aware refresh** (bhavcopy → deals → optional
+  digest) shortly after the 15:30 close on trading days. The decision `should_run(now,
+  last_run, blocked)` is a **pure function** (weekday + ≥16:00 IST + not done today + not
+  in a WAF cooldown), so it's unit-testable without sleeping/NSE; the last-run date persists
+  in `db.eod_meta` so the dev reloader's restarts don't re-trigger it, and a block mid-run
+  leaves the day un-recorded to retry after cooldown. `GET /api/eod/scheduler` +
+  `POST /api/eod/scheduler/run`, an `autoEod` block in `/api/health`, opt-out via
+  `NSE_EOD_AUTO=0`. Tests **+13** (suite **618 → 631**); lint clean.
 - **🛡️ Block-resilience UX** — closes the loop on the Akamai incident. The backoff
   already stopped us *re-earning* a block, but the UI still silently showed stale numbers
   and the stock modal 403'd mid-cooldown. Now `/api/health` reports `nse.blockedForSec`;

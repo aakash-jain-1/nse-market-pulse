@@ -127,15 +127,23 @@ def test_depth_splits_symbols():
 
 def test_health_reports_nse_block():
     import nse_client as nse
+    # Stub the unrelated heavy collaborators (feed connect / snaplog) so this test
+    # only exercises the NEW block + scheduler fields; test_app.py covers the rest.
     saved = nse._blocked_until
-    try:
-        nse._blocked_until = 0.0
-        st, j = _json("/api/health")
-        assert st == 200 and j["nse"]["blockedForSec"] == 0
-        nse.note_block("test")
-        assert _json("/api/health")[1]["nse"]["blockedForSec"] > 0
-    finally:
-        nse._blocked_until = saved
+    with _patches(
+        (webapp.snaplog, "health", lambda: {"healthy": True, "marketHours": False}),
+        (webapp.live_feed, "public_status",
+         lambda: {"provider": "none", "connected": False, "configured": False}),
+    ):
+        try:
+            nse._blocked_until = 0.0
+            st, j = _json("/api/health")
+            assert st == 200 and j["nse"]["blockedForSec"] == 0
+            assert "autoEod" in j and "enabled" in j["autoEod"]
+            nse.note_block("test")
+            assert _json("/api/health")[1]["nse"]["blockedForSec"] > 0
+        finally:
+            nse._blocked_until = saved
 
 
 def test_quote_falls_back_to_eod_during_block():
@@ -480,6 +488,37 @@ def test_eod_conviction_save_and_digest():
         r = client.post("/api/eod/conviction/digest", json={})
         j = r.get_json()
         assert r.status_code == 200 and j["ok"] is True and j["count"] == 5
+
+
+def test_eod_scheduler_status_and_run():
+    import eod_scheduler as es
+    with _patch(es, "status", lambda: {"enabled": True, "runAt": "16:00 IST",
+                                       "lastRunDate": None, "running": False}):
+        st, j = _json("/api/eod/scheduler")
+        assert st == 200 and j["runAt"] == "16:00 IST" and j["enabled"] is True
+
+    # Manual trigger: runs off-thread. Stub run_job so no backfill happens, and
+    # make it observable via an Event so we don't assert on thread timing.
+    import threading as _th
+    fired = _th.Event()
+    es._state["running"] = False
+    with _patches(
+        (es, "run_job", lambda **k: fired.set()),
+        (es, "status", lambda: {"enabled": True, "running": False}),
+    ):
+        r = client.post("/api/eod/scheduler/run?days=3", json={})
+        j = r.get_json()
+        assert r.status_code == 200 and j["started"] is True
+        assert fired.wait(2.0)         # the daemon thread invoked run_job
+
+    # A run already in progress is reported, not double-started.
+    es._state["running"] = True
+    try:
+        with _patch(es, "status", lambda: {"running": True}):
+            r = client.post("/api/eod/scheduler/run", json={})
+            assert r.get_json()["started"] is False
+    finally:
+        es._state["running"] = False
 
 
 def test_eod_backfill_get_post_and_busy():
