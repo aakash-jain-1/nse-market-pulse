@@ -385,6 +385,43 @@ def test_eod_deals_route():
         assert st == 200 and j["bulk"]["count"] == 3 and j["refresh"] is True
 
 
+def test_eod_conviction_arg_parsing():
+    import eod_conviction
+    seen = {}
+
+    def fake(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
+             fno_only=False, with_deals=True):
+        seen.update(limit=limit, min_price=min_price, min_value_cr=min_value_cr,
+                    min_pillars=min_pillars, fno_only=fno_only, with_deals=with_deals)
+        return {"date": "2026-07-15", "longs": [], "shorts": [], "count": 0}
+
+    with _patch(eod_conviction, "board", fake):
+        st, j = _json("/api/eod/conviction?limit=10&minPrice=50&minValueCr=5&minPillars=4&fno=1&deals=0")
+        assert st == 200 and j["date"] == "2026-07-15"
+        assert seen == {"limit": 10, "min_price": 50.0, "min_value_cr": 5.0,
+                        "min_pillars": 4, "fno_only": True, "with_deals": False}
+        _json("/api/eod/conviction")                  # defaults (deals ON)
+        assert seen["limit"] == 25 and seen["min_pillars"] == 2
+        assert seen["min_price"] == 20.0 and seen["with_deals"] is True
+
+
+def test_eod_conviction_save_and_digest():
+    import eod_conviction
+    import notify
+    with _patches(
+        (eod_conviction, "board", lambda **k: {"date": "2026-07-15", "longs": [], "shorts": []}),
+        (eod_conviction, "save", lambda b: {"saved": 3, "skipped": 1, "day": "2026-07-15"}),
+    ):
+        r = client.post("/api/eod/conviction/save", json={"minPillars": "3"})
+        j = r.get_json()
+        assert r.status_code == 200 and j["saved"] == 3 and j["day"] == "2026-07-15"
+
+    with _patch(notify, "send_digest", lambda: {"ok": True, "channels": ["telegram"], "count": 5}):
+        r = client.post("/api/eod/conviction/digest", json={})
+        j = r.get_json()
+        assert r.status_code == 200 and j["ok"] is True and j["count"] == 5
+
+
 def test_eod_backfill_get_post_and_busy():
     import bhavcopy
     import time as _t

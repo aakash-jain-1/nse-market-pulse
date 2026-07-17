@@ -166,6 +166,60 @@ def _send(cfg, text):
         return ok
 
 
+def _fmt_digest(board, top=8):
+    """Format an EOD conviction board (from eod_conviction.board()) into a compact
+    off-screen digest — the top LONG and SHORT stacked-conviction picks with their
+    confirmation count + the plan. Pure/text-only so it's unit-testable."""
+    date = _esc(board.get("date") or "—")
+    longs = (board.get("longs") or [])[:top]
+    shorts = (board.get("shorts") or [])[:top]
+
+    def _line(p):
+        arrow = "\U0001f7e2" if p.get("direction") == "LONG" else "\U0001f534"
+        conf = int(p.get("confirmations") or 0)
+        why = _esc((p.get("reasons") or [""])[0])
+        return (f"{arrow} <b>{_esc(p.get('symbol'))}</b> "
+                f"[{conf}\u2713 · {_esc(p.get('rating'))}] "
+                f"@ \u20b9{_fmt_price(p.get('close'))} "
+                f"\u2192 SL {_fmt_price(p.get('stop'))} / Tgt {_fmt_price(p.get('target'))}"
+                + (f"\n   \u2022 {why}" if why else ""))
+
+    parts = [f"\U0001f3c6 <b>NSE Market Pulse — EOD conviction ({date})</b>"]
+    if longs:
+        parts.append("\n<b>Longs</b>")
+        parts += [_line(p) for p in longs]
+    if shorts:
+        parts.append("\n<b>Shorts</b>")
+        parts += [_line(p) for p in shorts]
+    if not longs and not shorts:
+        parts.append("\nNo stacked-conviction setups today.")
+    parts.append("\n<i>Educational — not investment advice.</i>")
+    return "\n".join(parts)
+
+
+def send_digest(board=None, top=8):
+    """Send the EOD conviction digest to the configured channel(s). Builds the board
+    itself when not supplied. No-op with a clear error when nothing is configured."""
+    cfg = _load_config()
+    ch = _channels(cfg)
+    if not ch:
+        return {"ok": False, "channels": [],
+                "error": ("No channel configured. Set TELEGRAM_BOT_TOKEN + "
+                          "TELEGRAM_CHAT_ID (or ALERT_WEBHOOK_URL), or fill "
+                          "notify_config.json, then retry.")}
+    if board is None:
+        try:
+            import eod_conviction
+            board = eod_conviction.board()
+        except Exception:
+            log.warning("notify: building conviction board failed", exc_info=True)
+            return {"ok": False, "channels": ch, "error": "Could not build the board."}
+    ok = _send(cfg, _fmt_digest(board, top=top))
+    return {"ok": bool(ok), "channels": ch,
+            "count": (len(board.get("longs") or []) + len(board.get("shorts") or [])),
+            "error": None if ok else "Send failed — check the token / chat id / network."}
+
+
 def send_test():
     """Fire a one-off test message (used by the UI's 🔔 Push button)."""
     cfg = _load_config()

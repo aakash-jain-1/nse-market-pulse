@@ -373,6 +373,60 @@ def api_eod_deals():
     return jsonify(deals.recent(kind=request.args.get("kind", "bulk"), limit=limit))
 
 
+@app.route("/api/eod/conviction")
+def api_eod_conviction():
+    """Stacked-conviction board ('tomorrow's watchlist'): fuses breakout + delivery%
+    + bulk/block deals + F&O OI buildup, ranked by how many independent signals
+    agree. Off-hours. ?limit=&minPrice=&minValueCr=&minPillars=&fno=1&deals=0."""
+    import eod_conviction
+
+    def fnum(name, default):
+        v = request.args.get(name)
+        try:
+            return float(v) if v not in (None, "") else default
+        except ValueError:
+            return default
+
+    return jsonify(eod_conviction.board(
+        limit=int(fnum("limit", 25)),
+        min_price=fnum("minPrice", 20.0),
+        min_value_cr=fnum("minValueCr", 2.0),
+        min_pillars=int(fnum("minPillars", 2)),
+        fno_only=request.args.get("fno") == "1",
+        with_deals=request.args.get("deals") != "0",   # on by default
+    ))
+
+
+@app.route("/api/eod/conviction/save", methods=["POST"])
+def api_eod_conviction_save():
+    """Persist the current conviction board into the Ideas history (dated to the EOD
+    session; never clobbers a live idea). Body/query: same filters as the board."""
+    import eod_conviction
+    body = request.get_json(silent=True) or {}
+
+    def num(name, default):
+        v = body.get(name, request.args.get(name))
+        try:
+            return float(v) if v not in (None, "") else default
+        except (TypeError, ValueError):
+            return default
+
+    b = eod_conviction.board(
+        limit=int(num("limit", 25)), min_price=num("minPrice", 20.0),
+        min_value_cr=num("minValueCr", 2.0), min_pillars=int(num("minPillars", 2)),
+        fno_only=(body.get("fno") or request.args.get("fno")) == "1",
+        with_deals=(body.get("deals", request.args.get("deals")) != "0"))
+    return jsonify(eod_conviction.save(b))
+
+
+@app.route("/api/eod/conviction/digest", methods=["POST"])
+def api_eod_conviction_digest():
+    """Push the EOD conviction digest to the configured off-screen channel(s)
+    (Telegram/webhook). Builds the board itself."""
+    import notify
+    return jsonify(notify.send_digest())
+
+
 # Backfill runs off-thread (dozens of ~1-2s archive fetches); the UI polls the
 # GET for progress. Module state is fine — a single serving worker, and the
 # heavy work is serialized inside bhavcopy.backfill()'s own lock.

@@ -250,6 +250,47 @@ def test_send_test_ok():
 
 
 # ---------------------------------------------------------------------------
+# EOD conviction digest
+# ---------------------------------------------------------------------------
+def _pick(sym, direction="LONG", conf=4, rating="High"):
+    return {"symbol": sym, "direction": direction, "confirmations": conf,
+            "rating": rating, "close": 100.0, "stop": 95.0, "target": 110.0,
+            "reasons": ["breakout — at/above 40d high", "delivery 72%"]}
+
+
+def test_fmt_digest_shape_and_escaping():
+    board = {"date": "2026-07-16",
+             "longs": [_pick("ACME"), _pick("BE<T", conf=3, rating="Medium")],
+             "shorts": [_pick("DOWNX", direction="SHORT", conf=2, rating="Low")]}
+    s = notify._fmt_digest(board, top=8)
+    assert "EOD conviction (2026-07-16)" in s
+    assert "<b>Longs</b>" in s and "<b>Shorts</b>" in s
+    assert "ACME" in s and "4\u2713" in s
+    assert "BE&lt;T" in s                    # symbol HTML-escaped
+    assert "not investment advice" in s
+
+
+def test_fmt_digest_empty():
+    s = notify._fmt_digest({"date": "2026-07-16", "longs": [], "shorts": []})
+    assert "No stacked-conviction setups" in s
+
+
+def test_send_digest_no_channel():
+    with _config():
+        r = notify.send_digest(board={"date": "d", "longs": [], "shorts": []})
+        assert r["ok"] is False and "No channel" in r["error"]
+
+
+def test_send_digest_ok_uses_supplied_board():
+    board = {"date": "2026-07-16", "longs": [_pick("ACME")], "shorts": []}
+    with _config(env={"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "c"}), \
+         _patch_send() as sent:
+        r = notify.send_digest(board=board)
+        assert r["ok"] is True and r["count"] == 1 and r["channels"] == ["telegram"]
+        assert len(sent) == 1 and "ACME" in sent[0]
+
+
+# ---------------------------------------------------------------------------
 # Detection — ideas
 # ---------------------------------------------------------------------------
 def _tg():

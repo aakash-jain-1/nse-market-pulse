@@ -167,6 +167,19 @@
     .scan-tags { display: flex; flex-wrap: wrap; gap: 4px; }
     .scan-tag { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); white-space: nowrap; }
     .scan-tag.star { background: rgba(240,185,11,0.16); border-color: transparent; color: #f0b90b; font-weight: 700; }
+    .conv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+    @media (max-width: 900px) { .conv-grid { grid-template-columns: 1fr; } }
+    .conv-col-h { font-size: 13px; margin: 0 0 8px; }
+    .conv-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; cursor: pointer; transition: border-color .15s; }
+    .conv-card:hover { border-color: var(--accent); }
+    .conv-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .conv-sym { font-weight: 700; font-size: 14px; }
+    .conv-badge { font-size: 10px; font-weight: 700; color: #04121f; padding: 1px 8px; border-radius: 999px; }
+    .conv-rating { font-size: 11px; color: var(--muted); margin-left: auto; }
+    .conv-sub { font-size: 12px; color: var(--muted); margin: 5px 0; }
+    .conv-plan { font-size: 11px; color: var(--text); opacity: .9; margin-bottom: 4px; }
+    .conv-reasons { margin: 4px 0 0; padding-left: 16px; font-size: 11px; color: var(--muted); }
+    .conv-reasons li { margin: 1px 0; }
     .fut-toggle { font-size: 12px; padding: 5px 12px; border-radius: 6px; }
     .fut-toggle.active { background: var(--accent); border-color: var(--accent); color: #fff; }
     .fut-mom { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
@@ -566,6 +579,24 @@
         <button id="eBackfill" title="Download recent EOD bhavcopies (whole cash market) so swing signals have history. Off-hours friendly.">⬇ Backfill history</button>
         <span id="eodScanStatus" style="color:var(--muted);font-size:11px"></span>
       </div>
+      <div id="convBar" class="scan-filters" style="display:none">
+        <label title="A pick makes the board only when at least this many INDEPENDENT signals agree (breakout / delivery / volume / trend / OI buildup / bulk-deal).">Min signals
+          <select id="cvPillars">
+            <option value="2">2+ (broad)</option>
+            <option value="3" selected>3+ (recommended)</option>
+            <option value="4">4+ (strict)</option>
+          </select>
+        </label>
+        <label>Min price<input type="number" id="cvMinPrice" min="0" step="10" style="width:70px" value="30"></label>
+        <label>Min value (Cr)<input type="number" id="cvMinVal" min="0" step="1" style="width:70px" value="2"></label>
+        <label>Show<input type="number" id="cvLimit" min="5" max="100" step="5" style="width:64px" value="25"></label>
+        <label class="chk"><input type="checkbox" id="cvFno"> F&amp;O only</label>
+        <button id="cvApply">Apply</button>
+        <span style="width:1px;height:20px;background:var(--border)"></span>
+        <button id="cvSave" title="Save this board into the Ideas history (dated to the EOD session) as a durable watchlist you can review later.">💾 Save to Ideas</button>
+        <button id="cvDigest" title="Push the top picks to your configured off-screen channel (Telegram/webhook). Set it up in the header 🔔 first.">🔔 Send digest</button>
+        <span id="cvStatus" style="color:var(--muted);font-size:11px"></span>
+      </div>
       <div id="futMomentum" class="fut-mom" style="display:none"></div>
       <div id="tableWrap"><div class="loading">Loading…</div></div>
     </div>
@@ -785,6 +816,8 @@
         desc: "One ranked board combining volume spikes, money flow, momentum & OI buildup. Use the filters to hunt for exactly the setup you want." },
       { key: "eod",        label: "🌐 EOD Scan", title: "Full-Market EOD / Swing Scanner",
         desc: "Scans the WHOLE cash market (~2400 names, not just the live hot lists) from NSE's End-of-Day bhavcopy history for swing setups — breakouts/breakdowns of the recent high/low, gaps, unusual volume, trend vs 20/50-day MAs and NR7 squeezes. Works off-hours & weekends. Click ‘Backfill history’ once to load recent daily bars. Educational — NOT advice." },
+      { key: "conviction", label: "🏆 Conviction", title: "EOD Conviction Board — tomorrow's watchlist",
+        desc: "FUSES the independent end-of-day signals — breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint and F&O OI buildup — into one ranked watchlist. Names are ranked by how many signals AGREE (confirmation stacking), so a setup confirmed 4 ways beats a single strong signal. Save it to the Ideas history or push a digest to your phone. Works off-hours. Educational — NOT advice." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
         desc: "Composite ranking — stocks appearing across gainers, money-flow & volume spikes rank highest." },
       { key: "volgainers", label: "Volume Gainers", title: "Volume Gainers (unusual activity)",
@@ -992,6 +1025,8 @@
         current === "scanner" ? "flex" : "none";
       document.getElementById("eodBar").style.display =
         current === "eod" ? "flex" : "none";
+      document.getElementById("convBar").style.display =
+        current === "conviction" ? "flex" : "none";
       document.getElementById("futMode").style.display =
         current === "futures" ? "flex" : "none";
       document.getElementById("recoBar").style.display =
@@ -1086,6 +1121,77 @@
         </tr>`;
       }).join("");
       return cov2 + `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+    }
+
+    function convQuery() {
+      const p = new URLSearchParams();
+      const g = id => document.getElementById(id);
+      p.set("minPillars", g("cvPillars").value || "3");
+      if (g("cvMinPrice").value !== "") p.set("minPrice", g("cvMinPrice").value);
+      if (g("cvMinVal").value !== "") p.set("minValueCr", g("cvMinVal").value);
+      if (g("cvLimit").value !== "") p.set("limit", g("cvLimit").value);
+      if (g("cvFno").checked) p.set("fno", "1");
+      return "?" + p.toString();
+    }
+
+    // One conviction pick → a card with a confirmation-count badge + stacked reasons.
+    function convCard(p) {
+      const long = p.direction === "LONG";
+      const col = long ? "var(--green)" : "var(--red)";
+      const reasons = (p.reasons || []).map(r =>
+        `<li>${escapeHtml(r)}</li>`).join("");
+      const oi = p.oi ? ` · <span title="F&O near-month OI">${escapeHtml(p.oi.label)} ${p.oi.oiPct >= 0 ? "+" : ""}${p.oi.oiPct}%</span>` : "";
+      const deal = p.deal ? ` · <span style="color:var(--accent)">🐋 ${escapeHtml(p.deal.side)}${p.deal.client ? " (" + escapeHtml(p.deal.client) + ")" : ""}</span>` : "";
+      const deliv = (p.delivPct != null) ? ` · Deliv ${p.delivPct.toFixed(0)}%` : "";
+      return `<div class="conv-card" data-sym="${p.symbol}" style="border-left:4px solid ${col}">
+        <div class="conv-head">
+          <span class="conv-sym">${escapeHtml(p.symbol)}</span>
+          <span class="conv-badge" style="background:${col}">${p.confirmations}✓ ${long ? "LONG" : "SHORT"}</span>
+          <span class="conv-rating">${escapeHtml(p.rating)} · conv ${p.conviction}</span>
+        </div>
+        <div class="conv-sub">₹${fmtPrice(p.close)} · ${p.pChange >= 0 ? "+" : ""}${(p.pChange || 0).toFixed(2)}%${deliv}${p.volMult ? " · " + p.volMult + "x vol" : ""}${oi}${deal}</div>
+        <div class="conv-plan">Entry <b>${fmtPrice(p.entry)}</b> · SL ${fmtPrice(p.stop)} (${p.stopPct}%) · Tgt ${fmtPrice(p.target)} (${p.targetPct}%) · R:R ${p.rr}</div>
+        <ul class="conv-reasons">${reasons}</ul>
+      </div>`;
+    }
+
+    function renderConviction(data) {
+      const longs = data.longs || [], shorts = data.shorts || [];
+      const cov = `<div class="chart-note" style="margin:0 0 8px">🏆 <b>Stacked-conviction board</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names scanned · ${longs.length} long / ${shorts.length} short setups where <b>≥${data.filters ? data.filters.minPillars : 3} independent signals agree</b>. ${data.withDeals ? "Bulk/block deals cross-referenced. " : ""}Prices are the last EOD <b>close</b> (not live).</div>`;
+      if (!longs.length && !shorts.length) {
+        const hint = data.note || "No names cleared the confirmation bar — lower ‘Min signals’, loosen the price/value filters, or backfill more history (breakouts need ~20+ sessions).";
+        return cov + `<div class="empty">${escapeHtml(hint)}</div>`;
+      }
+      const col = (title, arr) => arr.length
+        ? `<div class="conv-col"><h3 class="conv-col-h">${title} <span style="color:var(--muted);font-weight:400">(${arr.length})</span></h3>${arr.map(convCard).join("")}</div>`
+        : "";
+      return cov + `<div class="conv-grid">${col("🟢 Longs", longs)}${col("🔴 Shorts", shorts)}</div>`;
+    }
+
+    async function convAction(kind) {
+      const st = document.getElementById("cvStatus");
+      const btn = document.getElementById(kind === "save" ? "cvSave" : "cvDigest");
+      const orig = btn.textContent; btn.disabled = true; btn.textContent = "…";
+      try {
+        const body = JSON.stringify({
+          minPillars: document.getElementById("cvPillars").value,
+          minPrice: document.getElementById("cvMinPrice").value,
+          minValueCr: document.getElementById("cvMinVal").value,
+          limit: document.getElementById("cvLimit").value,
+          fno: document.getElementById("cvFno").checked ? "1" : "0",
+        });
+        const r = await fetch("/api/eod/conviction/" + kind, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body,
+        }).then(r => r.json());
+        if (kind === "save") {
+          st.textContent = r.error ? ("Save failed: " + r.error)
+            : `Saved ${r.saved} picks to Ideas (${r.skipped} already tracked) for ${r.day}.`;
+        } else {
+          st.textContent = r.ok ? `Digest sent to ${(r.channels || []).join(", ")} (${r.count} picks).`
+            : ("Digest: " + (r.error || "failed"));
+        }
+      } catch (e) { st.textContent = "Request failed: " + e; }
+      btn.disabled = false; btn.textContent = orig;
     }
 
     async function eodBackfill() {
@@ -3816,6 +3922,22 @@
           dot.style.background = "var(--green)";
           return;
         }
+        if (current === "conviction") {
+          const data = await fetch("/api/eod/conviction" + convQuery()).then(r => r.json());
+          if (data.error) throw new Error(data.error);
+          window._convBoard = data;
+          window._lastRows = (data.longs || []).concat(data.shorts || []);
+          wrap.innerHTML = renderConviction(data);
+          annotateInfo(wrap);
+          wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
+            tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
+          document.getElementById("futMomentum").style.display = "none";
+          eodUpdateStatus(data.coverage);
+          document.getElementById("updated").textContent =
+            "Updated " + new Date().toLocaleTimeString("en-IN");
+          dot.style.background = "var(--green)";
+          return;
+        }
         let url = "/api/" + current + (current === "scanner" ? scannerQuery() : "");
         if (current === "recos")
           url = "/api/recommendations" + (document.getElementById("recoFno").checked ? "?fno=1" : "");
@@ -4542,6 +4664,11 @@
     document.getElementById("eFno").onchange = load;
     document.getElementById("eDeals").onchange = load;
     document.getElementById("eBackfill").onclick = eodBackfill;
+    document.getElementById("cvApply").onclick = load;
+    document.getElementById("cvPillars").onchange = load;
+    document.getElementById("cvFno").onchange = load;
+    document.getElementById("cvSave").onclick = () => convAction("save");
+    document.getElementById("cvDigest").onclick = () => convAction("digest");
     document.getElementById("recoFno").onchange = load;
     document.getElementById("simTake").onclick = async () => {
       const btn = document.getElementById("simTake");
