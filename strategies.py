@@ -20,7 +20,103 @@ Design
   conviction / rating / reasons ...), so the sim treats them uniformly.
 """
 
+import time
+from datetime import datetime, timedelta, timezone
+
 import nse_client as nse
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+# Session-scoped daily-bar cache for the squeeze / prior-day-level strategies.
+# Prior sessions are immutable intraday, so a symbol's recent bars are fetched at
+# most ONCE per trading day and reused across every build_context cycle (nearly
+# free after the first). symbol -> (yyyy-mm-dd, ascending bars).
+_daily_cache = {}
+_DAILY_BARS = 12            # recent completed sessions we keep (NR7 needs 7)
+
+# Short-TTL per-stock option-chain cache (PCR / max-pain strategies). Chains are
+# heavy, so we bound the candidate set and refresh at most every few minutes.
+# symbol -> (epoch, {pcr, maxPain, underlying, dte}).
+_chain_cache = {}
+_CHAIN_TTL_S = 300
+_CHAIN_MAX = 10             # at most this many chains fetched per cold cycle
+
+
+def _today_ist():
+    return datetime.now(_IST).strftime("%Y-%m-%d")
+
+
+def _dte(expiry):
+    """Calendar days to an NSE expiry string like '31-Jul-2026' (>=0), or None."""
+    try:
+        exp = datetime.strptime(expiry, "%d-%b-%Y").replace(tzinfo=_IST)
+        return max(0, (exp - datetime.now(_IST)).days)
+    except Exception:
+        return None
+
+
+def _load_daily(symbols):
+    """Recent completed daily bars for a candidate set, session-cached (immutable
+    intraday). Cold once/day per symbol; parallelised and fully best-effort."""
+    today = _today_ist()
+    stale = [s for s in symbols if _daily_cache.get(s, (None,))[0] != today]
+    if stale:
+        try:
+            import concurrent.futures as cf
+
+            def _h(s):
+                try:
+                    bars = nse.get_stock_history(s, chunks=1, chunk_days=25)
+                    return s, (bars[-_DAILY_BARS:] if bars else [])
+                except Exception:
+                    return s, []
+
+            with cf.ThreadPoolExecutor(max_workers=8) as ex:
+                for s, bars in ex.map(_h, stale):
+                    if bars:
+                        _daily_cache[s] = (today, bars)
+        except Exception:
+            pass
+    return {s: _daily_cache[s][1] for s in symbols
+            if _daily_cache.get(s, (None,))[0] == today and _daily_cache[s][1]}
+
+
+def _load_chains(ctx):
+    """Per-stock option-chain sentiment (PCR / max-pain / spot / dte) for a small,
+    liquid F&O subset, TTL-cached. Bounded + best-effort so it never stalls the
+    per-minute snapshot loop."""
+    # Prefer F&O scanner names (they have option chains) by descending score.
+    cand, seen = [], set()
+    for r in ctx.get("scanner", []):
+        s = r.get("symbol")
+        if s and s not in seen and (r.get("fno") or r.get("oiKind") or r.get("basisPct") is not None):
+            seen.add(s)
+            cand.append(s)
+        if len(cand) >= _CHAIN_MAX:
+            break
+    now = time.time()
+    stale = [s for s in cand if now - _chain_cache.get(s, (0,))[0] > _CHAIN_TTL_S]
+    if stale:
+        try:
+            import concurrent.futures as cf
+            import nse_quote
+
+            def _oc(s):
+                try:
+                    oc = nse_quote.get_option_chain(s)
+                    return s, {"pcr": oc.get("pcr"), "maxPain": oc.get("maxPain"),
+                               "underlying": oc.get("underlying"),
+                               "dte": _dte(oc.get("expiry"))}
+                except Exception:
+                    return s, None
+
+            with cf.ThreadPoolExecutor(max_workers=6) as ex:
+                for s, d in ex.map(_oc, stale):
+                    if d and d.get("underlying"):
+                        _chain_cache[s] = (now, d)
+        except Exception:
+            pass
+    return {s: _chain_cache[s][1] for s in cand if s in _chain_cache}
 
 
 # ----------------------------------------------------------------------------
@@ -112,6 +208,12 @@ def build_context(fno_only=False):
     except Exception:
         pass
     ctx["candles"] = candles
+
+    # Recent daily bars (session-cached) for the volatility-squeeze / prior-day
+    # high-low strategies, and per-stock option-chain sentiment (PCR / max-pain)
+    # for a small F&O subset. Both bounded + cached so they add ~no steady load.
+    ctx["daily"] = _load_daily(cand)
+    ctx["chains"] = _load_chains(ctx)
     return ctx
 
 
@@ -548,6 +650,261 @@ def gen_ivwap(ctx):
     return ideas
 
 
+def gen_fut_basis(ctx):
+    """K — Futures Basis / Cost-of-Carry: read the spot↔future PRICE relationship,
+    not just OI direction. A rich premium (future well above spot) funded by RISING
+    OI = leveraged longs paying up → LONG; a discount/backwardation on rising OI =
+    fresh shorts / carry stress → SHORT. Distinct from OI Smart-Money (which reads
+    the OI *direction*); this reads the *basis*."""
+    ideas = []
+    seen = set()
+    for r in ctx.get("futures", []):
+        sym, spot, bp = r.get("symbol"), r.get("spot"), r.get("basisPct")
+        if not sym or sym in seen or spot is None or bp is None:
+            continue
+        oi_rising = (r.get("changeInOI") or 0) > 0
+        pc = r.get("pChange")
+        if bp >= 0.5 and oi_rising:
+            conv = 40 + min((bp - 0.5) * 20, 40)
+            reasons = [f"Future at +{bp:.2f}% premium to spot (rich carry)",
+                       "Open interest rising — leveraged longs funding the premium"]
+            if pc is not None:
+                reasons.append(f"Underlying {pc:+.2f}% today")
+                conv += min(pc * 2, 15) if pc > 0 else 0
+            idea = _mk_idea(sym, "LONG", spot, conv, reasons, 1.5, 3.0, fno=True,
+                            extra={"basisPct": bp})
+        elif bp <= -0.3 and oi_rising:
+            conv = 40 + min((abs(bp) - 0.3) * 25, 40)
+            reasons = [f"Future at {bp:.2f}% discount to spot (backwardation)",
+                       "Open interest rising — fresh shorts / carry stress"]
+            if pc is not None:
+                reasons.append(f"Underlying {pc:+.2f}% today")
+                conv += min(abs(pc) * 2, 15) if pc < 0 else 0
+            idea = _mk_idea(sym, "SHORT", spot, conv, reasons, 1.5, 3.0, fno=True,
+                            extra={"basisPct": bp})
+        else:
+            continue
+        if idea:
+            ideas.append(idea)
+            seen.add(sym)
+    return ideas
+
+
+def gen_rel_strength(ctx):
+    """L — Relative Strength vs NIFTY: buy the day's leaders (outperforming the
+    index) and short the laggards. Relative momentum persists — a stock up 2% when
+    NIFTY is flat is a leader; up 2% when NIFTY is up 3% is a laggard. Distinct from
+    Momentum (an absolute volume+OI composite); this is purely relative-to-market."""
+    ideas = []
+    mkt = ((ctx.get("index") or {}).get("NIFTY") or {}).get("pChange")
+    if mkt is None:
+        return ideas
+    liquid = ctx.get("scannerSyms", set())
+    seen = set()
+    for r in ctx.get("scanner", []):
+        sym, pc, ltp = r.get("symbol"), r.get("pChange"), r.get("ltp")
+        if not sym or sym in seen or pc is None or ltp is None:
+            continue
+        if liquid and sym not in liquid:
+            continue
+        rs = pc - mkt
+        if rs >= 1.5 and pc > 0:
+            conv = 35 + min(rs * 8, 55)
+            reasons = [f"Outperforming NIFTY by {rs:+.2f}% ({pc:+.2f}% vs mkt {mkt:+.2f}%)",
+                       "Relative-strength leader"]
+            idea = _mk_idea(sym, "LONG", ltp, conv, reasons, 2.0, 4.0, fno=_is_fno(sym))
+        elif rs <= -1.5 and pc < 0:
+            conv = 35 + min(abs(rs) * 8, 55)
+            reasons = [f"Lagging NIFTY by {rs:.2f}% ({pc:+.2f}% vs mkt {mkt:+.2f}%)",
+                       "Relative-strength laggard"]
+            idea = _mk_idea(sym, "SHORT", ltp, conv, reasons, 2.0, 4.0, fno=_is_fno(sym))
+        else:
+            continue
+        if idea:
+            ideas.append(idea)
+            seen.add(sym)
+    return ideas
+
+
+def _ranges(bars):
+    return [b["high"] - b["low"] for b in bars
+            if b.get("high") is not None and b.get("low") is not None]
+
+
+def gen_squeeze(ctx):
+    """M — Volatility Squeeze (NR7): the narrowest daily range in 7 sessions marks a
+    volatility contraction; the expansion that follows tends to run (Crabel). When
+    the latest completed session is the NR7 and today's price breaks its high/low,
+    trade the break — LONG above, SHORT below."""
+    ideas = []
+    for sym, bars in ctx.get("daily", {}).items():
+        rngs = _ranges(bars[-7:])
+        if len(rngs) < 7:
+            continue
+        last = bars[-1]
+        lh, ll = last.get("high"), last.get("low")
+        lr = (lh - ll) if (lh is not None and ll is not None) else None
+        if lr is None or lr <= 0 or lr > min(rngs):
+            continue                       # last session must be the tightest (NR7)
+        ltp = ((ctx.get("quotes") or {}).get(sym) or {}).get("ltp")
+        if not ltp:
+            continue
+        tight = 1 - lr / (sum(rngs) / len(rngs))     # how much tighter than avg
+        if ltp > lh:
+            ext = (ltp - lh) / lh * 100
+            conv = 30 + min(ext * 20, 30) + min(tight * 60, 30)
+            reasons = [f"NR7 squeeze breakout above {lh:.1f}",
+                       f"Tightest range in 7 sessions, +{ext:.2f}% past it"]
+            idea = _mk_idea(sym, "LONG", ltp, conv, reasons, 2.0, 4.0, fno=_is_fno(sym))
+        elif ltp < ll:
+            ext = (ll - ltp) / ll * 100
+            conv = 30 + min(ext * 20, 30) + min(tight * 60, 30)
+            reasons = [f"NR7 squeeze breakdown below {ll:.1f}",
+                       f"Tightest range in 7 sessions, {ext:.2f}% below it"]
+            idea = _mk_idea(sym, "SHORT", ltp, conv, reasons, 2.0, 4.0, fno=_is_fno(sym))
+        else:
+            continue
+        if idea:
+            ideas.append(idea)
+    return ideas
+
+
+def gen_gap(ctx):
+    """N — Gap-and-Go / Gap-Fade: a big opening gap either continues (go, on trend
+    days) or fills (fade, on quiet/reversal days). Regime-tilted: hold the gap on
+    Trend/Mixed, fade it on Range/Recovery/Pullback, judged by whether price is
+    holding or rejecting the open."""
+    ideas = []
+    regime = (ctx.get("regime") or {}).get("label", "Mixed")
+    fade = regime in ("Range", "Recovery", "Pullback")
+    for sym, q in (ctx.get("quotes") or {}).items():
+        op, pcl, ltp = q.get("open"), q.get("prevClose"), q.get("ltp")
+        if not op or not pcl or not ltp:
+            continue
+        gap = (op - pcl) / pcl * 100
+        if abs(gap) < 1.5:
+            continue
+        idea = None
+        if not fade:                       # gap-and-go: trade the gap while it holds
+            if gap > 0 and ltp >= op:
+                conv = 35 + min(gap * 10, 50)
+                idea = _mk_idea(sym, "LONG", ltp, conv,
+                                [f"Gapped up {gap:+.2f}% and holding above the open",
+                                 f"Gap-and-go ({regime})"], 1.5, 2.5, fno=_is_fno(sym))
+            elif gap < 0 and ltp <= op:
+                conv = 35 + min(abs(gap) * 10, 50)
+                idea = _mk_idea(sym, "SHORT", ltp, conv,
+                                [f"Gapped down {gap:.2f}% and holding below the open",
+                                 f"Gap-and-go ({regime})"], 1.5, 2.5, fno=_is_fno(sym))
+        else:                              # gap-fade: bet the gap closes back
+            if gap > 0 and ltp < op:
+                conv = 35 + min(gap * 10, 50)
+                idea = _mk_idea(sym, "SHORT", ltp, conv,
+                                [f"Gapped up {gap:+.2f}% but rejecting the open",
+                                 f"Gap-fade toward prior close ({regime})"], 1.5, 2.5,
+                                fno=_is_fno(sym))
+            elif gap < 0 and ltp > op:
+                conv = 35 + min(abs(gap) * 10, 50)
+                idea = _mk_idea(sym, "LONG", ltp, conv,
+                                [f"Gapped down {gap:.2f}% but recovering the open",
+                                 f"Gap-fade toward prior close ({regime})"], 1.5, 2.5,
+                                fno=_is_fno(sym))
+        if idea:
+            ideas.append(idea)
+    return ideas
+
+
+def gen_pcr_extreme(ctx):
+    """O — PCR Contrarian: an extreme per-stock put/call ratio is a contrarian
+    sentiment tell. Very high PCR (put-heavy — excessive fear) → LONG; very low PCR
+    (call-crowded — excessive greed) → SHORT. Live-only (chains aren't archived)."""
+    ideas = []
+    for sym, d in (ctx.get("chains") or {}).items():
+        pcr, ltp = d.get("pcr"), d.get("underlying")
+        if pcr is None or not ltp:
+            continue
+        if pcr >= 1.3:
+            conv = 30 + min((pcr - 1.3) * 60, 55)
+            idea = _mk_idea(sym, "LONG", ltp, conv,
+                            [f"PCR {pcr:.2f} — put-heavy (excessive bearishness)",
+                             "Contrarian long on capitulation"], 2.0, 3.0, fno=True,
+                            extra={"pcr": pcr})
+        elif pcr <= 0.6:
+            conv = 30 + min((0.6 - pcr) * 90, 55)
+            idea = _mk_idea(sym, "SHORT", ltp, conv,
+                            [f"PCR {pcr:.2f} — call-crowded (excessive bullishness)",
+                             "Contrarian short on complacency"], 2.0, 3.0, fno=True,
+                            extra={"pcr": pcr})
+        else:
+            continue
+        if idea:
+            ideas.append(idea)
+    return ideas
+
+
+def gen_max_pain(ctx):
+    """P — Max-Pain Expiry Pin: into expiry week, option writers tend to pull price
+    toward the max-pain strike. Spot meaningfully above max pain → SHORT toward it;
+    below → LONG toward it. Only fires within ~5 days of expiry, scaled by nearness.
+    Live-only, expiry-gated."""
+    ideas = []
+    for sym, d in (ctx.get("chains") or {}).items():
+        mp, ltp, dte = d.get("maxPain"), d.get("underlying"), d.get("dte")
+        if not mp or not ltp or dte is None or dte > 5:
+            continue
+        dist = (ltp - mp) / mp * 100
+        if abs(dist) < 1.5:
+            continue
+        near = (6 - dte) / 6.0                       # closer to expiry ⇒ stronger
+        tgt = max(2.0, min(abs(dist), 4.0))
+        if dist > 0:
+            conv = 20 + min(dist * 8, 45) + near * 25
+            idea = _mk_idea(sym, "SHORT", ltp, conv,
+                            [f"Spot {dist:+.2f}% above max pain {mp:g} (expiry in {dte}d)",
+                             "Expiry pin — writers defend max pain"], 2.0, tgt, fno=True,
+                            extra={"maxPain": mp})
+        else:
+            conv = 20 + min(abs(dist) * 8, 45) + near * 25
+            idea = _mk_idea(sym, "LONG", ltp, conv,
+                            [f"Spot {dist:.2f}% below max pain {mp:g} (expiry in {dte}d)",
+                             "Expiry pin — writers defend max pain"], 2.0, tgt, fno=True,
+                            extra={"maxPain": mp})
+        if idea:
+            ideas.append(idea)
+    return ideas
+
+
+def gen_pdhl(ctx):
+    """Q — Prior-Day High/Low Breakout: yesterday's high and low are the most-
+    watched intraday levels; a clean break tends to run. LONG above the prior-day
+    high, SHORT below the prior-day low. Distinct from ORB (first-15-min range)."""
+    ideas = []
+    for sym, bars in (ctx.get("daily") or {}).items():
+        if not bars:
+            continue
+        pdh, pdl = bars[-1].get("high"), bars[-1].get("low")
+        ltp = ((ctx.get("quotes") or {}).get(sym) or {}).get("ltp")
+        if not pdh or not pdl or not ltp:
+            continue
+        if ltp > pdh:
+            ext = (ltp - pdh) / pdh * 100
+            conv = 30 + min(ext * 25, 55)
+            idea = _mk_idea(sym, "LONG", ltp, conv,
+                            [f"Broke above the prior-day high {pdh:.1f}",
+                             f"+{ext:.2f}% past yesterday's high"], 1.5, 3.0, fno=_is_fno(sym))
+        elif ltp < pdl:
+            ext = (pdl - ltp) / pdl * 100
+            conv = 30 + min(ext * 25, 55)
+            idea = _mk_idea(sym, "SHORT", ltp, conv,
+                            [f"Broke below the prior-day low {pdl:.1f}",
+                             f"{ext:.2f}% below yesterday's low"], 1.5, 3.0, fno=_is_fno(sym))
+        else:
+            continue
+        if idea:
+            ideas.append(idea)
+    return ideas
+
+
 def _regime_playbook_pick(regime_label):
     """Which base strategy to follow in this regime: the historical best from the
     daily-backtest leaderboard when it's warm, else the first strategy DESIGNED
@@ -703,6 +1060,27 @@ STRATEGIES = [
     {"id": "ivwap", "name": "Intraday VWAP Reclaim",
      "description": "True session VWAP from minute candles: holding above + rising = LONG, rejected below + falling = SHORT.",
      "regimeFit": ["Trend-Up", "Trend-Down"], "generate": gen_ivwap},
+    {"id": "fut_basis", "name": "Futures Basis / Carry",
+     "description": "Spot-vs-future basis + rising OI: rich premium = leveraged longs (LONG), discount/backwardation = fresh shorts (SHORT).",
+     "regimeFit": ["Trend-Up", "Trend-Down", "Mixed"], "generate": gen_fut_basis},
+    {"id": "rel_strength", "name": "Relative Strength vs NIFTY",
+     "description": "Buy the day's leaders (outperforming the index), short the laggards — pure relative momentum vs the market.",
+     "regimeFit": ["Trend-Up", "Trend-Down"], "generate": gen_rel_strength},
+    {"id": "squeeze", "name": "Volatility Squeeze (NR7)",
+     "description": "Narrowest daily range in 7 sessions (contraction) then a break of it: LONG above, SHORT below (Crabel expansion).",
+     "regimeFit": ["Range", "Trend-Up", "Trend-Down"], "generate": gen_squeeze},
+    {"id": "gap", "name": "Gap-and-Go / Fade",
+     "description": "Big opening gap: hold the gap on trend days (go), bet it fills on quiet/reversal days (fade).",
+     "regimeFit": ["Trend-Up", "Trend-Down", "Range"], "generate": gen_gap},
+    {"id": "pcr_extreme", "name": "PCR Contrarian",
+     "description": "Extreme per-stock put/call ratio as a contrarian tell: put-heavy = LONG, call-crowded = SHORT (live-only).",
+     "regimeFit": ["Recovery", "Range", "Pullback"], "generate": gen_pcr_extreme},
+    {"id": "max_pain", "name": "Max-Pain Expiry Pin",
+     "description": "Into expiry week, price gravitates to max pain: above it = SHORT, below it = LONG (live-only, expiry-gated).",
+     "regimeFit": ["Range", "Mixed"], "generate": gen_max_pain},
+    {"id": "pdhl", "name": "Prior-Day High/Low Break",
+     "description": "Break of yesterday's high/low — the most-watched intraday levels: LONG above PDH, SHORT below PDL.",
+     "regimeFit": ["Trend-Up", "Trend-Down", "Mixed"], "generate": gen_pdhl},
     {"id": "adaptive", "name": "Regime-Adaptive",
      "description": "Follows the playbook: each session delegates to the strategy with the best historical edge in today's regime (the strategy-of-the-day). Measures whether regime-switching beats any single fixed strategy.",
      "regimeFit": ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"],

@@ -44,13 +44,13 @@ NSE/
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
-├── strategies.py      # Strategy library (9 generators) + market-regime detector
+├── strategies.py      # Strategy library (17 generators) + market-regime detector
 ├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
 ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
-├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (6 strategies)
+├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (9 strategies)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 377 unit tests across 23 suites (see below)
+├── test_*.py          # 405 unit tests across 23 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
@@ -108,7 +108,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 377 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
+python -m pytest -q      # 405 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -450,6 +450,18 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **➕ Seven new strategies (library 10 → 17)** — added `fut_basis` (Futures
+  Basis / Cost-of-Carry), `rel_strength` (Relative Strength vs NIFTY), `squeeze`
+  (NR7 volatility squeeze), `gap` (Gap-and-Go / Fade), `pcr_extreme` (PCR
+  contrarian), `max_pain` (expiry pin), and `pdhl` (prior-day high/low break). Each
+  is a standard `gen_*` (returns `_mk_idea` shapes + `regimeFit`), so they run in
+  the parallel sim and get tracked per-regime. `build_context()` gained two bounded,
+  cached loaders — `ctx["daily"]` (session-cached recent daily bars) and
+  `ctx["chains"]` (5-min-TTL per-stock PCR/max-pain for a small F&O subset). The
+  EOD-computable `rel_strength`/`gap`/`squeeze` are also reconstructed in
+  `backtest_daily` (STRATS 6 → 9; `_backtest_symbol` now takes `day_regime`) so
+  **walk-forward validates them automatically**; the live-only edges are listed in
+  `NOT_COVERED`. Tests +28 (suite **377 → 405**).
 - **🧪 Walk-forward out-of-sample validation (`walkforward.py`)** — the overfit
   guard the Sim leaderboard was missing. A **pure** analysis (100 % covered) over the
   daily backtest's trade list: a holdout train/test split gives every fixed strategy
@@ -604,7 +616,7 @@ with no creds the app is unchanged.
   5-level depth ladder, quote header, 1m/5m/15m/1D). Fully optional + gitignored
   creds (`dhan_config.json`); no-op without a token. See the live-feed note above.
 - **Two parallel books — 🧪 Sim (cash) + 🎯 F&O Sim** (`book` tag on every
-  `sim_trades` row; `cash` | `fno`): both books run the SAME 10 strategies off the
+  `sim_trades` row; `cash` | `fno`): both books run the SAME 17 strategies off the
   SAME live context each cycle, but the `fno` book only takes F&O-eligible ideas
   (`idea['fno']`, via `strategies._is_fno` = lot-size lookup). Identical risk-based
   sizing (₹2k/trade) → the two scorecards are directly comparable. The auto loop
@@ -621,24 +633,35 @@ with no creds the app is unchanged.
   per-book state: `_simSel`, `_dayOpen/_dayCache` keyed `book|date`, alert diffs in
   `_simPrevByBook`). Adaptive/strategy-of-the-day stays backtest-driven (book-shared).
 - **Multi-strategy Sim + regime-aware daily comparison** (`strategies.py` +
-  `sim.py`, 🧪 Sim tab): the Sim now forward-tests **10 strategies in parallel**,
+  `sim.py`, 🧪 Sim tab): the Sim now forward-tests **17 strategies in parallel**,
   each with its **own ledger**, so we can see which one fits which market day.
-  - **Strategies** (`strategies.py`, 10): `momentum` (the original multi-signal
+  - **Strategies** (`strategies.py`, 17): `momentum` (the original multi-signal
     engine), `oi_smart` (F&O OI positioning), `meanrev` (contrarian oversold
     bounce / fade), `vol_breakout` (≥5× volume explosions), `high52w`
     (nearness-to-52-week-high momentum, George-Hwang), `vwap` (price vs the
     day's cumulative VWAP), `delivery` (high delivery% = accumulation/
     distribution), `orb` (Opening-Range Breakout: break of the 09:15-09:30 range
     with volume), `ivwap` (Intraday VWAP Reclaim: true session VWAP from minute
-    candles), `adaptive` (**Regime-Adaptive meta-strategy** — see below). Each is
-    `{id,name,description,regimeFit,generate(ctx)}` returning ideas in
-    `_build_idea` shape. `build_context()` fetches all live lists ONCE —
+    candles), `fut_basis` (Futures Basis / Cost-of-Carry: rich premium+rising OI =
+    LONG, discount+rising OI = SHORT — reads the spot↔future price gap), `rel_strength`
+    (Relative Strength vs NIFTY: leaders LONG / laggards SHORT), `squeeze` (NR7
+    volatility contraction → expansion break), `gap` (Gap-and-Go / Fade, regime-
+    tilted), `pcr_extreme` (per-stock PCR contrarian — live-only), `max_pain`
+    (expiry pin toward max pain — live-only, expiry-gated), `pdhl` (prior-day
+    high/low break — live-only), `adaptive` (**Regime-Adaptive meta-strategy** —
+    see below). Each is `{id,name,description,regimeFit,generate(ctx)}` returning
+    ideas in `_build_idea` shape. `build_context()` fetches all live lists ONCE —
     including a bounded, concurrent per-symbol quote fetch (`ctx["quotes"]`, ~45
-    liquid names, feeds VWAP/52wH/delivery) AND 5-min candles for the same set
-    (`ctx["candles"]`, feeds orb/ivwap) — and every generator reuses it.
-    **`orb`/`ivwap` need `ctx["candles"]`, which is NOT archived in `context_log`
+    liquid names, feeds VWAP/52wH/delivery/gap) AND 5-min candles for the same set
+    (`ctx["candles"]`, feeds orb/ivwap) — plus two bounded, cached loaders:
+    **`ctx["daily"]`** (recent daily bars, session-cached — immutable intraday;
+    feeds `squeeze`/`pdhl`) and **`ctx["chains"]`** (per-stock PCR/max-pain for a
+    small F&O subset, 5-min TTL; feeds `pcr_extreme`/`max_pain`). Every generator
+    reuses the bundle. **`orb`/`ivwap`/`squeeze`/`pdhl`/`pcr_extreme`/`max_pain`
+    depend on candles/daily/chains, which are NOT archived in `context_log`
     (`_trim_context`), so they run in the live forward-sim but are inert in the
-    offline backtest.**
+    offline context-replay backtest.** The EOD-computable `rel_strength`/`gap`/
+    `squeeze` ARE reconstructed in `backtest_daily` (and thus walk-forward-vetted).
   - **Regime-Adaptive** (`gen_adaptive` + `_regime_playbook_pick`): a
     meta-strategy that generates no signals itself — each session it delegates to
     the base strategy with the best HISTORICAL edge in today's regime (the
@@ -751,14 +774,16 @@ with no creds the app is unchanged.
     the last N days?" *today*, without needing archived context. Pulls REAL NSE EOD
     history (`nse.get_stock_history` daily OHLCV+delivery% + near-month futures OI
     via `nse.get_futures_oi_history`/`foCPV`, near expiry from `nse.get_futures`),
-    reconstructs the **6 EOD-computable strategies** (momentum, meanrev, delivery,
-    high52w=52w-proxy, vol_breakout, oi_smart=rising-OI buildup) over a selectable
-    universe — `LIQUID` names first, extended with a spread sample of the rest;
-    the UI offers Top 40/80/150 or **All F&O (~210)** (`universe` param, capped 260,
-    `_universe()` clamps to the live count). Enters at the signal day's close,
-    resolves on subsequent daily high/low (stop-first on straddles), same
-    `size_position` R sizing. Concurrency = 6 workers. VWAP/ORB/iVWAP are
-    intraday-only → in `NOT_COVERED`. This is a daily-bar APPROXIMATION (lower
+    reconstructs the **9 EOD-computable strategies** (momentum, meanrev, delivery,
+    high52w=52w-proxy, vol_breakout, oi_smart=rising-OI buildup, rel_strength=5-day
+    move vs an equal-weight market proxy, gap=open-vs-prev-close regime-tilted,
+    squeeze=NR7 contraction→break) over a selectable universe — `LIQUID` names
+    first, extended with a spread sample of the rest; the UI offers Top 40/80/150 or
+    **All F&O (~210)** (`universe` param, capped 260, `_universe()` clamps to the
+    live count). Enters at the signal day's close, resolves on subsequent daily
+    high/low (stop-first on straddles), same `size_position` R sizing. Concurrency =
+    6 workers. VWAP/ORB/iVWAP + the live-only F&O edges (fut_basis, pcr_extreme,
+    max_pain, pdhl) are in `NOT_COVERED`. This is a daily-bar APPROXIMATION (lower
     fidelity than the live sim / context backtest) — the UI says so; don't conflate
     its numbers with the intraday strategies.
     **Persistent EOD cache** (`db.eod_bars` / `eod_oi` / `eod_meta`): daily bars are

@@ -189,7 +189,7 @@ flowchart LR
         APP["app.py<br/>thin JSON routes + SSE"]
         CORE["nse_client.py<br/>session + hot lists + scanner + ideas"]
         QUOTE["nse_quote.py<br/>quotes · charts · option chain · Greeks"]
-        STRAT["strategies.py<br/>10 generators + regime detector"]
+        STRAT["strategies.py<br/>17 generators + regime detector"]
         SIM["sim.py<br/>per-strategy forward-test"]
         BT["backtest_strategies.py<br/>offline replay"]
         PAPER["paper.py<br/>virtual portfolio"]
@@ -247,7 +247,7 @@ flowchart TB
         direction TB
         NC["nse_client.py<br/>• warmed requests.Session (TTL 300s)<br/>• hot lists → normalized dicts<br/>• get_scanner / _build_idea / get_demand_score<br/>• get_price (symbol→LTP map)"]
         NQ["nse_quote.py<br/>• NextApi gateway<br/>• quote / depth / intraday chart<br/>• option chain + Black-Scholes Greeks"]
-        ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime()<br/>• 9 generators"]
+        ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime()<br/>• 17 generators"]
         SM["sim.py<br/>• per-strategy ledgers<br/>• take/update/summary<br/>• daily rollup + regime leaderboard"]
         BK["backtest_strategies.py<br/>• virtual-clock replay<br/>• scorecards + equity curves"]
         PP["paper.py<br/>• equity/futures/option fills<br/>• MTM P&L"]
@@ -305,7 +305,7 @@ sequenceDiagram
 The **Sim** tab turns the Ideas engine into a **library of strategies**, each
 forward-tested in parallel and compared against the day's **market regime**.
 
-**The 10 strategies** (`strategies.py`):
+**The 17 strategies** (`strategies.py`):
 
 | id | Name | Edge |
 |---|---|---|
@@ -318,11 +318,20 @@ forward-tested in parallel and compared against the day's **market regime**.
 | `delivery` | Delivery% Accumulation | High delivery % = real conviction (accumulation/distribution) |
 | `orb` | Opening-Range Breakout | Break of the first 15-min range (09:15–09:30) with volume (minute candles) |
 | `ivwap` | Intraday VWAP Reclaim | True session VWAP from minute candles: hold above/reject below |
+| `fut_basis` | Futures Basis / Carry | Spot↔future basis + rising OI: rich premium = LONG, discount/backwardation = SHORT |
+| `rel_strength` | Relative Strength vs NIFTY | Buy the day's leaders (outperforming the index), short the laggards |
+| `squeeze` | Volatility Squeeze (NR7) | Narrowest daily range in 7 sessions, then trade the expansion break |
+| `gap` | Gap-and-Go / Fade | Big opening gap: go with it on trend days, fade it on quiet/reversal days |
+| `pcr_extreme` | PCR Contrarian | Extreme per-stock put/call ratio (put-heavy = LONG, call-crowded = SHORT) — live-only |
+| `max_pain` | Max-Pain Expiry Pin | Into expiry week, price gravitates to max pain — live-only, expiry-gated |
+| `pdhl` | Prior-Day High/Low Break | Break of yesterday's high/low — the most-watched intraday levels — live-only |
 | `adaptive` | Regime-Adaptive | Meta-strategy: each session **follows the strategy-of-the-day** — delegates to whichever base strategy has the best historical edge in today's regime |
 
-> `orb` and `ivwap` need minute candles (`ctx["candles"]`), so they run in the
-> live forward-sim; they're inert in the offline backtest, which replays the
-> trimmed `context_log` (candles aren't archived).
+> `orb`/`ivwap`/`squeeze`/`pdhl`/`pcr_extreme`/`max_pain` need live-only data
+> (minute candles / recent daily bars / per-stock option chains), so they run in
+> the live forward-sim; they're inert in the offline context-replay backtest (that
+> data isn't archived). The EOD-computable `rel_strength`/`gap`/`squeeze` **are**
+> reconstructed in the daily backtest, so walk-forward validates them too.
 >
 > `adaptive` is a **meta-strategy**: it generates no signals of its own but each
 > session delegates to the base strategy with the best historical edge in the
@@ -424,11 +433,13 @@ flowchart LR
 - **Daily-bar historical backtest** (`/api/sim/backtest_daily`, `backtest_daily.py`,
   📅 button): "how would the strategies have worked over the last N days?" using
   **real NSE end-of-day** history (`get_stock_history` + near-month futures OI via
-  `foCPV`). Reconstructs the **6 EOD-computable strategies** (Momentum,
-  Mean-Reversion, Delivery%, High-Proximity, Volume-Breakout, OI Smart-Money) with
-  the same risk-based R sizing. Trades off fidelity for reach: EOD entries, exits
-  on the next days' high/low (a bar piercing both stop & target is a stop). VWAP /
-  ORB / iVWAP are intraday-only and not covered here. Universe is selectable — Top
+  `foCPV`). Reconstructs the **9 EOD-computable strategies** (Momentum,
+  Mean-Reversion, Delivery%, High-Proximity, Volume-Breakout, OI Smart-Money,
+  Relative-Strength, Gap-and-Go/Fade, Volatility-Squeeze/NR7) with the same
+  risk-based R sizing. Trades off fidelity for reach: EOD entries, exits on the
+  next days' high/low (a bar piercing both stop & target is a stop). VWAP / ORB /
+  iVWAP and the live-only F&O edges (Futures-Basis, PCR-Contrarian, Max-Pain,
+  Prior-Day-High/Low) have no daily equivalent and aren't covered here. Universe is selectable — Top
   40/80/150 or **All F&O (~210)**. A **persistent SQLite cache** (`eod_bars` /
   `eod_oi`, 12h freshness TTL) stores the daily history: the first full sweep is
   ~3 min, then repeat runs and wider look-backs (60/90d) are near-instant with zero
@@ -687,7 +698,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/sim/strategy_of_day[?days=60&universe=60]` | Today's live regime + the historically best strategy for it (memoised daily-backtest leaderboard) |
 | `GET /api/sim/walkforward[?days=120&universe=60&folds=4&maxHold=5]` | Walk-forward out-of-sample validation: per-strategy in-sample vs OOS expectancy + overfit verdict, plus the regime-adaptive-selection test (does it beat a fixed strategy OOS?) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
-| `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar]` | Daily-bar historical backtest over real NSE EOD (6 strategies); SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves exits on real 1-min candles |
+| `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar]` | Daily-bar historical backtest over real NSE EOD (9 strategies); SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves exits on real 1-min candles |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls (`take`/`reset` accept `{book}` — reset a specific book, or omit to wipe everything) |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
@@ -706,7 +717,7 @@ nse-market-pulse/
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
 ├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
 ├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
-├── strategies.py           # 10 strategy generators (incl. regime-adaptive) + regime detector
+├── strategies.py           # 17 strategy generators (incl. regime-adaptive) + regime detector
 ├── sim.py                  # Multi-strategy forward-tester + regime leaderboard
 ├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
 ├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
@@ -718,7 +729,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 377 unit tests, 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
+├── test_*.py               # 405 unit tests, 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

@@ -307,6 +307,255 @@ def test_gen_ivwap_needs_six_bars():
 
 
 # ---------------------------------------------------------------------------
+# gen_fut_basis (futures basis / carry)
+# ---------------------------------------------------------------------------
+def test_gen_fut_basis_premium_long_discount_short():
+    ctx = {"futures": [
+        {"symbol": "A", "spot": 100, "basisPct": 1.0, "changeInOI": 5000, "pChange": 1.0},  # premium+OI↑ LONG
+        {"symbol": "B", "spot": 200, "basisPct": -0.8, "changeInOI": 4000, "pChange": -1.0}, # discount+OI↑ SHORT
+    ]}
+    out = S.gen_fut_basis(ctx)
+    dirs = {i["symbol"]: i["direction"] for i in out}
+    assert dirs == {"A": "LONG", "B": "SHORT"}
+    assert all(i["fno"] for i in out)
+    assert next(i for i in out if i["symbol"] == "A")["basisPct"] == 1.0
+
+
+def test_gen_fut_basis_guards():
+    # premium but OI falling → skip; tiny basis → skip; missing spot → skip
+    ctx = {"futures": [
+        {"symbol": "A", "spot": 100, "basisPct": 1.0, "changeInOI": -10},   # OI down
+        {"symbol": "B", "spot": 100, "basisPct": 0.1, "changeInOI": 999},   # basis too small
+        {"symbol": "C", "spot": None, "basisPct": 1.0, "changeInOI": 999},  # no spot
+    ]}
+    assert S.gen_fut_basis(ctx) == []
+
+
+# ---------------------------------------------------------------------------
+# gen_rel_strength (relative strength vs NIFTY)
+# ---------------------------------------------------------------------------
+def test_gen_rel_strength_leader_long_laggard_short():
+    ctx = {
+        "index": {"NIFTY": {"pChange": 0.5}},
+        "scanner": [
+            {"symbol": "A", "pChange": 2.5, "ltp": 100},   # rs +2.0 leader LONG
+            {"symbol": "B", "pChange": -1.5, "ltp": 100},  # rs -2.0 laggard SHORT
+            {"symbol": "C", "pChange": 1.0, "ltp": 100},   # rs +0.5 too small skip
+        ],
+        "scannerSyms": {"A", "B", "C"},
+    }
+    with _fno():
+        out = S.gen_rel_strength(ctx)
+    dirs = {i["symbol"]: i["direction"] for i in out}
+    assert dirs == {"A": "LONG", "B": "SHORT"}
+
+
+def test_gen_rel_strength_needs_market():
+    ctx = {"index": {}, "scanner": [{"symbol": "A", "pChange": 5, "ltp": 100}],
+           "scannerSyms": {"A"}}
+    assert S.gen_rel_strength(ctx) == []
+
+
+# ---------------------------------------------------------------------------
+# gen_squeeze (NR7 volatility squeeze)
+# ---------------------------------------------------------------------------
+def _bar(h, l):
+    return {"high": h, "low": l, "close": (h + l) / 2}
+
+
+def test_gen_squeeze_breakout_up_and_down():
+    # 6 wide bars then a tight NR7 last bar (range 1) → breakout on today's ltp
+    wide = [_bar(110, 100) for _ in range(6)]
+    nr7 = _bar(105.5, 104.5)                       # range 1 = tightest
+    ctx = {
+        "daily": {"A": wide + [nr7], "B": wide + [nr7]},
+        "quotes": {"A": {"ltp": 106}, "B": {"ltp": 104}},   # A breaks up, B breaks down
+    }
+    with _fno():
+        out = S.gen_squeeze(ctx)
+    dirs = {i["symbol"]: i["direction"] for i in out}
+    assert dirs == {"A": "LONG", "B": "SHORT"}
+
+
+def test_gen_squeeze_not_nr7_skips():
+    # last bar is NOT the tightest → no squeeze setup
+    bars = [_bar(101, 100) for _ in range(6)] + [_bar(110, 100)]
+    ctx = {"daily": {"A": bars}, "quotes": {"A": {"ltp": 120}}}
+    with _fno():
+        assert S.gen_squeeze(ctx) == []
+
+
+def test_gen_squeeze_needs_seven_bars():
+    ctx = {"daily": {"A": [_bar(101, 100) for _ in range(6)]},
+           "quotes": {"A": {"ltp": 200}}}
+    assert S.gen_squeeze(ctx) == []
+
+
+# ---------------------------------------------------------------------------
+# gen_gap (gap-and-go / fade, regime-tilted)
+# ---------------------------------------------------------------------------
+def test_gen_gap_go_on_trend():
+    ctx = {
+        "regime": {"label": "Trend-Up"},
+        "quotes": {
+            "A": {"open": 103, "prevClose": 100, "ltp": 104},   # +3% gap, holding → LONG
+            "B": {"open": 97, "prevClose": 100, "ltp": 96},     # -3% gap, holding → SHORT
+        },
+    }
+    with _fno():
+        out = S.gen_gap(ctx)
+    dirs = {i["symbol"]: i["direction"] for i in out}
+    assert dirs == {"A": "LONG", "B": "SHORT"}
+
+
+def test_gen_gap_fade_on_range():
+    ctx = {
+        "regime": {"label": "Range"},
+        "quotes": {
+            "A": {"open": 103, "prevClose": 100, "ltp": 101.5},  # gap up rejecting → SHORT
+            "B": {"open": 97, "prevClose": 100, "ltp": 98.5},    # gap down recovering → LONG
+        },
+    }
+    with _fno():
+        out = S.gen_gap(ctx)
+    dirs = {i["symbol"]: i["direction"] for i in out}
+    assert dirs == {"A": "SHORT", "B": "LONG"}
+
+
+def test_gen_gap_small_gap_skips():
+    ctx = {"regime": {"label": "Trend-Up"},
+           "quotes": {"A": {"open": 100.5, "prevClose": 100, "ltp": 101}}}
+    with _fno():
+        assert S.gen_gap(ctx) == []
+
+
+# ---------------------------------------------------------------------------
+# gen_pcr_extreme (PCR contrarian)
+# ---------------------------------------------------------------------------
+def test_gen_pcr_extreme_contrarian():
+    ctx = {"chains": {
+        "A": {"pcr": 1.5, "underlying": 100},    # put-heavy → contrarian LONG
+        "B": {"pcr": 0.5, "underlying": 200},    # call-crowded → contrarian SHORT
+        "C": {"pcr": 1.0, "underlying": 100},    # neutral → skip
+    }}
+    out = S.gen_pcr_extreme(ctx)
+    dirs = {i["symbol"]: i["direction"] for i in out}
+    assert dirs == {"A": "LONG", "B": "SHORT"}
+    assert all(i["fno"] for i in out)
+
+
+# ---------------------------------------------------------------------------
+# gen_max_pain (expiry pin)
+# ---------------------------------------------------------------------------
+def test_gen_max_pain_pins_toward_strike():
+    ctx = {"chains": {
+        "A": {"maxPain": 100, "underlying": 103, "dte": 2},   # above pin → SHORT
+        "B": {"maxPain": 100, "underlying": 97, "dte": 2},    # below pin → LONG
+    }}
+    out = S.gen_max_pain(ctx)
+    dirs = {i["symbol"]: i["direction"] for i in out}
+    assert dirs == {"A": "SHORT", "B": "LONG"}
+
+
+def test_gen_max_pain_only_near_expiry():
+    ctx = {"chains": {"A": {"maxPain": 100, "underlying": 105, "dte": 20}}}  # far from expiry
+    assert S.gen_max_pain(ctx) == []
+
+
+# ---------------------------------------------------------------------------
+# gen_pdhl (prior-day high/low breakout)
+# ---------------------------------------------------------------------------
+def test_gen_pdhl_breaks_prior_levels():
+    ctx = {
+        "daily": {"A": [_bar(105, 95)], "B": [_bar(105, 95)]},
+        "quotes": {"A": {"ltp": 106}, "B": {"ltp": 94}},   # A>PDH LONG, B<PDL SHORT
+    }
+    with _fno():
+        out = S.gen_pdhl(ctx)
+    dirs = {i["symbol"]: i["direction"] for i in out}
+    assert dirs == {"A": "LONG", "B": "SHORT"}
+
+
+def test_gen_pdhl_inside_range_skips():
+    ctx = {"daily": {"A": [_bar(105, 95)]}, "quotes": {"A": {"ltp": 100}}}
+    with _fno():
+        assert S.gen_pdhl(ctx) == []
+
+
+# ---------------------------------------------------------------------------
+# new-generator guard/skip branches (missing fields, no breakout, etc.)
+# ---------------------------------------------------------------------------
+def test_gen_rel_strength_guards():
+    ctx = {
+        "index": {"NIFTY": {"pChange": 0.0}},
+        "scanner": [
+            {"symbol": None, "pChange": 5, "ltp": 100},     # no symbol
+            {"symbol": "Z", "pChange": None, "ltp": 100},   # no pChange
+            {"symbol": "ILLIQ", "pChange": 5, "ltp": 100},  # not in the liquid set
+        ],
+        "scannerSyms": {"OTHER"},
+    }
+    with _fno():
+        assert S.gen_rel_strength(ctx) == []
+
+
+def test_gen_squeeze_guards():
+    wide = [_bar(110, 100) for _ in range(6)]
+    nr7 = _bar(105.5, 104.5)
+    ctx = {
+        "daily": {"A": wide + [nr7],        # no quote → no ltp
+                  "B": wide + [nr7]},        # ltp inside the NR7 range → no break
+        "quotes": {"B": {"ltp": 105.0}},
+    }
+    with _fno():
+        assert S.gen_squeeze(ctx) == []
+
+
+def test_gen_gap_missing_fields_skips():
+    ctx = {"regime": {"label": "Trend-Up"},
+           "quotes": {"A": {"open": None, "prevClose": 100, "ltp": 105},
+                      "B": {"open": 103, "prevClose": None, "ltp": 105}}}
+    with _fno():
+        assert S.gen_gap(ctx) == []
+
+
+def test_gen_pcr_extreme_guards():
+    ctx = {"chains": {"A": {"pcr": None, "underlying": 100},
+                      "B": {"pcr": 1.5, "underlying": None}}}
+    assert S.gen_pcr_extreme(ctx) == []
+
+
+def test_gen_max_pain_near_pin_skips():
+    ctx = {"chains": {"A": {"maxPain": 100, "underlying": 100.5, "dte": 1}}}  # 0.5% < 1.5%
+    assert S.gen_max_pain(ctx) == []
+
+
+def test_gen_pdhl_guards():
+    ctx = {"daily": {"A": [], "B": [_bar(105, 95)]}, "quotes": {}}   # empty bars / no ltp
+    with _fno():
+        assert S.gen_pdhl(ctx) == []
+
+
+def test_gen_fut_basis_go_and_deduped():
+    # premium+OI↑ once, then a duplicate symbol row must be ignored
+    ctx = {"futures": [
+        {"symbol": "A", "spot": 100, "basisPct": 1.0, "changeInOI": 500, "pChange": 1.0},
+        {"symbol": "A", "spot": 100, "basisPct": 1.0, "changeInOI": 500, "pChange": 1.0},
+    ]}
+    out = S.gen_fut_basis(ctx)
+    assert [i["symbol"] for i in out] == ["A"]
+
+
+def test_dte_helper():
+    from datetime import timedelta
+    future = (datetime.now(S._IST) + timedelta(days=10)).strftime("%d-%b-%Y")
+    assert S._dte(future) in (9, 10)               # boundary by time-of-day
+    past = (datetime.now(S._IST) - timedelta(days=5)).strftime("%d-%b-%Y")
+    assert S._dte(past) == 0                        # clamped to >= 0
+    assert S._dte("garbage") is None
+
+
+# ---------------------------------------------------------------------------
 # playbook pick + sizing
 # ---------------------------------------------------------------------------
 def test_playbook_pick_fit_when_no_history():
@@ -395,7 +644,7 @@ def test_gen_adaptive_empty_when_no_pick():
 # ---------------------------------------------------------------------------
 def test_strategy_meta_shape():
     meta = S.strategy_meta()
-    assert len(meta) == len(S.STRATEGIES) == 10
+    assert len(meta) == len(S.STRATEGIES) == 17
     for m in meta:
         assert set(m) == {"id", "name", "description", "regimeFit"}
         assert "generate" not in m

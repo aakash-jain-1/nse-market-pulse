@@ -146,6 +146,67 @@ def test_backtest_symbol_fires_one_momentum():
 
 
 # ---------------------------------------------------------------------------
+# new EOD signals: gap / squeeze / rel_strength
+# ---------------------------------------------------------------------------
+def _fb(d, o, c, h, l, v=1000, prev=None, deliv=None):
+    """Full daily bar incl. open (needed by gap)."""
+    return {"d": d, "symbol": "X", "open": o, "close": c, "high": h, "low": l,
+            "volume": v, "prevClose": prev if prev is not None else c, "delivPct": deliv}
+
+
+def test_strats_include_new_eod():
+    ids = [s["id"] for s in bd.STRATS]
+    assert {"rel_strength", "gap", "squeeze"} <= set(ids)
+    assert len(ids) == 9
+
+
+def test_backtest_gap_and_go_long():
+    bars = [
+        _fb("2026-07-01", 100, 100, 101, 99, prev=100),
+        _fb("2026-07-02", 103, 104, 104.5, 102.5, prev=100),   # +3% gap, close holds open
+        _fb("2026-07-03", 106, 109, 109.5, 105, prev=104),     # resolve: +4% target hit
+    ]
+    dr = {"2026-07-02": {"label": "Trend-Up", "mktPct": 0.2}}   # trend → gap-and-go
+    trades = bd._backtest_symbol(bars, {}, "2026-01-01", 5, dr)
+    gaps = [t for t in trades if t["strategy"] == "gap"]
+    assert gaps and gaps[0]["direction"] == "LONG"
+
+
+def test_backtest_gap_fade_short():
+    bars = [
+        _fb("2026-07-01", 100, 100, 101, 99, prev=100),
+        _fb("2026-07-02", 103, 101, 103.5, 100.5, prev=100),   # +3% gap but close rejects open
+        _fb("2026-07-03", 99, 96, 100, 95, prev=101),          # resolve down → target
+    ]
+    dr = {"2026-07-02": {"label": "Range", "mktPct": 0.0}}      # quiet → fade
+    trades = bd._backtest_symbol(bars, {}, "2026-01-01", 5, dr)
+    gaps = [t for t in trades if t["strategy"] == "gap"]
+    assert gaps and gaps[0]["direction"] == "SHORT"
+
+
+def test_backtest_squeeze_breakout_long():
+    wide = [_fb(f"2026-06-{d:02d}", 100, 100, 105, 95, prev=100) for d in range(1, 7)]
+    nr7 = _fb("2026-06-08", 100, 100, 100.5, 99.5, prev=100)        # tightest range (NR7)
+    today = _fb("2026-06-09", 100.5, 101, 101.5, 100.4, prev=100)   # close breaks NR7 high
+    resolve = _fb("2026-06-10", 101, 107, 108, 100.5, prev=101)     # target
+    bars = wide + [nr7, today, resolve]
+    trades = bd._backtest_symbol(bars, {}, "2026-01-01", 5, None)
+    sq = [t for t in trades if t["strategy"] == "squeeze"]
+    assert sq and sq[0]["direction"] == "LONG"
+
+
+def test_backtest_rel_strength_long():
+    closes = [100, 100, 101, 102, 103, 104, 105]                    # +5% over 5 sessions
+    bars = [_fb(f"2026-07-{i + 1:02d}", c, c, c + 0.5, c - 0.5,
+                prev=(closes[i - 1] if i else 100)) for i, c in enumerate(closes)]
+    bars.append(_fb("2026-07-08", 105, 108, 112, 105, prev=105))    # resolve target
+    dr = {b["d"]: {"label": "Trend-Up", "mktPct": 0.0} for b in bars}   # flat market
+    trades = bd._backtest_symbol(bars, {}, "2026-01-01", 5, dr)
+    rs = [t for t in trades if t["strategy"] == "rel_strength"]
+    assert rs and rs[0]["direction"] == "LONG"
+
+
+# ---------------------------------------------------------------------------
 # regime proxy
 # ---------------------------------------------------------------------------
 def test_classify_regime_branches():

@@ -84,7 +84,7 @@ angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE de
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
 notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger
 paper.py             Paper-trading engine (equity/options/futures, JSON-persisted)
-strategies.py        Strategy library (10 generators) + market-regime detector
+strategies.py        Strategy library (17 generators) + market-regime detector
 sim.py               Multi-strategy forward-tester (per-strategy sims + daily rollup)
 intrabar.py          Minute-candle trade resolver (target/stop/MFE/MAE) + resolve_point
 backtest_strategies.py  Offline backtester: replays archived context, resolves on OHLCV
@@ -95,7 +95,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 377 across 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 405 across 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -168,7 +168,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **377 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **405 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -236,6 +236,33 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Seven new strategies (library 10 → 17; suite 377 → 405)
+- Added seven researched edges to `strategies.py`, each a standard `gen_*` returning
+  `_mk_idea` shapes + a `regimeFit`, so they run in the parallel sim, get tracked
+  per-regime, and (for the EOD-computable ones) are backtested + walk-forward-vetted:
+  - **`fut_basis`** — Futures Basis / Cost-of-Carry: rich premium + rising OI = LONG,
+    discount/backwardation + rising OI = SHORT (reads the spot↔future *price* gap, vs
+    OI Smart-Money's OI *direction*). Uses `ctx["futures"]` — zero extra fetch.
+  - **`rel_strength`** — Relative Strength vs NIFTY: buy leaders / short laggards vs
+    the index (live: today's move vs NIFTY; backtest: 5-day stock vs market proxy).
+  - **`squeeze`** — Volatility Squeeze (NR7): tightest daily range in 7 then a break.
+  - **`gap`** — Gap-and-Go / Fade: regime-tilted opening-gap play (go on trend, fade
+    on range), open vs prevClose.
+  - **`pcr_extreme`** — PCR Contrarian (per-stock option chain; live-only).
+  - **`max_pain`** — Max-Pain Expiry Pin (option chain + expiry-gated; live-only).
+  - **`pdhl`** — Prior-Day High/Low Breakout (live-only).
+- `build_context()` gained two bounded, cached loaders: **`ctx["daily"]`** (recent
+  daily bars, session-cached — immutable intraday; powers squeeze + pdhl) and
+  **`ctx["chains"]`** (per-stock PCR/max-pain for a small F&O subset, 5-min TTL;
+  powers pcr_extreme + max_pain). Both best-effort so they never stall the per-minute
+  snapshot loop; auto-dropped by `_trim_context` (no context_log bloat).
+- **`backtest_daily`** now reconstructs `rel_strength` / `gap` / `squeeze` from daily
+  bars (STRATS 6 → 9); `_backtest_symbol` takes `day_regime` for the market-relative
+  signals. `fut_basis`/`pcr_extreme`/`max_pain`/`pdhl` are in `NOT_COVERED` (live-only).
+  Walk-forward picks up the 3 new EOD strategies automatically (reads `bd.STRATS`).
+- Tests: +23 in `test_strategies.py` (generators + guard branches + `_dte`), +5 in
+  `test_backtest_daily.py` (gap/squeeze/rel_strength signals). Suite 377 → 405.
 
 ### 2026-07-16 — Walk-forward out-of-sample validation (`walkforward.py`; suite 363 → 377)
 - New **`walkforward.py`** — the credibility check the Sim leaderboard was missing.

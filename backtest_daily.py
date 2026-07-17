@@ -14,13 +14,14 @@ This is DIFFERENT from `backtest_strategies.py`:
     subsequent daily high/low (a bar that pierces both stop and target is counted
     as a STOP first — conservative), no intrabar wick precision.
 
-Coverage: 6 strategies. Five come from ONE daily price/volume/delivery call per
-symbol — Momentum, Mean-Reversion, Delivery%, High-Proximity, Volume-Breakout.
-The sixth, OI Smart-Money, adds a second call per symbol for the near-month
-futures' daily open-interest history (foCPV). VWAP / ORB / iVWAP remain
-intraday-only (no daily equivalent) and are left to the live sim / context
-backtest. Sizing matches the live sim: fixed RISK_PER_TRADE, outcomes in
-R-multiples.
+Coverage: 9 strategies. Most come from ONE daily price/volume/delivery call per
+symbol — Momentum, Mean-Reversion, Delivery%, High-Proximity, Volume-Breakout,
+Relative-Strength (vs an equal-weight market proxy), Gap-and-Go/Fade, and the
+Volatility-Squeeze (NR7). OI Smart-Money adds a second call per symbol for the
+near-month futures' daily open-interest history (foCPV). VWAP / ORB / iVWAP and
+the live-only F&O edges (Futures-Basis, PCR-Contrarian, Max-Pain) have no daily
+equivalent and are left to the live sim / context backtest. Sizing matches the
+live sim: fixed RISK_PER_TRADE, outcomes in R-multiples.
 """
 import concurrent.futures as cf
 import threading
@@ -58,6 +59,12 @@ STRATS = [
      "desc": "Close breaks the prior 20-day high/low on a >=2x volume expansion."},
     {"id": "oi_smart",     "name": "F&O OI Smart-Money",     "stop": 3.0, "target": 6.0,
      "desc": "Meaningful near-month OI build (>=8%) on >=1.2x volume with a real directional close: long buildup (price up + OI up) -> long, short buildup (price down + OI up) -> short. Entered/resolved on the equity bars."},
+    {"id": "rel_strength", "name": "Relative Strength vs NIFTY", "stop": 3.0, "target": 6.0,
+     "desc": "Outperforming the equal-weight market by >=3% over 5 sessions on an up move -> LONG; lagging by >=3% on a down move -> SHORT (relative momentum)."},
+    {"id": "gap",          "name": "Gap-and-Go / Fade",      "stop": 2.5, "target": 4.0,
+     "desc": "Open gaps >=1.5% vs the prior close: go with the gap on trend days (close holds the open), fade it toward the close on quiet/reversal days (regime-tilted)."},
+    {"id": "squeeze",      "name": "Volatility Squeeze (NR7)", "stop": 3.0, "target": 6.0,
+     "desc": "The prior session was the narrowest range in 7 (NR7 contraction) and today's close breaks that range -> trade the expansion (Crabel)."},
 ]
 STRAT_MAP = {s["id"]: s for s in STRATS}
 
@@ -88,6 +95,14 @@ NOT_COVERED = [
      "reason": "Needs the 09:15-09:30 opening range (minute candles)."},
     {"id": "ivwap", "name": "Intraday VWAP Reclaim",
      "reason": "Needs the intraday session VWAP path (minute candles)."},
+    {"id": "fut_basis", "name": "Futures Basis / Carry",
+     "reason": "Needs daily futures settlement prices (basis history not cached)."},
+    {"id": "pcr_extreme", "name": "PCR Contrarian",
+     "reason": "Per-stock option chains aren't archived historically."},
+    {"id": "max_pain", "name": "Max-Pain Expiry Pin",
+     "reason": "Per-stock option chains aren't archived historically."},
+    {"id": "pdhl", "name": "Prior-Day High/Low Break",
+     "reason": "Intraday level break — resolved by the live sim / minute path."},
 ]
 
 # A curated liquid F&O default universe (Nifty-heavyweights + high-beta favourites).
@@ -428,8 +443,10 @@ def _trade(sid, direction, bars, feats, i, max_hold):
     return t
 
 
-def _backtest_symbol(bars, oi_map, cutoff_iso, max_hold):
-    """All trades for one symbol across every strategy (no overlapping per s/strat)."""
+def _backtest_symbol(bars, oi_map, cutoff_iso, max_hold, day_regime=None):
+    """All trades for one symbol across every strategy (no overlapping per s/strat).
+    `day_regime` (date -> {label, mktPct, ...}) powers the market-relative signals
+    (Relative-Strength needs the market move; Gap needs the day's regime tilt)."""
     feats = _features(bars)
     trades = []
     busy = {}   # strategy_id -> index until which we're in a trade
@@ -465,6 +482,55 @@ def _backtest_symbol(bars, oi_map, cutoff_iso, max_hold):
                     sigs.append(("oi_smart", "LONG"))
                 elif f["ret1"] <= -OI_MIN_RET:
                     sigs.append(("oi_smart", "SHORT"))
+        # Gap-and-Go / Fade: today's open vs the prior close, tilted by regime.
+        op, pcl = b.get("open"), b.get("prevClose")
+        if op and pcl and c and op > 0 and pcl > 0:
+            gap = (op / pcl - 1) * 100
+            if abs(gap) >= 1.5:
+                fade = ((day_regime or {}).get(b["d"]) or {}).get("label") in (
+                    "Range", "Recovery", "Pullback")
+                if not fade:                       # gap-and-go (close holds the open)
+                    if gap > 0 and c >= op:
+                        sigs.append(("gap", "LONG"))
+                    elif gap < 0 and c <= op:
+                        sigs.append(("gap", "SHORT"))
+                else:                              # gap-fade (close rejects the open)
+                    if gap > 0 and c < op:
+                        sigs.append(("gap", "SHORT"))
+                    elif gap < 0 and c > op:
+                        sigs.append(("gap", "LONG"))
+        # Volatility Squeeze (NR7): the prior session is the tightest range in 7 and
+        # today's close breaks that range.
+        if i >= 7 and c:
+            prev = bars[i - 1]
+            ph, pl = prev.get("high"), prev.get("low")
+            window = [bars[j]["high"] - bars[j]["low"] for j in range(i - 7, i)
+                      if bars[j].get("high") is not None and bars[j].get("low") is not None]
+            if ph is not None and pl is not None and len(window) == 7:
+                pr = ph - pl
+                if pr > 0 and pr <= min(window):
+                    if c > ph:
+                        sigs.append(("squeeze", "LONG"))
+                    elif c < pl:
+                        sigs.append(("squeeze", "SHORT"))
+        # Relative Strength vs the equal-weight market over 5 sessions.
+        if i >= 5 and c and day_regime:
+            c5 = bars[i - 5].get("close")
+            if c5:
+                stock5 = (c / c5 - 1) * 100
+                mkt5, ok = 0.0, True
+                for j in range(i - 4, i + 1):
+                    m = (day_regime.get(bars[j]["d"]) or {}).get("mktPct")
+                    if m is None:
+                        ok = False
+                        break
+                    mkt5 += m
+                if ok:
+                    rs = stock5 - mkt5
+                    if rs >= 3 and stock5 > 0:
+                        sigs.append(("rel_strength", "LONG"))
+                    elif rs <= -3 and stock5 < 0:
+                        sigs.append(("rel_strength", "SHORT"))
         for sid, direction in sigs:
             if busy.get(sid, -1) >= i:
                 continue   # already in a trade for this strategy on this name
@@ -682,7 +748,7 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
     by_strat = {s["id"]: [] for s in STRATS}
     first_iso = last_iso
     for sym, bars in hist.items():
-        for t in _backtest_symbol(bars, ois.get(sym, {}), cutoff_iso, max_hold):
+        for t in _backtest_symbol(bars, ois.get(sym, {}), cutoff_iso, max_hold, day_regime):
             t["regimeAtEntry"] = (day_regime.get(t["openedDate"]) or {}).get("label", "?")
             by_strat[t["strategy"]].append(t)
             if t["openedDate"] < first_iso:
