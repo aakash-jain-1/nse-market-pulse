@@ -475,6 +475,36 @@ def eod_bars_get(symbol):
             "SELECT * FROM eod_bars WHERE symbol=? ORDER BY d", (symbol.upper(),))]
 
 
+def eod_bars_all(since=None):
+    """ALL eod bars grouped {SYMBOL: [bar,...]} (each list ascending by date), in
+    ONE connection. `since` (YYYY-MM-DD, inclusive) trims to recent history so a
+    market-wide scan doesn't load years of rows. Used by the EOD scanner to price
+    ~2400 names without a per-symbol query each."""
+    q, args = "SELECT * FROM eod_bars", ()
+    if since:
+        q += " WHERE d >= ?"
+        args = (since,)
+    q += " ORDER BY symbol, d"
+    out = {}
+    with _conn() as c:
+        for r in c.execute(q, args):
+            out.setdefault(r["symbol"], []).append(dict(r))
+    return out
+
+
+def eod_latest_date():
+    """Most recent trading date present in eod_bars (YYYY-MM-DD), or None."""
+    with _conn() as c:
+        r = c.execute("SELECT MAX(d) z FROM eod_bars").fetchone()
+    return (r["z"] if r else None) or None
+
+
+def eod_oi_symbols():
+    """Distinct symbols that have futures OI history (the ingested F&O universe)."""
+    with _conn() as c:
+        return [r[0] for r in c.execute("SELECT DISTINCT symbol FROM eod_oi")]
+
+
 def eod_bars_put(symbol, bars):
     """Upsert daily bars (each needs a clean 'd' YYYY-MM-DD). Past bars are
     immutable; REPLACE handles the occasional revision + the newest day."""

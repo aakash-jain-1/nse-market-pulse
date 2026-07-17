@@ -234,6 +234,32 @@ def test_eod_bars_put_bulk():
         assert db.eod_bars_put_bulk([]) == 0
 
 
+def test_eod_bars_all_grouped_and_since():
+    with _temp_db():
+        db.eod_bars_put("ACME", [{"d": "2026-06-01", "close": 90},
+                                 {"d": "2026-07-15", "close": 100}])
+        db.eod_bars_put("BETA", [{"d": "2026-07-15", "close": 200}])
+        allb = db.eod_bars_all()
+        assert set(allb) == {"ACME", "BETA"}
+        assert [r["close"] for r in allb["ACME"]] == [90.0, 100.0]  # ascending by d
+        # `since` trims older rows (and can drop a symbol entirely).
+        recent = db.eod_bars_all(since="2026-07-01")
+        assert [r["close"] for r in recent["ACME"]] == [100.0]
+        assert db.eod_bars_all(since="2027-01-01") == {}
+
+
+def test_eod_latest_date_and_oi_symbols():
+    with _temp_db():
+        assert db.eod_latest_date() is None            # empty DB
+        assert db.eod_oi_symbols() == []
+        db.eod_bars_put("ACME", [{"d": "2026-07-14", "close": 1},
+                                 {"d": "2026-07-16", "close": 2}])
+        db.eod_bars_put("BETA", [{"d": "2026-07-15", "close": 3}])
+        assert db.eod_latest_date() == "2026-07-16"
+        db.eod_oi_put("ACME", "31-JUL-2026", [{"d": "2026-07-16", "oi": 5}])
+        assert db.eod_oi_symbols() == ["ACME"]         # only names with futures OI
+
+
 # ---------------------------------------------------------------------------
 # minute bars
 # ---------------------------------------------------------------------------

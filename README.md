@@ -63,6 +63,7 @@ layers analytics on top:
 | 🧪 **Sim** | The multi-strategy forward-test + regime leaderboard + offline backtest (see [below](#strategy-sim-regimes--backtest)). |
 | 🎯 **F&O Sim** | The **same** forward-test as Sim, but a dedicated **parallel book that only trades F&O-eligible names** (ones you can actually take with futures/leverage). Same strategies, same live signals, same ₹2k/trade sizing — so you can compare F&O-only performance against the all-market book side by side. |
 | 🔎 **Scanner** | One ranked board combining volume spikes, money flow, momentum & OI buildup, with filters (direction, %chg, volume ×avg, value, OI signal, F&O-only). |
+| 🌐 **EOD Scan** | The **market-wide, off-hours** scanner: ranks the whole EOD bhavcopy universe (up to **~2400** cash names + F&O, not just the ~100–150 live hot lists) for swing setups — breakouts/breakdowns of the recent N-day high/low, gaps, unusual volume, trend vs 20/50-day MAs, NR7 squeezes. Works nights/weekends. Click **⬇ Backfill history** once to load recent daily bars. Prices are the last EOD close. |
 | ★ **Demand Score** | Composite ranking — stocks appearing across gainers, money-flow & volume spikes float to the top. |
 | **Volume Gainers** | Stocks trading far above their average volume. |
 | **F&O Open Interest** | OI spurts, classified long buildup / short buildup / short covering / long unwinding. |
@@ -240,7 +241,7 @@ flowchart TB
 
     subgraph API["app.py — routes"]
         direction TB
-        R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}"]
+        R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}<br/>/api/eod/{scan,backfill,status,price,quote,refresh}"]
         R2["/api/{recommendations,deepdive,quote,<br/>chart,optionchain,fno/universe}"]
         R3["/api/sim/{strategies,summary,daily,leaderboard,performance,<br/>backtest,backtest_daily,walkforward,strategy_of_day,regime,take,auto,mode,reset}"]
         R4["/api/paper/{portfolio,order,option_order,<br/>futures_order,reset}"]
@@ -251,7 +252,8 @@ flowchart TB
         direction TB
         NC["nse_client.py<br/>• warmed requests.Session (TTL 300s)<br/>• hot lists → normalized dicts<br/>• get_scanner / _build_idea / get_demand_score<br/>• get_price (symbol→LTP map)"]
         NQ["nse_quote.py<br/>• NextApi gateway<br/>• quote / depth / intraday chart<br/>• option chain + Black-Scholes Greeks"]
-        BC["bhavcopy.py<br/>• EOD UDiFF bhavcopy (static archive)<br/>• resilient price / lot fallback<br/>• ingest → eod_bars/eod_oi"]
+        BC["bhavcopy.py<br/>• EOD UDiFF bhavcopy (static archive)<br/>• resilient price / lot fallback<br/>• ingest / backfill → eod_bars/eod_oi"]
+        ES["eod_scanner.py<br/>• full-market EOD/swing scan<br/>• breakouts/gaps/vol/MA/NR7<br/>• reads db.eod_bars (off-hours)"]
         ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime() (+ India-VIX volState)<br/>• 17 generators"]
         SM["sim.py<br/>• per-strategy ledgers<br/>• take/update/summary<br/>• daily rollup + regime leaderboard"]
         BK["backtest_strategies.py<br/>• virtual-clock replay<br/>• scorecards + equity curves"]
@@ -278,7 +280,10 @@ flowchart TB
     PP --> NC
     NC -.EOD fallback.-> BC
     BC --> NSEAPI
-    BC -.ingest.-> DBM
+    BC -.ingest / backfill.-> DBM
+    R1 --> ES
+    ES -.reads bars.-> DBM
+    BC -.history.-> ES
 ```
 
 ---
@@ -759,7 +764,8 @@ nse-market-pulse/
 ├── app.py                  # Flask server + JSON API (thin routes) — port 5055
 ├── nse_client.py           # NSE session mgmt + hot lists + scanner + ideas (CORE)
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
-├── bhavcopy.py             # EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback
+├── bhavcopy.py             # EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback + backfill
+├── eod_scanner.py          # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7) — off-hours
 ├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
 ├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
 ├── strategies.py           # 17 strategy generators (incl. regime-adaptive) + regime detector
@@ -774,7 +780,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 475 unit tests, 24 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/db/app+routes/feeds/…)
+├── test_*.py               # 507 unit tests, 25 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/eodscanner/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

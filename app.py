@@ -336,6 +336,67 @@ def api_eod_refresh():
     return jsonify(bhavcopy.ingest_db(date=body.get("date") or None))
 
 
+@app.route("/api/eod/scan")
+def api_eod_scan():
+    """Full-market EOD/swing scanner over the ingested bhavcopy history (works
+    off-hours). ?view=&limit=&minPrice=&minValueCr=&fno=1."""
+    import eod_scanner
+
+    def fnum(name, default):
+        v = request.args.get(name)
+        try:
+            return float(v) if v not in (None, "") else default
+        except ValueError:
+            return default
+
+    return jsonify(eod_scanner.scan(
+        view=request.args.get("view", "setups"),
+        limit=int(fnum("limit", 50)),
+        min_price=fnum("minPrice", 20.0),
+        min_value_cr=fnum("minValueCr", 1.0),
+        fno_only=request.args.get("fno") == "1",
+    ))
+
+
+# Backfill runs off-thread (dozens of ~1-2s archive fetches); the UI polls the
+# GET for progress. Module state is fine — a single serving worker, and the
+# heavy work is serialized inside bhavcopy.backfill()'s own lock.
+_eod_backfill = {"running": False, "startedAt": 0.0, "days": 0, "result": None}
+
+
+@app.route("/api/eod/backfill", methods=["GET", "POST"])
+def api_eod_backfill():
+    """POST {days} to load the last N sessions' bhavcopies into eod_bars (gives the
+    scanner market-wide HISTORY). Returns immediately; GET reports progress."""
+    import bhavcopy
+    import threading
+    if request.method == "GET":
+        return jsonify(dict(_eod_backfill))
+    body = request.get_json(silent=True) or {}
+    try:
+        days = int(body.get("days") or 20)
+    except (TypeError, ValueError):
+        days = 20
+    days = max(1, min(days, 120))
+    if _eod_backfill["running"]:
+        return jsonify({**_eod_backfill, "busy": True})
+    _eod_backfill.update(running=True, startedAt=time.time(), days=days, result=None)
+
+    def _job():
+        try:
+            def _progress(snap):
+                _eod_backfill["result"] = snap   # live day/bar counts for the poller
+            _eod_backfill["result"] = bhavcopy.backfill(days=days, progress=_progress)
+        except Exception:
+            log.warning("EOD backfill failed", exc_info=True)
+            _eod_backfill["result"] = {"error": "backfill failed"}
+        finally:
+            _eod_backfill["running"] = False
+
+    threading.Thread(target=_job, daemon=True).start()
+    return jsonify({**_eod_backfill, "started": True})
+
+
 @app.route("/api/chart/<symbol>")
 def api_chart(symbol):
     return jsonify(nse_quote.get_chart(symbol))

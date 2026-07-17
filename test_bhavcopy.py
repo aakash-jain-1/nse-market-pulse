@@ -514,6 +514,54 @@ def test_ingest_db_populates_bars_and_oi():
 
 
 # ---------------------------------------------------------------------------
+# backfill — many sessions, dedup, progress, clamp, busy
+# ---------------------------------------------------------------------------
+def test_backfill_counts_distinct_days_and_progress():
+    # 5 calls: a holiday walks back onto 07-16 (dup), and one day is unpublished.
+    results = [
+        {"cmDate": "2026-07-17", "bars": 2400, "oi": 200, "equities": 2405, "futures": 200},
+        {"cmDate": "2026-07-16", "bars": 2400, "oi": 200, "equities": 2400, "futures": 200},
+        {"cmDate": "2026-07-16", "bars": 2400, "oi": 200, "equities": 9999, "futures": 200},  # dup → skipped
+        {"cmDate": "2026-07-15", "bars": 2400, "oi": 200, "equities": 2400, "futures": 200},
+        {"cmDate": None, "bars": 0, "oi": 0, "equities": 0, "futures": 0},
+    ]
+    it = iter(results)
+    progress = []
+    with _patch(b, "ingest_db", lambda date=None: next(it)):
+        got = b.backfill(days=5, progress=lambda g: progress.append(g["days"]))
+    assert got["days"] == 3                          # distinct published sessions
+    assert got["bars"] == 2400 * 3 and got["oi"] == 600
+    assert got["dates"] == ["2026-07-15", "2026-07-16", "2026-07-17"]  # sorted
+    assert got["equities"] == 2405                   # max over COUNTED days (dup's 9999 skipped)
+    assert progress == [1, 2, 3]                     # one tick per distinct day
+
+
+def test_backfill_clamps_days():
+    calls = {"n": 0}
+
+    def fake(date=None):
+        calls["n"] += 1
+        return {"cmDate": None, "bars": 0, "oi": 0, "equities": 0, "futures": 0}
+
+    with _patch(b, "ingest_db", fake):
+        b.backfill(days=0)
+        assert calls["n"] == 1                        # clamped up to 1
+    calls["n"] = 0
+    with _patch(b, "ingest_db", fake):
+        b.backfill(days=999)
+        assert calls["n"] == 250                      # clamped down to 250
+
+
+def test_backfill_busy_returns_without_running():
+    b._backfill_lock.acquire()
+    try:
+        got = b.backfill(days=5)
+    finally:
+        b._backfill_lock.release()
+    assert got.get("busy") is True and got["days"] == 0
+
+
+# ---------------------------------------------------------------------------
 # integration — wired into nse_client
 # ---------------------------------------------------------------------------
 def test_get_price_falls_back_to_eod():

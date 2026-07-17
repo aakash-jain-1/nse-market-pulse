@@ -41,7 +41,8 @@ NSE/
 ├── app.py             # Flask server + JSON API endpoints (runs on port 5055)
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
 ├── nse_quote.py       # Per-stock quote/chart/depth (NextApi) + OHLCV candles (charting)
-├── bhavcopy.py        # EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback
+├── bhavcopy.py        # EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback + backfill(days)
+├── eod_scanner.py     # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7) — off-hours, pure
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
@@ -51,10 +52,11 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (9 strategies)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 475 unit tests across 24 suites (see below)
+├── test_*.py          # 507 unit tests across 25 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
-│   ├── test_bhavcopy.py                             # EOD UDiFF parsers + fetch walk-back + price/lot fallback
+│   ├── test_bhavcopy.py                             # EOD UDiFF parsers + fetch walk-back + backfill + price/lot fallback
+│   ├── test_eod_scanner.py                          # full-market swing scanner: features/tags/score/views/scan/status
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
 │   ├── test_quote.py / test_quote_more.py / test_book.py   # nse_quote math + parsers + depth
 │   ├── test_ideas.py / test_ideas_journal.py / test_strategies.py / test_paper.py
@@ -343,6 +345,17 @@ with no creds the app is unchanged.
   composite score with human-readable **tags** (⭐ Multi-signal, 🔥 Unusual
   volume, 💰 Money flow, 📈/📉 Momentum, 🟢/🔴 OI buildup). Client-side filter
   bar → `/api/scanner?direction=&minChange=&minVolMult=&minValueCr=&oi=&fno=1`.
+- **EOD Scan** (`🌐 EOD Scan`, `eod_scanner.py`) — the *market-wide, off-hours*
+  counterpart to the live Scanner. Instead of the ~100–150 hot lists it scans the
+  whole ingested EOD universe (up to ~2400 cash names + the F&O set) from
+  `db.eod_bars` for swing setups: breakouts/breakdowns of the recent N-day high/low,
+  gaps, unusual volume vs the trailing 20-day avg, trend vs the 20/50-day MAs, and
+  NR7 squeezes — each row carrying `tags` + a bullish-setup `score`. View selector
+  (setups/breakout/breakdown/gainers/losers/unusual/squeeze/value) + price/value/
+  limit/F&O filters → `/api/eod/scan?view=&limit=&minPrice=&minValueCr=&fno=1`.
+  Needs history: **⬇ Backfill** loads recent bhavcopies via `bhavcopy.backfill(days)`
+  (`POST /api/eod/backfill`, GET polls). Prices are the last EOD **close** (not
+  live). Works nights/weekends since it touches no live API.
 - **Demand Score** — composite ranking combining volume-gainers (volume
   multiple), most-active-by-value (money flow rank), and top-gainers (% gain).
   See `get_demand_score()`.
@@ -457,11 +470,30 @@ with no creds the app is unchanged.
 - Phone/LAN access + optional deploy.
 - ✅ *(done — see below)* `jugaad-data`/`nsefeed`-style fallback for the flaky bits:
   implemented natively as `bhavcopy.py` (EOD UDiFF ingest), no third-party dep.
-  Still open: point the intraday **scanner** at the full EOD universe; parse FO
-  options (STO/IDO) for resilient EOD max-pain/PCR.
+- ✅ *(done — see below)* market-wide EOD scanner over the full bhavcopy universe
+  (`eod_scanner.py` + 🌐 EOD Scan tab). Still open: parse FO options (STO/IDO) for
+  resilient EOD max-pain/PCR; a futures rollover tracker.
 
 ## Done recently
 
+- **🌐 Full-market EOD / swing scanner (`eod_scanner.py`)** — the live scanner only
+  sees NSE's ~100–150 intraday hot lists and reads all-zeros off-hours, but we
+  already persist whole-market daily bars in `db.eod_bars` (from bhavcopy). This new
+  module mines that history for end-of-day setups so the app has a **market-wide**
+  board that also works nights/weekends. Ranks names by proximity to / break of the
+  recent **N-day high/low** (breakout/breakdown), **gap**, **unusual volume** vs the
+  trailing 20-day avg, **trend** vs the 20/50-day MAs, and an **NR7 squeeze** (a
+  *genuine* contraction — strictly narrower than each prior session; a flat series
+  is not a squeeze). All feature math (`_features`/`_tags`/`_score` + per-view
+  predicate & sort key) is **pure** → fully unit-tested; `scan()` does one grouped
+  `db.eod_bars_all(since=…)` read, filters (min price / turnover / F&O-only) and
+  ranks. Signals **degrade gracefully** with history depth. New `bhavcopy.backfill(days)`
+  bulk-loads recent sessions for market-wide *history* (lock-guarded, idempotent,
+  dedups holiday walk-backs); DB gains `eod_bars_all`/`eod_latest_date`/
+  `eod_oi_symbols`. `/api/eod/scan` + background `/api/eod/backfill` (POST starts,
+  GET polls); new **🌐 EOD Scan** tab (setup selector + price/value/limit/F&O
+  filters + ⬇ Backfill w/ live progress). Prices are the last EOD **close**
+  (labelled — not live). Tests **+32** (suite **475 → 507**).
 - **🎯 Vol-conditioned strategy selection** — closed the loop on the volatility
   axis: `strategy_of_day` and the live adaptive playbook (`_regime_playbook_pick`)
   now pick using a **blend of the regime-bucket and vol-bucket marginal

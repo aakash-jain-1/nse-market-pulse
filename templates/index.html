@@ -535,6 +535,29 @@
         <button id="futAll" class="fut-toggle">All F&amp;O (~215)</button>
         <span id="futHint" style="color:var(--muted);font-size:11px"></span>
       </div>
+      <div id="eodBar" class="scan-filters" style="display:none">
+        <label>Setup
+          <select id="eDir">
+            <option value="setups">Best setups</option>
+            <option value="breakout">Breakouts (near/at high)</option>
+            <option value="breakdown">Breakdowns (near/at low)</option>
+            <option value="gainers">Top gainers</option>
+            <option value="losers">Top losers</option>
+            <option value="unusual">Unusual volume</option>
+            <option value="squeeze">Squeeze (NR7)</option>
+            <option value="value">Most traded (value)</option>
+          </select>
+        </label>
+        <label>Min price<input type="number" id="eMinPrice" min="0" step="10" style="width:70px" value="20"></label>
+        <label>Min value (Cr)<input type="number" id="eMinVal" min="0" step="1" style="width:70px" value="1"></label>
+        <label>Show<input type="number" id="eLimit" min="10" max="300" step="10" style="width:64px" value="50"></label>
+        <label class="chk"><input type="checkbox" id="eFno"> F&amp;O only</label>
+        <button id="eApply">Apply</button>
+        <span style="width:1px;height:20px;background:var(--border)"></span>
+        <label title="Load the last N sessions' bhavcopies into the local history cache — needed for moving averages, N-day highs and average-volume signals. Runs in the background (~1-2s per day).">Backfill<input type="number" id="eDays" min="1" max="120" step="5" style="width:56px" value="30"> days</label>
+        <button id="eBackfill" title="Download recent EOD bhavcopies (whole cash market) so swing signals have history. Off-hours friendly.">⬇ Backfill history</button>
+        <span id="eodScanStatus" style="color:var(--muted);font-size:11px"></span>
+      </div>
       <div id="futMomentum" class="fut-mom" style="display:none"></div>
       <div id="tableWrap"><div class="loading">Loading…</div></div>
     </div>
@@ -752,6 +775,8 @@
         desc: "The same forward-test as the Sim tab, but a dedicated parallel book that only trades F&O-eligible stocks (ones you can actually take with futures/leverage). Same strategies, same live signals, same risk-based sizing (₹2k/trade) — so you can compare F&O-only performance against the all-market book. Educational — NOT advice." },
       { key: "scanner",    label: "🔎 Scanner", title: "In-Demand Scanner",
         desc: "One ranked board combining volume spikes, money flow, momentum & OI buildup. Use the filters to hunt for exactly the setup you want." },
+      { key: "eod",        label: "🌐 EOD Scan", title: "Full-Market EOD / Swing Scanner",
+        desc: "Scans the WHOLE cash market (~2400 names, not just the live hot lists) from NSE's End-of-Day bhavcopy history for swing setups — breakouts/breakdowns of the recent high/low, gaps, unusual volume, trend vs 20/50-day MAs and NR7 squeezes. Works off-hours & weekends. Click ‘Backfill history’ once to load recent daily bars. Educational — NOT advice." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
         desc: "Composite ranking — stocks appearing across gainers, money-flow & volume spikes rank highest." },
       { key: "volgainers", label: "Volume Gainers", title: "Volume Gainers (unusual activity)",
@@ -957,6 +982,8 @@
       document.getElementById("panelDesc").textContent = meta.desc;
       document.getElementById("scanFilters").style.display =
         current === "scanner" ? "flex" : "none";
+      document.getElementById("eodBar").style.display =
+        current === "eod" ? "flex" : "none";
       document.getElementById("futMode").style.display =
         current === "futures" ? "flex" : "none";
       document.getElementById("recoBar").style.display =
@@ -982,6 +1009,91 @@
       if (document.getElementById("fFno").checked) p.set("fno", "1");
       const q = p.toString();
       return q ? "?" + q : "";
+    }
+
+    function eodQuery() {
+      const p = new URLSearchParams();
+      p.set("view", document.getElementById("eDir").value || "setups");
+      const mp = document.getElementById("eMinPrice").value;
+      const mv = document.getElementById("eMinVal").value;
+      const lim = document.getElementById("eLimit").value;
+      if (mp !== "") p.set("minPrice", mp);
+      if (mv !== "") p.set("minValueCr", mv);
+      if (lim !== "") p.set("limit", lim);
+      if (document.getElementById("eFno").checked) p.set("fno", "1");
+      return "?" + p.toString();
+    }
+
+    function eodPct(v) {
+      if (v == null) return `<td style="color:var(--muted)">—</td>`;
+      return `<td class="${v >= 0 ? "pos" : "neg"}">${v >= 0 ? "+" : ""}${v.toFixed(1)}%</td>`;
+    }
+
+    function eodUpdateStatus(cov) {
+      const el = document.getElementById("eodScanStatus");
+      if (!el || document.getElementById("eBackfill").disabled) return;  // don't stomp a live backfill
+      if (!cov || !cov.rows) { el.textContent = "No EOD history yet — click ⬇ Backfill history."; return; }
+      el.textContent = `${fmtNum(cov.symbols)} names · ${fmtNum(cov.rows)} bars · ${cov.from || "?"} → ${cov.to || "?"}${cov.fnoSymbols ? " · " + cov.fnoSymbols + " F&O" : ""}`;
+    }
+
+    function renderEodScan(data) {
+      const rows = data.rows || [];
+      const cov = `<div class="chart-note" style="margin:0 0 8px">Whole-market EOD scan · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names, ${fmtNum(data.scanned || 0)} with enough history, ${fmtNum(data.matched || 0)} match. Prices are the last EOD <b>close</b> (not live).</div>`;
+      if (!rows.length) {
+        const hint = data.note || "No names match these filters — loosen them, or backfill more history for the moving-average / N-day-high signals.";
+        return cov + `<div class="empty">${escapeHtml(hint)}</div>`;
+      }
+      const max = rows[0].score || 1;
+      const wd = rows[0].windowDays || "N";
+      const head = `<tr><th>Stock</th><th>Close</th><th>% Chg</th><th>Gap</th><th title="Today's volume vs its trailing 20-day average">Vol ×Avg</th><th title="% from the recent ${wd}-day high (≥0 = at/above → breakout)">vs Hi</th><th title="% from the recent ${wd}-day low (≤0 = at/below)">vs Lo</th><th>Setups</th><th title="Bullish setup strength: breakout + volume + trend + gap + squeeze">Score</th></tr>`;
+      const body = rows.map((r, i) => {
+        const tags = (r.tags || []).map(t =>
+          `<span class="scan-tag${t.indexOf("⭐") >= 0 ? " star" : ""}">${escapeHtml(t)}</span>`).join("");
+        return `<tr data-sym="${r.symbol}">
+          ${rowStart(i, r.symbol)}
+          <td>${fmtPrice(r.close)}</td>
+          ${eodPct(r.pChange)}
+          ${eodPct(r.gapPct)}
+          <td>${r.volMult ? r.volMult.toFixed(1) + "x" : "—"}</td>
+          ${eodPct(r.pctFromHigh)}
+          ${eodPct(r.pctFromLow)}
+          <td><div class="scan-tags">${tags || "—"}</div></td>
+          <td>${r.score}<span class="score-bar"><i style="width:${Math.max(4, (r.score / max) * 100)}%"></i></span></td>
+        </tr>`;
+      }).join("");
+      return cov + `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+    }
+
+    async function eodBackfill() {
+      const btn = document.getElementById("eBackfill");
+      const st = document.getElementById("eodScanStatus");
+      const days = parseInt(document.getElementById("eDays").value, 10) || 30;
+      const orig = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Backfilling…";
+      try {
+        await fetch("/api/eod/backfill", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ days }),
+        }).then(r => r.json());
+      } catch (e) {}
+      const poll = async () => {
+        let s = {};
+        try { s = await fetch("/api/eod/backfill").then(r => r.json()); } catch (e) {}
+        const res = s.result || {};
+        if (s.running) {
+          st.textContent = `Backfilling ${res.days || 0}/${s.days} sessions · ${fmtNum(res.bars || 0)} bars loaded…`;
+          setTimeout(poll, 1500);
+        } else {
+          btn.disabled = false;
+          btn.textContent = orig;
+          st.textContent = res.days
+            ? `Loaded ${res.days} sessions · ${fmtNum(res.bars || 0)} bars.`
+            : (res.error ? "Backfill failed — see server log." : "Backfill done.");
+          if (current === "eod") load();
+        }
+      };
+      setTimeout(poll, 1200);
     }
 
     function rowStart(i, sym) {
@@ -3647,6 +3759,21 @@
           dot.style.background = "var(--green)";
           return;
         }
+        if (current === "eod") {
+          const data = await fetch("/api/eod/scan" + eodQuery()).then(r => r.json());
+          if (data.error) throw new Error(data.error);
+          window._lastRows = data.rows || [];
+          wrap.innerHTML = renderEodScan(data);
+          annotateInfo(wrap);
+          wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
+            tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
+          document.getElementById("futMomentum").style.display = "none";
+          eodUpdateStatus(data.coverage);
+          document.getElementById("updated").textContent =
+            "Updated " + new Date().toLocaleTimeString("en-IN");
+          dot.style.background = "var(--green)";
+          return;
+        }
         let url = "/api/" + current + (current === "scanner" ? scannerQuery() : "");
         if (current === "recos")
           url = "/api/recommendations" + (document.getElementById("recoFno").checked ? "?fno=1" : "");
@@ -4357,6 +4484,10 @@
     document.getElementById("ocTSell").onclick = () => placeOptionOrder("SELL");
     document.getElementById("refreshBtn").onclick = load;
     document.getElementById("fApply").onclick = load;
+    document.getElementById("eApply").onclick = load;
+    document.getElementById("eDir").onchange = load;
+    document.getElementById("eFno").onchange = load;
+    document.getElementById("eBackfill").onclick = eodBackfill;
     document.getElementById("recoFno").onchange = load;
     document.getElementById("simTake").onclick = async () => {
       const btn = document.getElementById("simTake");

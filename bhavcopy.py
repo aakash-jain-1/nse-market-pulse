@@ -59,6 +59,7 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 _LATEST_TTL = 1800  # 30 min — bhavcopy is EOD, so it changes at most once a day
 _cache = {"ts": 0.0, "cm": {}, "fo": {}, "cmDate": None, "foDate": None, "date": None}
 _lock = threading.Lock()
+_backfill_lock = threading.Lock()  # serialize backfills so they don't stampede the archive
 
 
 # ---------------------------------------------------------------------------
@@ -392,3 +393,43 @@ def ingest_db(date=None):
 
     return {"cmDate": cm_date, "foDate": fo_date, "bars": bars, "oi": oi,
             "equities": len(cm), "futures": len(fo.get("futures") or {})}
+
+
+def backfill(days=20, progress=None):
+    """Ingest the last `days` trading sessions' bhavcopies into eod_bars/eod_oi so
+    the EOD scanner + daily backtest have market-wide HISTORY (not just today's
+    single day). Idempotent — re-ingesting a day just REPLACEs the same rows.
+
+    Each day is one CM + one FO archive fetch (~1-2s), so this is slow (~1s/day);
+    call it from a background thread. Serialized by a lock so two callers can't
+    hammer the archive at once. Returns a summary of what landed.
+    """
+    days = max(1, min(int(days), 250))
+    got = {"asked": days, "days": 0, "bars": 0, "oi": 0, "equities": 0, "dates": []}
+    if not _backfill_lock.acquire(blocking=False):
+        got["busy"] = True
+        return got
+    try:
+        seen = set()
+        for d in _recent_trading_days(n=days):
+            res = ingest_db(date=d)
+            cm_date = res.get("cmDate")
+            # A holiday walks back to the prior session, which we may already have
+            # ingested this pass — count each distinct published day once.
+            if not cm_date or cm_date in seen or not res.get("bars"):
+                continue
+            seen.add(cm_date)
+            got["days"] += 1
+            got["bars"] += res.get("bars", 0)
+            got["oi"] += res.get("oi", 0)
+            got["equities"] = max(got["equities"], res.get("equities", 0))
+            got["dates"].append(cm_date)
+            if progress:
+                try:
+                    progress(dict(got))
+                except Exception:
+                    pass
+        got["dates"].sort()
+        return got
+    finally:
+        _backfill_lock.release()

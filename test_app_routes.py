@@ -326,6 +326,57 @@ def test_eod_refresh_post():
         assert seen["date"] == "2026-07-15"
 
 
+def test_eod_scan_arg_parsing():
+    import eod_scanner
+    seen = {}
+
+    def fake(view="setups", limit=50, min_price=20.0, min_value_cr=1.0, fno_only=False):
+        seen.update(view=view, limit=limit, min_price=min_price,
+                    min_value_cr=min_value_cr, fno_only=fno_only)
+        return {"view": view, "rows": []}
+
+    with _patch(eod_scanner, "scan", fake):
+        st, j = _json("/api/eod/scan?view=breakout&limit=25&minPrice=50&minValueCr=5&fno=1")
+        assert st == 200 and j["view"] == "breakout"
+        assert seen == {"view": "breakout", "limit": 25, "min_price": 50.0,
+                        "min_value_cr": 5.0, "fno_only": True}
+        _json("/api/eod/scan")                        # defaults
+        assert seen["view"] == "setups" and seen["limit"] == 50
+        assert seen["min_price"] == 20.0 and seen["min_value_cr"] == 1.0
+        assert seen["fno_only"] is False
+
+
+def test_eod_backfill_get_post_and_busy():
+    import bhavcopy
+    import time as _t
+    webapp._eod_backfill.update(running=False, startedAt=0.0, days=0, result=None)
+    # GET reports the idle state.
+    st, j = _json("/api/eod/backfill")
+    assert st == 200 and j["running"] is False
+    got = {}
+
+    def fake_backfill(days=20, progress=None):
+        got["days"] = days
+        return {"asked": days, "days": days, "bars": days * 10, "dates": []}
+
+    with _patch(bhavcopy, "backfill", fake_backfill):
+        r = client.post("/api/eod/backfill", json={"days": 999})   # clamped to 120
+        assert r.status_code == 200 and r.get_json()["started"] is True
+        for _ in range(100):                            # let the daemon thread finish
+            if not webapp._eod_backfill["running"]:
+                break
+            _t.sleep(0.02)
+    assert got["days"] == 120                            # clamp applied in the route
+    assert webapp._eod_backfill["result"]["bars"] == 1200
+    assert webapp._eod_backfill["running"] is False
+    # A second POST while one is running is refused as busy (no new thread).
+    webapp._eod_backfill["running"] = True
+    try:
+        assert client.post("/api/eod/backfill", json={"days": 5}).get_json()["busy"] is True
+    finally:
+        webapp._eod_backfill["running"] = False
+
+
 # ---------------------------------------------------------------------------
 # logger endpoints
 # ---------------------------------------------------------------------------
