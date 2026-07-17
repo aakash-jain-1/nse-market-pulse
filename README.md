@@ -63,7 +63,7 @@ layers analytics on top:
 | 🧪 **Sim** | The multi-strategy forward-test + regime leaderboard + offline backtest (see [below](#strategy-sim-regimes--backtest)). |
 | 🎯 **F&O Sim** | The **same** forward-test as Sim, but a dedicated **parallel book that only trades F&O-eligible names** (ones you can actually take with futures/leverage). Same strategies, same live signals, same ₹2k/trade sizing — so you can compare F&O-only performance against the all-market book side by side. |
 | 🔎 **Scanner** | One ranked board combining volume spikes, money flow, momentum & OI buildup, with filters (direction, %chg, volume ×avg, value, OI signal, F&O-only). |
-| 🌐 **EOD Scan** | The **market-wide, off-hours** scanner: ranks the whole EOD bhavcopy universe (up to **~2400** cash names + F&O, not just the ~100–150 live hot lists) for swing setups — breakouts/breakdowns of the recent N-day high/low, gaps, unusual volume, trend vs 20/50-day MAs, NR7 squeezes. Works nights/weekends. Click **⬇ Backfill history** once to load recent daily bars. Prices are the last EOD close. |
+| 🌐 **EOD Scan** | The **market-wide, off-hours** scanner: ranks the whole EOD bhavcopy universe (up to **~2400** cash names + F&O, not just the ~100–150 live hot lists) for swing setups — breakouts/breakdowns of the recent N-day high/low, gaps, unusual volume, trend vs 20/50-day MAs, NR7 squeezes, and **high delivery% accumulation** (real buying vs intraday churn, with a "+Npp vs avg" spike hint). A **🐋 deals** toggle cross-references the latest **bulk/block deals** (institutional footprint) and flags rows a big player just traded. Works nights/weekends. Click **⬇ Backfill history** once to load recent daily bars (also merges delivery%). Prices are the last EOD close. |
 | ★ **Demand Score** | Composite ranking — stocks appearing across gainers, money-flow & volume spikes float to the top. |
 | **Volume Gainers** | Stocks trading far above their average volume. |
 | **F&O Open Interest** | OI spurts, classified long buildup / short buildup / short covering / long unwinding. |
@@ -243,7 +243,7 @@ flowchart TB
 
     subgraph API["app.py — routes"]
         direction TB
-        R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}<br/>/api/eod/{scan,backfill,status,price,quote,refresh}"]
+        R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}<br/>/api/eod/{scan,deals,backfill,status,price,quote,refresh}"]
         R2["/api/{recommendations,deepdive,quote,<br/>chart,optionchain,fno/universe}<br/>/api/eod/optionchain/&lt;sym&gt;[/summary]"]
         R3["/api/sim/{strategies,summary,daily,leaderboard,performance,<br/>backtest,backtest_daily,walkforward,strategy_of_day,regime,take,auto,mode,reset}"]
         R4["/api/paper/{portfolio,order,option_order,<br/>futures_order,reset}"]
@@ -254,8 +254,9 @@ flowchart TB
         direction TB
         NC["nse_client.py<br/>• warmed requests.Session (TTL 300s)<br/>• hot lists → normalized dicts<br/>• get_scanner / _build_idea / get_demand_score<br/>• get_price (symbol→LTP map)"]
         NQ["nse_quote.py<br/>• NextApi gateway<br/>• quote / depth / intraday chart<br/>• option chain + Black-Scholes Greeks"]
-        BC["bhavcopy.py<br/>• EOD UDiFF bhavcopy (static archive)<br/>• resilient price / lot fallback<br/>• ingest / backfill → eod_bars/eod_oi"]
-        ES["eod_scanner.py<br/>• full-market EOD/swing scan<br/>• breakouts/gaps/vol/MA/NR7<br/>• reads db.eod_bars (off-hours)"]
+        BC["bhavcopy.py<br/>• EOD UDiFF bhavcopy + delivery%<br/>• resilient price / lot fallback<br/>• ingest / backfill → eod_bars/eod_oi"]
+        DL["deals.py<br/>• bulk/block deals (nsearchives)<br/>• institutional footprint<br/>• by_symbol / recent / status"]
+        ES["eod_scanner.py<br/>• full-market EOD/swing scan<br/>• breakouts/gaps/vol/MA/NR7/delivery<br/>• bulk-deal xref · reads db.eod_bars"]
         EO["eod_options.py<br/>• EOD option chain (FO bhavcopy)<br/>• PCR / max-pain / OI walls<br/>• live-shape fallback (off-hours)"]
         ST["strategies.py<br/>• build_context() (shared bundle)<br/>• detect_regime() (+ India-VIX volState)<br/>• 17 generators"]
         SM["sim.py<br/>• per-strategy ledgers<br/>• take/update/summary<br/>• daily rollup + regime leaderboard"]
@@ -490,7 +491,8 @@ flowchart LR
     leaderboards, Strategy-of-the-Day and walk-forward become **statistically
     trustworthy** rather than a flattering read off a handful of liquid favourites.
     Liquidity floors (`minPrice`/`minValueCr`) keep the sample tradable; exits stay
-    daily-only and **Delivery% goes quiet** (the bhavcopy has no delivery column).
+    daily-only. **Delivery%** is merged into the EOD bars during backfill (from NSE's
+    `sec_bhavdata_full` file), so the delivery-accumulation strategy is live here too.
     The same `?source=eod` applies to `/api/sim/strategy_of_day` and `/walkforward`.
   - **Minute-accurate mode** ("minute-accurate" checkbox / `resolve=intrabar`):
     re-resolves each trade on **real 1-minute candles** (`intrabar.py`) so exits
@@ -748,7 +750,10 @@ python nse_demand.py losers     # top losers
 | `GET /api/depth?symbols=<csv>` | Batch order-book imbalance/spread stats (Scanner "⚖ Order-book scan"; capped, pooled) |
 | `GET /api/eod/status[?refresh=1]` | EOD bhavcopy freshness/coverage (date, #equities, #futures, cache age; no secrets) |
 | `GET /api/eod/price/<sym>` · `/api/eod/quote/<sym>` | Resilient EOD close / full EOD record for **any** listed symbol (works off-hours; static NSE archive) |
-| `POST /api/eod/refresh[{date}]` | Ingest a day's bhavcopy (whole cash market + F&O) into the `eod_bars`/`eod_oi` cache (broadens the daily-backtest universe) |
+| `POST /api/eod/refresh[{date}]` | Ingest a day's bhavcopy (whole cash market + F&O) into the `eod_bars`/`eod_oi` cache (broadens the daily-backtest universe; also merges delivery%) |
+| `GET /api/eod/scan?view=&limit=&minPrice=&minValueCr=&fno=1&deals=1` | Full-market EOD/swing scanner over `db.eod_bars` (`view=setups\|breakout\|breakdown\|gainers\|losers\|unusual\|squeeze\|value\|delivery`; `deals=1` cross-references bulk/block deals with a 🐋 badge) |
+| `GET /api/eod/deals?kind=bulk\|block&limit=` (+ `?status=1`) | Latest session's **bulk/block deals** (institutional footprint), market-wide + off-hours |
+| `GET·POST /api/eod/backfill[{days}]` | Load the last N sessions' bhavcopies (+ delivery%) into the local history cache; POST starts a background job, GET polls progress |
 | `GET /api/ohlc/<sym>?interval=<n>&type=<I\|D>&days=<n>` | Real OHLCV candles + volume (`charting.nseindia.com`) |
 | `GET /api/live/config` | Live feed status: provider (angel/dhan)? configured? connected? market-open? watchlist (never returns secrets) |
 | `POST /api/live/watch` | Set the subscribed symbol set + focus (`{symbols:[…], focus}`) |
@@ -780,8 +785,9 @@ nse-market-pulse/
 ├── app.py                  # Flask server + JSON API (thin routes) — port 5055
 ├── nse_client.py           # NSE session mgmt + hot lists + scanner + ideas (CORE)
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
-├── bhavcopy.py             # EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback + backfill
-├── eod_scanner.py          # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7) — off-hours
+├── bhavcopy.py             # EOD UDiFF bhavcopy ingest + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill
+├── deals.py                # Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status
+├── eod_scanner.py          # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours
 ├── eod_options.py          # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape
 ├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
 ├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
@@ -797,7 +803,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 530 unit tests, 26 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/eodscanner/eodoptions/db/app+routes/feeds/…)
+├── test_*.py               # 555 unit tests, 27 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/deals/eodscanner/eodoptions/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

@@ -323,6 +323,67 @@ def test_parse_fo_skips_blank_symbol_and_keeps_first_nearest():
 
 
 # ---------------------------------------------------------------------------
+# sec_bhavdata_full — delivery% parse / fetch / date url
+# ---------------------------------------------------------------------------
+# Real header carries a LEADING SPACE on every column after SYMBOL — replicate it
+# so a future strip() regression fails loudly here.
+_DELIV_HEADER = ("SYMBOL,SERIES, DATE1, PREV_CLOSE, OPEN_PRICE, HIGH_PRICE, "
+                 "LOW_PRICE, LAST_PRICE, CLOSE_PRICE, AVG_PRICE, TTL_TRD_QNTY, "
+                 "TURNOVER_LACS, NO_OF_TRADES, DELIV_QTY, DELIV_PER")
+
+
+def _deliv_row(sym, series, deliv_qty, deliv_per, date="15-Jul-2026"):
+    return (f"{sym},{series}, {date}, 9, 9, 11, 8, 10, 10, 10, 1000, "
+            f"1.0, 50, {deliv_qty}, {deliv_per}")
+
+
+def _deliv_csv(rows):
+    return "\n".join([_DELIV_HEADER, *rows]) + "\n"
+
+
+def test_deliv_url_formats_ddmmyyyy():
+    assert b.deliv_url(date(2026, 7, 5)).endswith("sec_bhavdata_full_05072026.csv")
+    assert b.deliv_url("2026-12-31").endswith("sec_bhavdata_full_31122026.csv")
+
+
+def test_parse_sec_delivery_basic_and_series_filter():
+    text = _deliv_csv([
+        _deliv_row("ACME", "EQ", "700", "70.0"),
+        _deliv_row("BONDX", "GB", "5", "-"),        # non-equity series → skipped
+        _deliv_row("BETA", "BE", "120", "40.5"),
+    ])
+    out = b.parse_sec_delivery(text)
+    assert set(out) == {"ACME", "BETA"}
+    assert out["ACME"]["delivPct"] == 70.0 and out["ACME"]["delivQty"] == 700.0
+    assert out["BETA"]["delivPct"] == 40.5
+
+
+def test_parse_sec_delivery_dash_pct_is_none_and_eq_wins():
+    text = _deliv_csv([
+        _deliv_row("ACME", "BE", "10", "12.0"),     # non-EQ first…
+        _deliv_row("ACME", "EQ", "700", "70.0"),    # …EQ must win
+        _deliv_row("NOCALC", "EQ", "-", "-"),       # dash → None, still kept
+    ])
+    out = b.parse_sec_delivery(text)
+    assert out["ACME"]["series"] == "EQ" and out["ACME"]["delivPct"] == 70.0
+    assert out["NOCALC"]["delivPct"] is None and out["NOCALC"]["delivQty"] is None
+
+
+def test_parse_sec_delivery_empty_text():
+    assert b.parse_sec_delivery("") == {}
+
+
+def test_fetch_sec_delivery_walks_back():
+    good = _deliv_csv([_deliv_row("ACME", "EQ", "700", "70.0")]).encode()
+    with _patch(b, "_download", lambda url: good if "15072026" in url else None):
+        d, dmap = b.fetch_sec_delivery(date=date(2026, 7, 16), walk=5)
+    assert d == "2026-07-15" and dmap["ACME"]["delivPct"] == 70.0
+    with _patch(b, "_download", lambda url: None):
+        d, dmap = b.fetch_sec_delivery(date=date(2026, 7, 16), walk=3)
+    assert d is None and dmap == {}
+
+
+# ---------------------------------------------------------------------------
 # _unzip / _download / fetch walk-back
 # ---------------------------------------------------------------------------
 def test_fetch_cm_walks_back_over_holiday():
@@ -564,17 +625,47 @@ def test_ingest_db_populates_bars_and_oi():
         assert len(oi) == 1 and oi[0]["oi"] == 900000.0 and oi[0]["spot"] == 10.0
 
 
+def test_ingest_db_merges_delivery_for_same_session_only():
+    cm = {"ACME": {"symbol": "ACME", "d": "2026-07-16", "close": 10.0, "prevClose": 9.0,
+                   "volume": 1000.0, "value": 10000.0},
+          "BETA": {"symbol": "BETA", "d": "2026-07-16", "close": 20.0, "prevClose": 19.0}}
+    fo = {"date": "2026-07-16", "lots": {}, "underlying": {}, "futures": {}}
+    dmap = {"ACME": {"delivPct": 72.0, "delivQty": 720.0}}   # BETA absent
+    with _temp_db() as db:
+        with _patch(b, "fetch_cm", lambda *a, **k: ("2026-07-16", cm)), \
+                _patch(b, "fetch_fo", lambda *a, **k: ("2026-07-16", fo)), \
+                _patch(b, "fetch_sec_delivery", lambda *a, **k: ("2026-07-16", dmap)):
+            res = b.ingest_db()
+        assert res["deliv"] == 1
+        assert db.eod_bars_get("ACME")[0]["delivPct"] == 72.0
+        assert db.eod_bars_get("BETA")[0]["delivPct"] is None
+
+
+def test_ingest_db_skips_delivery_from_a_different_day():
+    # Delivery file walked back to a PRIOR session must NOT be stamped onto today.
+    cm = {"ACME": {"symbol": "ACME", "d": "2026-07-16", "close": 10.0, "prevClose": 9.0}}
+    fo = {"date": "2026-07-16", "lots": {}, "underlying": {}, "futures": {}}
+    stale = {"ACME": {"delivPct": 99.0, "delivQty": 1.0}}
+    with _temp_db() as db:
+        with _patch(b, "fetch_cm", lambda *a, **k: ("2026-07-16", cm)), \
+                _patch(b, "fetch_fo", lambda *a, **k: ("2026-07-16", fo)), \
+                _patch(b, "fetch_sec_delivery", lambda *a, **k: ("2026-07-13", stale)):
+            res = b.ingest_db()
+        assert res["deliv"] == 0
+        assert db.eod_bars_get("ACME")[0]["delivPct"] is None
+
+
 # ---------------------------------------------------------------------------
 # backfill — many sessions, dedup, progress, clamp, busy
 # ---------------------------------------------------------------------------
 def test_backfill_counts_distinct_days_and_progress():
     # 5 calls: a holiday walks back onto 07-16 (dup), and one day is unpublished.
     results = [
-        {"cmDate": "2026-07-17", "bars": 2400, "oi": 200, "equities": 2405, "futures": 200},
-        {"cmDate": "2026-07-16", "bars": 2400, "oi": 200, "equities": 2400, "futures": 200},
-        {"cmDate": "2026-07-16", "bars": 2400, "oi": 200, "equities": 9999, "futures": 200},  # dup → skipped
-        {"cmDate": "2026-07-15", "bars": 2400, "oi": 200, "equities": 2400, "futures": 200},
-        {"cmDate": None, "bars": 0, "oi": 0, "equities": 0, "futures": 0},
+        {"cmDate": "2026-07-17", "bars": 2400, "oi": 200, "deliv": 2300, "equities": 2405, "futures": 200},
+        {"cmDate": "2026-07-16", "bars": 2400, "oi": 200, "deliv": 2300, "equities": 2400, "futures": 200},
+        {"cmDate": "2026-07-16", "bars": 2400, "oi": 200, "deliv": 9999, "equities": 9999, "futures": 200},  # dup → skipped
+        {"cmDate": "2026-07-15", "bars": 2400, "oi": 200, "deliv": 2300, "equities": 2400, "futures": 200},
+        {"cmDate": None, "bars": 0, "oi": 0, "deliv": 0, "equities": 0, "futures": 0},
     ]
     it = iter(results)
     progress = []
@@ -582,6 +673,7 @@ def test_backfill_counts_distinct_days_and_progress():
         got = b.backfill(days=5, progress=lambda g: progress.append(g["days"]))
     assert got["days"] == 3                          # distinct published sessions
     assert got["bars"] == 2400 * 3 and got["oi"] == 600
+    assert got["deliv"] == 2300 * 3                  # summed over counted days (dup skipped)
     assert got["dates"] == ["2026-07-15", "2026-07-16", "2026-07-17"]  # sorted
     assert got["equities"] == 2405                   # max over COUNTED days (dup's 9999 skipped)
     assert progress == [1, 2, 3]                     # one tick per distinct day

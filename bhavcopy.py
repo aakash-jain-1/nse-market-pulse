@@ -48,6 +48,9 @@ log = logging.getLogger("bhavcopy")
 ARCH = "https://nsearchives.nseindia.com"
 _CM_TMPL = ARCH + "/content/cm/BhavCopy_NSE_CM_0_0_0_{ymd}_F_0000.csv.zip"
 _FO_TMPL = ARCH + "/content/fo/BhavCopy_NSE_FO_0_0_0_{ymd}_F_0000.csv.zip"
+# Security-wise delivery position — a PLAIN (unzipped) CSV with per-symbol
+# delivery quantity/percentage that the UDiFF CM bhavcopy omits. Dated DDMMYYYY.
+_DELIV_TMPL = ARCH + "/products/content/sec_bhavdata_full_{dmy}.csv"
 
 # Cash-market series we treat as tradable equities (skip govt bonds/T-bills/ETF
 # oddities/SGBs etc.). EQ = rolling, BE/BZ = trade-for-trade/surveillance,
@@ -94,12 +97,25 @@ def _ymd(d):
     return d.strftime("%Y%m%d")
 
 
+def _dmy8(d):
+    """date | datetime | 'YYYY-MM-DD' → 'DDMMYYYY' for the delivery archive URL."""
+    if isinstance(d, str):
+        d = datetime.strptime(d[:10], "%Y-%m-%d").date()
+    elif isinstance(d, datetime):
+        d = d.date()
+    return d.strftime("%d%m%Y")
+
+
 def cm_url(d):
     return _CM_TMPL.format(ymd=_ymd(d))
 
 
 def fo_url(d):
     return _FO_TMPL.format(ymd=_ymd(d))
+
+
+def deliv_url(d):
+    return _DELIV_TMPL.format(dmy=_dmy8(d))
 
 
 def _today_ist():
@@ -275,6 +291,49 @@ def parse_fo_options(text, underlying=None):
     return {"date": date, "symbol": want, "expiries": sorted(by), "byExpiry": by}
 
 
+def parse_sec_delivery(text, series=EQUITY_SERIES):
+    """Parse an NSE `sec_bhavdata_full` (security-wise delivery position) CSV into
+    {SYMBOL: {delivQty, delivPct}} — the delivery data the UDiFF CM bhavcopy omits.
+
+    Two quirks handled: (1) the header cells carry a LEADING SPACE (` SERIES`,
+    ` DELIV_PER`, …) so we match on stripped/upper-cased names, and (2) `DELIV_PER`
+    is `-` for series NSE doesn't compute delivery on (bonds/ETFs) → None. Only the
+    equity `series` are kept; EQ wins when a symbol appears under several series.
+    High delivery% = real (non-intraday) buying — a conviction/accumulation signal.
+    """
+    out = {}
+    reader = csv.reader(io.StringIO(text))
+    try:
+        header = [h.strip().upper() for h in next(reader)]
+    except StopIteration:
+        return out
+    idx = {name: i for i, name in enumerate(header)}
+
+    def cell(row, name):
+        i = idx.get(name)
+        return row[i] if (i is not None and i < len(row)) else None
+
+    for row in reader:
+        if not row:
+            continue
+        srs = (cell(row, "SERIES") or "").strip().upper()
+        if series and srs not in series:
+            continue
+        sym = (cell(row, "SYMBOL") or "").strip().upper()
+        if not sym:
+            continue
+        if sym in out and out[sym]["series"] == "EQ" and srs != "EQ":
+            continue
+        out[sym] = {
+            "symbol": sym,
+            "series": srs,
+            "delivQty": _num(cell(row, "DELIV_QTY")),
+            "delivPct": _num(cell(row, "DELIV_PER")),
+            "date": (cell(row, "DATE1") or "").strip(),
+        }
+    return out
+
+
 # ---------------------------------------------------------------------------
 # network (best-effort; all failures degrade to None/empty)
 # ---------------------------------------------------------------------------
@@ -346,6 +405,24 @@ def fetch_fo_text(date=None, walk=7):
         if text:
             return d.strftime("%Y-%m-%d"), text
     return None, None
+
+
+def fetch_sec_delivery(date=None, walk=7):
+    """(date_str, {SYMBOL: {delivQty, delivPct, …}}) for the latest sec_bhavdata_full
+    delivery file at/ before `date`, with the same weekend/holiday walk-back as the
+    bhavcopy. It's a PLAIN CSV (not zipped). (None, {}) if none found."""
+    for d in _recent_trading_days(date, walk):
+        raw = _download(deliv_url(d))
+        if not raw:
+            continue
+        try:
+            parsed = parse_sec_delivery(raw.decode("utf-8", "replace"))
+        except Exception:
+            log.warning("bhavcopy delivery parse failed for %s", d, exc_info=True)
+            continue
+        if parsed:
+            return d.strftime("%Y-%m-%d"), parsed
+    return None, {}
 
 
 def latest(force=False):
@@ -438,17 +515,29 @@ def status(refresh=False):
 # ---------------------------------------------------------------------------
 def ingest_db(date=None):
     """Load a day's bhavcopy into the `eod_bars`/`eod_oi` cache (one CM bar and
-    one near-future OI row per symbol). Widens the daily backtester's universe to
+    one near-future OI row per symbol), layering in per-symbol **delivery%** from
+    the sec_bhavdata_full file (which the UDiFF CM omits) so the EOD scanner /
+    delivery strategy work market-wide. Widens the daily backtester's universe to
     the whole market without per-symbol NSE calls. Returns written-row counts."""
     import db
     cm_date, cm = fetch_cm(date)
     fo_date, fo = fetch_fo(date)
 
-    bars = 0
+    bars = deliv = 0
     if cm:
         rows = []
         for sym, r in cm.items():
             rows.append({**r, "symbol": sym, "iso": r.get("d"), "date": r.get("d")})
+        # Layer delivery% for the SAME session (aligned to cm_date, no walk-away).
+        if cm_date:
+            dd, dmap = fetch_sec_delivery(cm_date, walk=2)
+            if dmap and dd == cm_date:
+                for row in rows:
+                    dv = dmap.get(row["symbol"])
+                    if dv:
+                        row["delivPct"] = dv.get("delivPct")
+                        row["delivQty"] = dv.get("delivQty")
+                        deliv += 1
         bars = db.eod_bars_put_bulk(rows)
 
     oi = 0
@@ -463,7 +552,7 @@ def ingest_db(date=None):
             oi += db.eod_oi_put(sym, f.get("expiry"), [row])
 
     return {"cmDate": cm_date, "foDate": fo_date, "bars": bars, "oi": oi,
-            "equities": len(cm), "futures": len(fo.get("futures") or {})}
+            "deliv": deliv, "equities": len(cm), "futures": len(fo.get("futures") or {})}
 
 
 def backfill(days=20, progress=None):
@@ -476,7 +565,8 @@ def backfill(days=20, progress=None):
     hammer the archive at once. Returns a summary of what landed.
     """
     days = max(1, min(int(days), 250))
-    got = {"asked": days, "days": 0, "bars": 0, "oi": 0, "equities": 0, "dates": []}
+    got = {"asked": days, "days": 0, "bars": 0, "oi": 0, "deliv": 0,
+           "equities": 0, "dates": []}
     if not _backfill_lock.acquire(blocking=False):
         got["busy"] = True
         return got
@@ -493,6 +583,7 @@ def backfill(days=20, progress=None):
             got["days"] += 1
             got["bars"] += res.get("bars", 0)
             got["oi"] += res.get("oi", 0)
+            got["deliv"] += res.get("deliv", 0)
             got["equities"] = max(got["equities"], res.get("equities", 0))
             got["dates"].append(cm_date)
             if progress:

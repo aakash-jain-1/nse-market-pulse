@@ -46,7 +46,10 @@ _CR = 1e7              # ₹1 crore, for the min-turnover filter (value is in ru
 
 # Named scans. Each maps to a filter + a sort key over the computed features.
 VIEWS = ("setups", "breakout", "breakdown", "gainers", "losers",
-         "unusual", "squeeze", "value")
+         "unusual", "squeeze", "value", "delivery")
+
+# Delivery% at/above this = real (non-intraday) buying → accumulation conviction.
+_DELIV_HOT = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +112,10 @@ def _features(bars):
     avg_vol = _mean(prior_vols[-_VOL_WIN:]) if prior_vols else None
     vol_mult = (v / avg_vol) if (v and avg_vol) else None
 
+    deliv = last.get("delivPct")
+    prior_deliv = [b.get("delivPct") for b in prior if b.get("delivPct") is not None]
+    avg_deliv = _mean(prior_deliv[-_VOL_WIN:]) if prior_deliv else None
+
     rng = _rng(h, l)
     range_pct = (rng / close * 100.0) if rng is not None else None
     # NR7 = today's range is a genuine contraction: strictly narrower than each of
@@ -149,7 +156,10 @@ def _features(bars):
         "trend": trend,
         "rangePct": range_pct,
         "nr7": nr7,
-        "delivPct": last.get("delivPct"),
+        "delivPct": deliv,
+        "avgDelivPct": round(avg_deliv, 1) if avg_deliv is not None else None,
+        # delivery% jump vs its own trailing average → a spike in real buying
+        "delivVsAvg": round(deliv - avg_deliv, 1) if (deliv is not None and avg_deliv) else None,
     }
 
 
@@ -180,7 +190,13 @@ def _tags(f):
         tags.append("squeeze")
     dp = f.get("delivPct")
     if dp is not None and dp >= 65:
-        tags.append(f"deliv {dp:.0f}%")
+        tags.append(f"🚚 deliv {dp:.0f}%")
+    dv = f.get("delivVsAvg")
+    if dv is not None and dv >= 12:
+        tags.append(f"deliv +{dv:.0f}pp")     # delivery-% spike vs its average
+    for d in (f.get("deals") or []):
+        tags.append("🐋 bulk BUY" if d.get("side") == "BUY" else "🐋 bulk SELL")
+        break                                  # one badge is enough for the board
     return tags
 
 
@@ -207,6 +223,8 @@ def _score(f):
     dp = f.get("delivPct")
     if dp and dp >= 60:
         s += _clip((dp - 60) / 8, 0, 5)
+    if any(d.get("side") == "BUY" for d in (f.get("deals") or [])):
+        s += 8                                   # a big player bought today
     return round(s, 1)
 
 
@@ -232,6 +250,11 @@ _VIEW_SPEC = {
                   lambda f: _neg(f.get("rangePct"))),
     "value":     (lambda f: (f.get("value") or 0) > 0,
                   lambda f: f.get("value") or 0),
+    # Accumulation: high delivery% on an up day (real buying, not intraday churn).
+    # Rank by delivery% then the spike-vs-average so a genuine jump floats up.
+    "delivery":  (lambda f: f.get("delivPct") is not None and f["delivPct"] >= _DELIV_HOT
+                            and (f.get("pChange") or 0) >= 0,
+                  lambda f: (f.get("delivPct") or 0, f.get("delivVsAvg") or 0)),
 }
 
 
@@ -252,13 +275,31 @@ def _since(latest, lookback):
     return (d - timedelta(days=int(lookback * 1.6) + 10)).strftime("%Y-%m-%d")
 
 
+def _deal_map(enabled):
+    """{SYMBOL: [deal,…]} across the latest bulk + block deals, or {} when disabled
+    or unavailable (network/off). Cheap (tiny CSVs, cached 30 min in `deals`)."""
+    if not enabled:
+        return {}
+    try:
+        import deals
+        out = deals.by_symbol("bulk")
+        for sym, ds in deals.by_symbol("block").items():
+            out.setdefault(sym, []).extend(ds)
+        return out
+    except Exception:
+        log.warning("scan: deals cross-reference failed", exc_info=True)
+        return {}
+
+
 def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
-         fno_only=False, lookback=LOOKBACK):
+         fno_only=False, lookback=LOOKBACK, with_deals=False):
     """Rank the whole ingested EOD universe by `view`.
 
     Filters: close ≥ `min_price`, turnover ≥ `min_value_cr` crore, and (optional)
-    F&O names only. Returns {view, date, rows, universe, scanned, matched,
-    coverage, note}. Needs no network — everything comes from db.eod_bars."""
+    F&O names only. `with_deals` cross-references the latest bulk/block deals so
+    rows a big player traded get a 🐋 badge (+ score bonus). Returns {view, date,
+    rows, universe, scanned, matched, coverage, note}. Needs no network for the
+    bars (from db.eod_bars); deals add one tiny cached CSV fetch when enabled."""
     import db
     view = view if view in _VIEW_SPEC else "setups"
     try:
@@ -269,6 +310,7 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
 
     latest = db.eod_latest_date()
     grouped = db.eod_bars_all(since=_since(latest, lookback))
+    deal_map = _deal_map(with_deals)
 
     fno = None
     if fno_only:
@@ -295,6 +337,8 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
             continue
         if not keep_pred(f):
             continue
+        if deal_map.get(sym):
+            f["deals"] = deal_map[sym]
         f["score"] = _score(f)
         f["tags"] = _tags(f)
         rows.append(f)
@@ -310,8 +354,10 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
         "scanned": scanned,
         "matched": len(rows),
         "coverage": status(),
+        "withDeals": bool(deal_map),
         "filters": {"minPrice": min_price, "minValueCr": min_value_cr,
-                    "fnoOnly": bool(fno_only), "lookback": lookback},
+                    "fnoOnly": bool(fno_only), "lookback": lookback,
+                    "withDeals": bool(with_deals)},
         "note": None if grouped else (
             "No EOD history yet — click ‘Backfill history’ to load recent "
             "bhavcopies (whole-market daily bars)."),

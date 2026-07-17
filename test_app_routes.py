@@ -345,20 +345,44 @@ def test_eod_scan_arg_parsing():
     import eod_scanner
     seen = {}
 
-    def fake(view="setups", limit=50, min_price=20.0, min_value_cr=1.0, fno_only=False):
+    def fake(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
+             fno_only=False, with_deals=False):
         seen.update(view=view, limit=limit, min_price=min_price,
-                    min_value_cr=min_value_cr, fno_only=fno_only)
+                    min_value_cr=min_value_cr, fno_only=fno_only, with_deals=with_deals)
         return {"view": view, "rows": []}
 
     with _patch(eod_scanner, "scan", fake):
-        st, j = _json("/api/eod/scan?view=breakout&limit=25&minPrice=50&minValueCr=5&fno=1")
+        st, j = _json("/api/eod/scan?view=breakout&limit=25&minPrice=50&minValueCr=5&fno=1&deals=1")
         assert st == 200 and j["view"] == "breakout"
         assert seen == {"view": "breakout", "limit": 25, "min_price": 50.0,
-                        "min_value_cr": 5.0, "fno_only": True}
+                        "min_value_cr": 5.0, "fno_only": True, "with_deals": True}
         _json("/api/eod/scan")                        # defaults
         assert seen["view"] == "setups" and seen["limit"] == 50
         assert seen["min_price"] == 20.0 and seen["min_value_cr"] == 1.0
-        assert seen["fno_only"] is False
+        assert seen["fno_only"] is False and seen["with_deals"] is False
+
+
+def test_eod_deals_route():
+    import deals
+    seen = {}
+
+    def fake_recent(kind="bulk", limit=200):
+        seen.update(kind=kind, limit=limit)
+        return {"kind": kind, "date": "17-Jul-2026", "count": 1,
+                "deals": [{"symbol": "ACME", "side": "BUY"}]}
+
+    with _patches(
+        (deals, "recent", fake_recent),
+        (deals, "status", lambda refresh=False: {"bulk": {"count": 3}, "refresh": refresh}),
+    ):
+        st, j = _json("/api/eod/deals?kind=block&limit=10")
+        assert st == 200 and j["kind"] == "block" and j["count"] == 1
+        assert seen == {"kind": "block", "limit": 10}
+        _json("/api/eod/deals")                       # defaults
+        assert seen == {"kind": "bulk", "limit": 200}
+        # status branch
+        st, j = _json("/api/eod/deals?status=1&refresh=1")
+        assert st == 200 and j["bulk"]["count"] == 3 and j["refresh"] is True
 
 
 def test_eod_backfill_get_post_and_busy():

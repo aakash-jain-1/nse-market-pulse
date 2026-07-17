@@ -355,7 +355,22 @@ def api_eod_scan():
         min_price=fnum("minPrice", 20.0),
         min_value_cr=fnum("minValueCr", 1.0),
         fno_only=request.args.get("fno") == "1",
+        with_deals=request.args.get("deals") == "1",
     ))
+
+
+@app.route("/api/eod/deals")
+def api_eod_deals():
+    """Latest bulk/block deals (institutional footprint), market-wide and off-hours.
+    ?kind=bulk|block&limit=200 ; ?status=1 for freshness/coverage only."""
+    import deals
+    if request.args.get("status") == "1":
+        return jsonify(deals.status(refresh=request.args.get("refresh") == "1"))
+    try:
+        limit = int(request.args.get("limit") or 200)
+    except (TypeError, ValueError):
+        limit = 200
+    return jsonify(deals.recent(kind=request.args.get("kind", "bulk"), limit=limit))
 
 
 # Backfill runs off-thread (dozens of ~1-2s archive fetches); the UI polls the

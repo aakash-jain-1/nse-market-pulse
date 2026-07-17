@@ -80,8 +80,9 @@ python -m pytest -q      # full unit-test suite
 app.py               Flask routes (thin) + startup wiring + security guard/headers
 nse_client.py        NSE session mgmt + hot-list fetch/normalize (CORE) + _fetch micro-cache
 nse_quote.py         Per-stock quote/chart/DEPTH (NextApi) + OHLCV (charting) + get_book_stats
-bhavcopy.py          EOD UDiFF bhavcopy ingest (static archive) — resilient price/universe fallback + backfill(days)
-eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7) — off-hours, pure math
+bhavcopy.py          EOD UDiFF bhavcopy ingest (static archive) + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill(days)
+deals.py             Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status, off-hours
+eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure math
 eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours
 angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
@@ -98,7 +99,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 530 across 26 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/eodscanner/eodoptions/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 555 across 27 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/deals/eodscanner/eodoptions/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -127,7 +128,18 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   the live API is down) and a **lot-size fallback** in `get_lot_sizes()`.
   `ingest_db()` bulk-loads CM bars + FO OI into `eod_bars`/`eod_oi` to widen the
   daily-backtest universe to the whole market. Dependency-free (reimplements the
-  slice of `jugaad-data` we need).
+  slice of `jugaad-data` we need). The UDiFF CM file **omits delivery%**, so
+  `ingest_db()` also pulls the **`sec_bhavdata_full`** plain CSV (`parse_sec_delivery`/
+  `fetch_sec_delivery`) and merges per-symbol `delivPct`/`delivQty` **for the same
+  session only** (never stamps a walked-back day's delivery onto today) — re-activating
+  the delivery strategy and the scanner's accumulation view market-wide.
+- **Deals (`deals.py`)**: NSE publishes the latest session's **bulk & block deals**
+  (funds/HNIs/promoters — a legally-disclosed institutional footprint) as tiny plain
+  CSVs on nsearchives (`/content/equities/bulk.csv`, `block.csv`; block ships a
+  "NO RECORDS" sentinel on quiet days). `parse_deals()` is pure; fetch reuses
+  `bhavcopy._download` + a 30-min lock-guarded cache. `by_symbol()` powers a cheap
+  scanner cross-reference (🐋 badge + score bonus when `with_deals=1`); `recent()`/
+  `status()` back `/api/eod/deals`. Off-hours friendly.
 - **Data flow**: `nse_client`/`nse_quote` normalize NSE fields into stable keys
   (`symbol`, `ltp`, `pChange`, `volume`, ...). `app.py` (JSON API) + `nse_demand.py`
   (CLI) consume them; the frontend polls `/api/<view>` and renders client-side.
@@ -159,8 +171,10 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
 - **EOD**: `/api/eod/status[?refresh=1]` (bhavcopy freshness/coverage, no secrets),
   `/api/eod/price/<sym>`, `/api/eod/quote/<sym>`, `/api/eod/refresh` (POST → ingest
   the whole market into the EOD cache), **`/api/eod/scan?view=&limit=&minPrice=&
-  minValueCr=&fno=1`** (full-market swing scanner), **`/api/eod/backfill`** (POST
-  {days} starts a background history load; GET polls progress),
+  minValueCr=&fno=1&deals=1`** (full-market swing scanner; `view=delivery` for
+  accumulation, `deals=1` cross-references bulk/block deals), **`/api/eod/deals?kind=
+  bulk|block&limit=`** (+ `?status=1` for freshness), **`/api/eod/backfill`** (POST
+  {days} starts a background history load — now also merges delivery%; GET polls),
   **`/api/eod/optionchain/<sym>[?expiry]`** + **`/summary`** (resilient EOD option
   chain from the FO bhavcopy — PCR/max-pain/OI walls, off-hours).
 - Live: `/api/live/config`, `/api/live/watch` (POST), `/api/live/seed/<sym>`, SSE stream.
@@ -193,17 +207,19 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **530 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **555 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
   math), `test_ideas.py` + `test_ideas_journal.py`, `test_fetch_cache.py`,
   `test_client.py` + `test_client_fetchers.py` (normalizers + raw-payload
   parsers), `test_quote.py` + `test_quote_more.py`, `test_paper.py`,
-  `test_strategies.py`, `test_bhavcopy.py` (EOD UDiFF parsers + fetch walk-back +
-  price/lot fallback wiring), `test_app.py` (middleware) + `test_app_routes.py`
-  (every endpoint via the Flask test client), `test_db.py`, `test_logger.py`,
-  `test_feeds.py`, `test_book.py`, `test_notify.py`.
+  `test_strategies.py`, `test_bhavcopy.py` (EOD UDiFF + sec_bhavdata_full delivery
+  parsers + fetch walk-back + price/lot fallback + delivery-merge wiring),
+  `test_deals.py` (bulk/block parse incl. NO-RECORDS + cached fetch),
+  `test_eod_scanner.py` (incl. delivery view + deals xref), `test_app.py`
+  (middleware) + `test_app_routes.py` (every endpoint via the Flask test client),
+  `test_db.py`, `test_logger.py`, `test_feeds.py`, `test_book.py`, `test_notify.py`.
 - Coverage: `python -m coverage run -m pytest && coverage report -m --omit="test_*.py"`
   → **~73 % of source** (100 % pure math, `app.py` routes 86 %; the rest is
   startup/thread/websocket/SSE glue tested via stubs or left to integration).
@@ -268,8 +284,16 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   **same shape** as `nse_quote.get_option_chain`, so the existing ⛓ Option-Chain UI
   renders it unchanged; the loader now **auto-falls-back** to EOD when the live chain
   is empty/blocked, with a 🌐 EOD badge. `/api/eod/optionchain/<sym>[?expiry]` +
-  `/summary`. *Still open:* delivery% market-wide (UDiFF CM has no delivery column);
-  a futures rollover tracker.
+  `/summary`. *Still open:* a futures rollover tracker.
+- ✅ **Delivery% + bulk/block deals market-wide (`bhavcopy` delivery merge + `deals.py`)**
+  — the UDiFF CM bhavcopy omits delivery%, so `ingest_db()` now also ingests
+  **`sec_bhavdata_full`** and merges per-symbol `delivPct`/`delivQty` (same-session
+  only) into `eod_bars`. This **re-activates the delivery strategy** in the EOD
+  backtest (was 0 trades → now fires, regime-gated **+0.23R** on a real 23-session
+  run) and adds an **Accumulation (high delivery%)** scanner view + a Deliv% column
+  with a "+Npp vs avg" spike hint. `deals.py` fetches NSE **bulk/block deals** (the
+  institutional footprint) and the scanner cross-references them (`?deals=1`) to flag
+  🐋 rows a big player traded (+ score bonus). `/api/eod/deals`.
 - ✅ **Full-universe EOD backtest (`backtest_daily.py source="eod"`)** — runs the 9
   EOD-computable strategies over the WHOLE ingested bhavcopy universe read straight
   from SQLite (`db.eod_bars`/`db.eod_oi`) instead of a curated ~40–260-name NSE pull.
@@ -306,6 +330,44 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-07-17 — Delivery% + bulk/block deals market-wide (`bhavcopy` delivery merge + `deals.py`, suite 530 → 555)
+- **Why:** the previous full-universe EOD backtest found the **Delivery% strategy had
+  gone quiet (0 trades)** — because the UDiFF CM bhavcopy we ingest **omits the
+  delivery column** entirely, so `delivPct` was always null and the strategy never
+  fired. Delivery% (shares actually delivered vs traded) is the single best "real
+  accumulation vs intraday churn" tell, so this was a real gap, not a dead strategy.
+- **How (delivery):** NSE publishes a separate **`sec_bhavdata_full_DDMMYYYY.csv`**
+  (security-wise delivery position) as a plain CSV on nsearchives. Added pure
+  `parse_sec_delivery()` (handles the file's **leading-space headers** ` SERIES`/
+  ` DELIV_PER`, the `-` sentinel for series NSE doesn't compute delivery on, and
+  EQ-wins dedup) + `fetch_sec_delivery()` (walk-back over holidays). `ingest_db()`
+  now pulls it **for the CM session only** and merges `delivPct`/`delivQty` into the
+  ~3100 CM bars **before** the bulk write — and crucially **guards against stamping a
+  walked-back day's delivery onto a different session** (`dd == cm_date`). `eod_bars`
+  already had the columns, so no schema change. **Real e2e:** a 23-session backfill
+  merged delivery on **72,549/72,549 bars (100%)**; the delivery strategy now fires
+  **44 trades** (regime-gated **+0.23R**, was 0).
+- **How (deals):** new `deals.py` fetches NSE **bulk & block deals** (funds/HNIs/
+  promoters — a legally-disclosed institutional footprint) from the tiny nsearchives
+  CSVs. `parse_deals()` is pure (handles the block file's **"NO RECORDS"** sentinel);
+  fetch reuses `bhavcopy._download` + a 30-min cache. **Real feed:** 102 bulk deals
+  pulled live. The scanner cross-references them (`?deals=1` → `with_deals`) to flag
+  🐋 rows a big player traded (+8 score bonus on a bulk BUY).
+- **Scanner:** new **`delivery`** view (high delivery% on an up day = accumulation),
+  `avgDelivPct`/`delivVsAvg` features (delivery-spike-vs-own-average), 🚚 deliv / +Npp
+  / 🐋 bulk BUY|SELL tags, and a **Deliv%** column in the UI (green when hot, "+Npp"
+  spike hint). E2e delivery view surfaced BALAJIPHOS 100%/8.4× vol and SINTERCOM 98%
+  with a 🐋 bulk-SELL flag.
+- **API/UI:** `/api/eod/deals?kind=bulk|block&limit=` (+ `?status=1`); `/api/eod/scan`
+  gains `?deals=1`; backfill result now reports `deliv`. EOD-scan tab gets a
+  **Accumulation (high delivery%)** setup + a **🐋 deals** checkbox.
+- **Tests:** +25 (suite **530 → 555**, all green): `parse_sec_delivery` (series
+  filter / dash / EQ-wins / empty), `fetch_sec_delivery` walk-back, `ingest_db`
+  delivery-merge **and** different-day guard, backfill `deliv` aggregation; new
+  `test_deals.py` (parse incl. NO-RECORDS + bad numbers, cache TTL/force, recent/
+  by_symbol/status); scanner delivery feature/view/predicate + deals annotation +
+  score bonus; `/api/eod/deals` + scan `deals=1` route parsing. Lint + JS clean.
+
 ### 2026-07-17 — Full-universe EOD backtest (`backtest_daily.py source="eod"`, suite 523 → 530)
 - **Why:** the daily backtest (and everything downstream — regime/vol leaderboards,
   `strategy_of_day`, walk-forward) ran over a curated ~40–260-name universe pulled
@@ -331,6 +393,7 @@ a documented caveat).
   the Sim tab (Live NSE ↔ Full-market EOD); the curated-universe / refresh /
   minute-accurate controls grey out for EOD; the result shows a source badge, store
   coverage, and a "thin history — load more sessions" hint.
+  *(Update 2026-07-17: delivery% is no longer quiet — see the delivery/deals entry.)*
 - **Trade-offs (documented in UI + docstring):** Delivery% goes quiet (the UDiFF CM
   bhavcopy has no delivery column) and exits are daily-only.
 - **Verified end-to-end on the live archive:** backfilled 12 real sessions (~3300

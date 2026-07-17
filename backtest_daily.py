@@ -30,11 +30,12 @@ TWO DATA SOURCES (same strategy pipeline, chosen with `source=`):
   - "eod" — read the WHOLE ingested bhavcopy universe (~2400 cash names + ~210 F&O
     OI) straight from SQLite (`db.eod_bars` / `db.eod_oi`, populated by
     `bhavcopy.backfill`). No network, works nights/weekends, and the leaderboards
-    become statistically trustworthy (thousands of trades vs a few hundred). The
-    trade-off: no delivery% (bhavcopy omits it, so that one signal goes quiet) and
-    no minute re-resolution (daily exits only — the intrabar pass needs per-symbol
-    NSE fetches, which would defeat the off-hours premise). Run
-    `bhavcopy.backfill(days=N)` first to give it history.
+    become statistically trustworthy (thousands of trades vs a few hundred).
+    Delivery% is merged in during backfill (from `sec_bhavdata_full`), so the
+    delivery strategy is live here too. The trade-off: no minute re-resolution
+    (daily exits only — the intrabar pass needs per-symbol NSE fetches, which would
+    defeat the off-hours premise). Run `bhavcopy.backfill(days=N)` first to give it
+    history.
 """
 import concurrent.futures as cf
 import threading

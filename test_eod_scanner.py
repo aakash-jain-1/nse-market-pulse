@@ -158,6 +158,21 @@ def test_features_no_nr7_when_today_widest():
     assert es._features(bars)["nr7"] is False
 
 
+def test_features_delivery_average_and_spike():
+    # 20 sessions around 40% delivery, then a spike to 80% today.
+    bars = [_bar(d, 100.0, deliv=40.0) for d in _dates(20)]
+    bars.append(_bar("2026-07-16", 101.0, prev=100.0, deliv=80.0))
+    f = es._features(bars)
+    assert f["delivPct"] == 80.0
+    assert f["avgDelivPct"] == 40.0
+    assert f["delivVsAvg"] == 40.0             # +40 percentage points vs its average
+
+
+def test_features_delivery_none_when_absent():
+    f = es._features(_flat(10, 100.0))         # no delivPct on any bar
+    assert f["delivPct"] is None and f["avgDelivPct"] is None and f["delivVsAvg"] is None
+
+
 # ---------------------------------------------------------------------------
 # _tags / _score
 # ---------------------------------------------------------------------------
@@ -170,7 +185,7 @@ def test_tags_breakout_volume_trend_deliv():
     assert any("x vol" in t for t in tags)
     assert "uptrend" in tags
     assert any(t.startswith("gap +") for t in tags)
-    assert any(t.startswith("deliv") for t in tags)
+    assert any("deliv 80%" in t for t in tags)
 
 
 def test_tags_breakdown_and_gap_down():
@@ -179,6 +194,22 @@ def test_tags_breakdown_and_gap_down():
     tags = es._tags(es._features(bars))
     assert any("low" in t for t in tags)
     assert any(t.startswith("gap -") for t in tags)
+
+
+def test_tags_delivery_spike_and_deal_badge():
+    f = {"delivPct": 78.0, "delivVsAvg": 20.0,
+         "deals": [{"side": "BUY", "client": "BIG FUND"}]}
+    tags = es._tags(f)
+    assert any("deliv 78%" in t for t in tags)
+    assert any("+20pp" in t for t in tags)
+    assert any("bulk BUY" in t for t in tags)
+
+
+def test_score_deal_buy_bonus():
+    base = {"score": 0, "pChange": 1.0}
+    plain = es._score(dict(base))
+    with_buy = es._score({**base, "deals": [{"side": "BUY"}]})
+    assert with_buy >= plain + 8               # a bulk BUY lifts the score
 
 
 def test_tags_empty_on_calm_shorthistory():
@@ -204,9 +235,9 @@ def test_view_spec_covers_all_named_views():
 
 def test_view_predicates():
     up = {"pctFromHigh": 5.0, "pctFromLow": 12.0, "pChange": 3.0, "volMult": 2.5,
-          "nr7": False, "rangePct": 4.0, "value": 5e8, "score": 40}
+          "nr7": False, "rangePct": 4.0, "value": 5e8, "score": 40, "delivPct": 75.0}
     dn = {"pctFromHigh": -9.0, "pctFromLow": -1.0, "pChange": -4.0, "volMult": 0.8,
-          "nr7": True, "rangePct": 0.3, "value": 1e8, "score": 5}
+          "nr7": True, "rangePct": 0.3, "value": 1e8, "score": 5, "delivPct": 75.0}
     keep = {k: v[0] for k, v in es._VIEW_SPEC.items()}
     assert keep["breakout"](up) and not keep["breakout"](dn)
     assert keep["breakdown"](dn) and not keep["breakdown"](up)
@@ -215,6 +246,9 @@ def test_view_predicates():
     assert keep["unusual"](up) and not keep["unusual"](dn)
     assert keep["squeeze"](dn) and not keep["squeeze"](up)
     assert keep["value"](up) and keep["setups"](dn)  # setups keeps everything
+    # delivery: needs high delivery% AND a non-negative day
+    assert keep["delivery"](up) and not keep["delivery"](dn)  # dn is a down day
+    assert not keep["delivery"]({"delivPct": 30.0, "pChange": 2.0})  # too low deliv
 
 
 def test_since_floor():
@@ -295,6 +329,45 @@ def test_scan_min_price_and_limit_and_fno():
         assert es.scan(view="setups", min_price=20, limit=1)["matched"] == 1
         fno = es.scan(view="setups", min_price=20, fno_only=True)
         assert [x["symbol"] for x in fno["rows"]] == ["BREAK"]          # only F&O name
+
+
+def test_scan_delivery_view_keeps_high_delivery_up_days():
+    with _temp_db() as db:
+        # ACCUM: 20 quiet days ~40% deliv, then an up day at 78% delivery.
+        acc = [_bar(d, 100.0, prev=100.0, val=5e8, deliv=40.0) for d in _dates(20)]
+        acc.append(_bar("2026-07-15", 103.0, prev=100.0, val=5e8, deliv=78.0))
+        db.eod_bars_put("ACCUM", acc)
+        # CHURN: same move but low delivery% (intraday churn) → excluded.
+        ch = [_bar(d, 100.0, prev=100.0, val=5e8, deliv=25.0) for d in _dates(20)]
+        ch.append(_bar("2026-07-15", 103.0, prev=100.0, val=5e8, deliv=28.0))
+        db.eod_bars_put("CHURN", ch)
+        r = es.scan(view="delivery", min_price=20, min_value_cr=1.0)
+    assert [x["symbol"] for x in r["rows"]] == ["ACCUM"]
+    assert r["rows"][0]["delivPct"] == 78.0
+
+
+def test_scan_with_deals_annotates_and_boosts(monkeypatch=None):
+    import deals
+    with _temp_db() as db:
+        _seed_universe(db)
+        # Stub the deals cross-reference: a big player BOUGHT the DOWN name.
+        orig = deals.by_symbol
+        deals.by_symbol = lambda kind="bulk": (
+            {"DOWN": [{"side": "BUY", "client": "BIG FUND"}]} if kind == "bulk" else {})
+        try:
+            r = es.scan(view="setups", min_price=20, with_deals=True)
+        finally:
+            deals.by_symbol = orig
+    assert r["withDeals"] is True and r["filters"]["withDeals"] is True
+    down = next(x for x in r["rows"] if x["symbol"] == "DOWN")
+    assert down.get("deals") and any("bulk BUY" in t for t in down["tags"])
+
+
+def test_scan_with_deals_off_by_default():
+    with _temp_db() as db:
+        _seed_universe(db)
+        r = es.scan(view="setups", min_price=20)
+    assert r["withDeals"] is False and r["filters"]["withDeals"] is False
 
 
 def test_scan_unknown_view_falls_back_to_setups():
