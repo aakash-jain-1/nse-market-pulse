@@ -306,6 +306,28 @@ def test_sim_walkforward_arg_parsing():
     assert seen2["source"] == "eod" and seen2["universe_size"] == 2500
 
 
+def test_sim_portfolio_arg_parsing():
+    import portfolio_backtest as pbk
+    seen = {}
+    with _patch(pbk, "run", lambda **k: seen.update(k) or {"overall": {}}):
+        st, j = _json("/api/sim/portfolio?days=90&universe=30&capital=500000"
+                      "&maxPositions=8&riskPct=2&sizing=equal&maxAllocPct=20")
+    assert st == 200 and j == {"overall": {}}
+    assert seen["days"] == 90 and seen["universe_size"] == 30
+    assert seen["start_capital"] == 500000.0 and seen["max_positions"] == 8
+    assert seen["risk_pct"] == 2.0 and seen["sizing"] == "equal"
+    assert seen["max_alloc_pct"] == 20.0 and seen["source"] == "live"
+    assert seen["min_price"] is None                       # live source → no EOD floors
+
+    # EOD source: whole-universe default + liquidity floors pass through.
+    seen2 = {}
+    with _patch(pbk, "run", lambda **k: seen2.update(k) or {"overall": {}}):
+        _json("/api/sim/portfolio?source=eod&minPrice=40&minValueCr=5")
+    assert seen2["source"] == "eod" and seen2["universe_size"] == 2500
+    assert seen2["min_price"] == 40.0 and seen2["min_value_cr"] == 5.0
+    assert seen2["sizing"] == "risk"                        # default sizing
+
+
 # ---------------------------------------------------------------------------
 # EOD bhavcopy endpoints
 # ---------------------------------------------------------------------------

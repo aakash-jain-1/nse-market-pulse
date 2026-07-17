@@ -55,9 +55,11 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 595 unit tests across 28 suites (see below)
+├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, sizing) → equity curve + CAGR/DD/Sharpe
+├── test_*.py          # 612 unit tests across 29 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
+│   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
 │   ├── test_bhavcopy.py                             # EOD UDiFF + sec_bhavdata_full delivery parsers + walk-back + backfill (pacing/abort-on-block) + delivery-merge
 │   ├── test_deals.py                                # bulk/block deal parse (incl. NO-RECORDS) + cached fetch/recent/by_symbol/status + keep-cache-during-block
 │   ├── test_eod_scanner.py                          # full-market swing scanner: features/tags/score/views/scan/status + delivery view + deals xref
@@ -510,9 +512,28 @@ with no creds the app is unchanged.
   delivery + deals + OI buildup into one confirmation-stacked "tomorrow's watchlist";
   save→Ideas history + off-screen digest. Still open: a futures rollover tracker; a
   scheduled/auto EOD backfill + auto-digest after close.
+- ✅ *(done — see below)* portfolio-level backtest (`portfolio_backtest.py`) — replays the
+  daily-backtest trades through a real book (finite capital, concurrent-position cap,
+  risk/equal sizing) → equity curve + CAGR / max-DD / Sharpe. Still open: rank same-day
+  signals by conviction (needs bd trades to carry a score), and mark-to-market open
+  positions on daily closes (currently marked at cost).
 
 ## Done recently
 
+- **📈 Portfolio-level backtest (`portfolio_backtest.py`)** — the daily backtest reported
+  per-trade **R**; that answers "does this signal have an edge?" but not "could I have
+  traded it?". This replays the exact `backtest_daily` trades through a REAL book:
+  finite capital, a cap on **concurrent positions**, and position **sizing** (fixed-%
+  risk off current equity, or equal-weight) — so surplus same-day signals get **skipped**
+  when slots/capital run out. Output is an **equity curve** + CAGR / max-drawdown /
+  Sharpe / profit-factor / exposure, overall and **per strategy** (which one compounds
+  capital, not just which has the best R). `simulate()` is pure (fully unit-tested);
+  `run()` pulls trades from `bd.run(_collect=True)` (live or full EOD universe).
+  `/api/sim/portfolio` + a **📈 Portfolio backtest** button with an SVG equity curve.
+  Immediately useful finding on the EOD universe: **5,712 signals but only 74 taken**
+  with 5 slots — exactly the reality the per-trade view hides. Tests **+17** (suite
+  **595 → 612**); lint clean. Still marked at cost (no daily MTM) + neutral same-day
+  ordering (no conviction rank yet) — see roadmap.
 - **🛡️ Akamai/WAF block backoff + gentle backfill pacing** — the user hit
   **"Access Denied … edgesuite.net"** in Chrome: NSE's edge had temporarily blocked
   their IP, caused by our own bursty automated traffic (repeated full-history

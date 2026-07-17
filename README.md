@@ -246,7 +246,7 @@ flowchart TB
         direction TB
         R1["/api/{gainers,losers,volume,value,<br/>volgainers,oispurts,futures,scanner,demand}<br/>/api/eod/{scan,deals,conviction,backfill,status,price,quote,refresh}"]
         R2["/api/{recommendations,deepdive,quote,<br/>chart,optionchain,fno/universe}<br/>/api/eod/optionchain/&lt;sym&gt;[/summary]"]
-        R3["/api/sim/{strategies,summary,daily,leaderboard,performance,<br/>backtest,backtest_daily,walkforward,strategy_of_day,regime,take,auto,mode,reset}"]
+        R3["/api/sim/{strategies,summary,daily,leaderboard,performance,<br/>backtest,backtest_daily,walkforward,portfolio,strategy_of_day,regime,take,auto,mode,reset}"]
         R4["/api/paper/{portfolio,order,option_order,<br/>futures_order,reset}"]
         R5["/api/log/{status,snapshot,backtest,iv,download}<br/>/api/iv/rank"]
     end
@@ -536,6 +536,20 @@ flowchart LR
   *no-better-than-fixed*). **Anchored walk-forward folds** repeat the learn→test across
   the window so the verdict isn't one lucky cut. A strategy (or the leaderboard) is
   only trustworthy if its out-of-sample expectancy stays positive.
+- **📈 Portfolio-level backtest** (`/api/sim/portfolio`, `portfolio_backtest.py`, 📈
+  button): the daily backtest reports per-trade **R** — the edge of a *signal*. But you
+  can't take every signal: capital is finite and gets tied up in open positions, and you
+  realistically hold only *N* names at once. This **replays the exact daily-backtest
+  trades through a real book** — starting capital, a cap on **concurrent positions**, and
+  position **sizing** (fixed-% risk off current equity, or equal-weight, capped per name)
+  — so surplus same-day signals are **skipped** when slots/capital run out. You get an
+  **equity curve** plus **CAGR, max drawdown, Sharpe, profit factor, exposure**, overall
+  and **per strategy** (which one actually *compounds capital*, not just which has the
+  best R). Runs on the Live curated universe or the whole **`source=eod`** bhavcopy
+  history. It's brutally honest: on the full EOD universe a strategy set firing ~5,700
+  signals collapses to ~74 actual trades with 5 slots — the reality per-trade R hides.
+  *(Open positions are marked at cost, so the curve steps on exits; shorts model margin
+  as full notional.)*
 - **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
   entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
 - **🗄 EOD data resilience & full-market coverage** (`bhavcopy.py`, `/api/eod/*`,
@@ -774,6 +788,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/sim/walkforward[?days=120&universe=60&folds=4&maxHold=5]` | Walk-forward out-of-sample validation: per-strategy in-sample vs OOS expectancy + overfit verdict, plus the regime-adaptive-selection test (does it beat a fixed strategy OOS?) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
 | `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar&source=live\|eod&minPrice=&minValueCr=]` | Daily-bar historical backtest, 9 strategies; `source=live` (curated NSE, SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves on 1-min candles) or `source=eod` (whole bhavcopy universe from SQLite, off-hours, thousands of trades) |
+| `GET /api/sim/portfolio[?capital=&maxPositions=&sizing=risk\|equal&riskPct=&maxAllocPct=&days=&universe=&source=live\|eod&minPrice=&minValueCr=]` | Portfolio-level backtest: replays the daily-backtest trades through a real book (finite capital, concurrent-position cap, risk/equal sizing) → equity curve + CAGR / max-drawdown / Sharpe / profit-factor, overall + per strategy |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls (`take`/`reset` accept `{book}` — reset a specific book, or omit to wipe everything) |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
@@ -803,13 +818,14 @@ nse-market-pulse/
 ├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
 ├── backtest_daily.py        # Daily-bar historical backtest — source=live (curated NSE) or source=eod (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py          # Walk-forward out-of-sample / overfit validation (pure over trades)
+├── portfolio_backtest.py   # Portfolio-level backtest — replay bd trades through a real book (finite capital, max concurrent, sizing) → equity curve + CAGR/DD/Sharpe
 ├── notify.py               # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger
 ├── paper.py                # Paper-trading engine (equity + long/short options + long/short futures)
 ├── snapshot_logger.py      # Background logger (snapshots + IV + context + alerts) → SQLite
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 595 unit tests, 28 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/…)
+├── test_*.py               # 612 unit tests, 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

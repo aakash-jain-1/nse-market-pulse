@@ -528,6 +528,33 @@
         <label class="chk" title="Re-resolve exits on REAL 1-minute candles (true intraday path — which-came-first, wick timing) instead of the daily high/low. Heavier; limited to NSE's ~30-40 day minute retention, older trades fall back to daily."><input type="checkbox" id="simBtIntrabar"> minute-accurate</label>
         <button id="simBacktestDaily" style="padding:6px 12px">📅 Daily backtest (real EOD)</button>
         <button id="simWalkforward" style="padding:6px 12px" title="Out-of-sample check: split the daily history into train/test, learn the best-per-regime playbook on train, and measure whether each strategy's edge — and the regime-adaptive selection — actually survives out-of-sample. Separates a real edge from a curve-fit one.">🧪 Walk-forward (out-of-sample)</button>
+        <label title="Starting capital for the portfolio backtest">Capital ₹
+          <select id="pfCapital">
+            <option value="1000000" selected>10 L</option>
+            <option value="2500000">25 L</option>
+            <option value="5000000">50 L</option>
+            <option value="10000000">1 Cr</option>
+          </select>
+        </label>
+        <label title="How many positions you'll hold at once. When more signals fire than free slots, the extras are skipped — this is what makes the backtest realistic.">Max positions
+          <select id="pfMaxPos">
+            <option value="3">3</option>
+            <option value="5" selected>5</option>
+            <option value="8">8</option>
+            <option value="10">10</option>
+            <option value="15">15</option>
+          </select>
+        </label>
+        <label title="Position sizing. Risk %: size so a stop-out loses this % of current equity. Equal: split capital evenly across the max positions.">Sizing
+          <select id="pfSizing">
+            <option value="risk" selected>Risk %</option>
+            <option value="equal">Equal-weight</option>
+          </select>
+        </label>
+        <label title="Risk per trade as a % of current equity (only used for Risk % sizing)">Risk %
+          <input type="number" id="pfRisk" min="0.1" max="10" step="0.25" value="1" style="width:56px">
+        </label>
+        <button id="simPortfolio" style="padding:6px 12px" title="Replay the daily-backtest trades through a REAL book: finite capital, a cap on concurrent positions, and position sizing off current equity. Turns 'this signal has +0.3R' into an actual equity curve with CAGR, max drawdown and Sharpe — and shows which strategy compounds capital, not just which has the best per-trade R.">📈 Portfolio backtest</button>
         <button id="eodRefresh" style="padding:6px 12px" title="Download NSE's End-of-Day bhavcopy (whole cash market + full F&O universe) from the static archive and load it into the local history cache. Broadens the daily-backtest universe to every listed name and gives ANY symbol a resilient EOD price — works off-hours and even when NSE's live API is down.">⬇ Load EOD (whole market)</button>
         <span id="eodStatus" style="color:var(--muted);font-size:11px"></span>
         <span style="color:var(--muted);font-size:11px">Risk-based sizing: each trade risks ₹2,000 to its stop · target=right, stop=wrong · multi-day hold (≤3 sessions). Expectancy in R.</span>
@@ -2971,7 +2998,8 @@
         renderSimLeaderboard(lb) + renderSimDaily(daily) +
         `<div id="btResult">${window._btHtml || ""}</div>` +
         `<div id="btDailyResult">${window._btDailyHtml || ""}</div>` +
-        `<div id="btWfResult">${window._btWfHtml || ""}</div>`;
+        `<div id="btWfResult">${window._btWfHtml || ""}</div>` +
+        `<div id="btPortfolioResult">${window._btPfHtml || ""}</div>`;
     }
 
     // Backtest panels are injected on button click, but the Sim tab auto-refreshes
@@ -2982,6 +3010,94 @@
       window[globalKey] = html;
       const el = document.getElementById(id);
       if (el) el.innerHTML = html;
+    }
+
+    // Compact ₹ (Cr / L) for portfolio capital.
+    function pfMoney(n) {
+      if (n == null) return "—";
+      const a = Math.abs(n);
+      if (a >= 1e7) return "₹" + (n / 1e7).toLocaleString("en-IN", { maximumFractionDigits: 2 }) + " Cr";
+      if (a >= 1e5) return "₹" + (n / 1e5).toLocaleString("en-IN", { maximumFractionDigits: 2 }) + " L";
+      return "₹" + Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+    }
+
+    // A labelled area chart of the equity curve (bigger + clearer than a spark).
+    function pfEquitySvg(curve, start) {
+      if (!curve || curve.length < 2) return "";
+      const W = 680, H = 168, L = 8, R = 8, T = 12, B = 16;
+      const ys = curve.map(p => p.equity);
+      const ymin = Math.min(start, ...ys), ymax = Math.max(start, ...ys);
+      const yr = (ymax - ymin) || 1;
+      const px = i => L + (i / (curve.length - 1)) * (W - L - R);
+      const py = v => T + (1 - (v - ymin) / yr) * (H - T - B);
+      const line = curve.map((p, i) => px(i) + "," + py(p.equity)).join(" ");
+      const up = ys[ys.length - 1] >= start;
+      const col = up ? "var(--up, #16a34a)" : "var(--down, #dc2626)";
+      const area = `${px(0)},${py(ymin)} ${line} ${px(curve.length - 1)},${py(ymin)}`;
+      const base = py(start);
+      return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="display:block;margin:6px 0">
+        <polygon points="${area}" fill="${col}" opacity="0.10"></polygon>
+        <line x1="${L}" y1="${base}" x2="${W - R}" y2="${base}" stroke="var(--muted)" stroke-dasharray="4 4" opacity="0.55"></line>
+        <polyline points="${line}" fill="none" stroke="${col}" stroke-width="2"></polyline>
+      </svg>`;
+    }
+
+    // Portfolio-level backtest: an equity curve + book metrics (CAGR, max DD, Sharpe)
+    // and a per-strategy "which one actually compounds capital" table.
+    function renderPortfolio(pf) {
+      if (!pf) return "";
+      if (pf.message) return `<div class="chart-note" style="margin-top:8px">${pf.message}</div>`;
+      const o = pf.overall || {};
+      if (o.note && !(o.equityCurve || []).length)
+        return `<div class="chart-note" style="margin-top:8px">${o.note}</div>`;
+      const cls = v => v > 0 ? "pos" : (v < 0 ? "neg" : "");
+      const pc = v => v == null ? "—" : _sgn(v) + v + "%";
+      const p = o.params || {};
+      const eod = pf.source === "eod";
+      const srcBadge = `<span class="badge" style="background:${eod ? 'var(--accent);color:#04121f' : 'var(--border);color:var(--fg)'};font-weight:700;padding:2px 8px;border-radius:4px">${eod ? "🌐 FULL-MARKET EOD" : "📡 LIVE NSE"}</span>`;
+      const stat = (k, v, c) => `<div style="flex:1 0 96px;background:var(--card2,rgba(255,255,255,.03));border:1px solid var(--border);border-radius:6px;padding:6px 8px">
+        <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.04em">${k}</div>
+        <div class="${c || ''}" style="font-size:15px;font-weight:700;margin-top:2px">${v}</div></div>`;
+      const pf2 = o.profitFactor == null ? (o.winRate === 100 ? "∞" : "—") : o.profitFactor;
+      const metrics = [
+        stat("End capital", pfMoney(o.endCapital), cls(o.totalReturnPct)),
+        stat("Total return", pc(o.totalReturnPct), cls(o.totalReturnPct)),
+        stat("CAGR", pc(o.cagrPct), cls(o.cagrPct)),
+        stat("Max drawdown", o.maxDrawdownPct == null ? "—" : "-" + o.maxDrawdownPct + "%", o.maxDrawdownPct > 0 ? "neg" : ""),
+        stat("Sharpe", o.sharpe == null ? "—" : o.sharpe, (o.sharpe || 0) >= 1 ? "pos" : ""),
+        stat("Win rate", o.winRate == null ? "—" : o.winRate + "%"),
+        stat("Profit factor", pf2),
+        stat("Trades taken", fmtNum(o.tradesTaken)),
+        stat("Skipped slot/cap", `${fmtNum(o.tradesSkippedSlot)}/${fmtNum(o.tradesSkippedCapital)}`),
+        stat("Max concurrent", `${o.maxConcurrent}/${p.maxPositions}`),
+        stat("Avg exposure", o.avgExposurePct == null ? "—" : o.avgExposurePct + "%"),
+        stat("Avg hold", o.avgHoldDays == null ? "—" : o.avgHoldDays + "d"),
+      ].join("");
+      const psRows = (pf.perStrategy || []).map(r => `<tr>
+        <td class="sym">${r.name || r.id}</td>
+        <td class="${cls(r.totalReturnPct)}">${pc(r.totalReturnPct)}</td>
+        <td class="${cls(r.cagrPct)}">${r.cagrPct == null ? "—" : r.cagrPct + "%"}</td>
+        <td class="neg">${r.maxDrawdownPct == null ? "—" : "-" + r.maxDrawdownPct + "%"}</td>
+        <td>${r.sharpe == null ? "—" : r.sharpe}</td>
+        <td class="${(r.winRate || 0) >= 50 ? 'pos' : 'neg'}">${r.winRate == null ? "—" : r.winRate + "%"}</td>
+        <td>${fmtNum(r.tradesTaken)}</td>
+        <td>${pfMoney(r.endCapital)}</td></tr>`).join("");
+      const psTable = psRows ? `<div style="overflow-x:auto;margin-top:8px"><table class="tbl" style="min-width:560px">
+        <thead><tr><th>Strategy</th><th title="Total return over the window on this strategy alone">Return</th><th>CAGR</th><th title="Max peak-to-trough equity drop">Max DD</th><th>Sharpe</th><th>Win%</th><th title="Trades actually taken by the book">Taken</th><th>End cap</th></tr></thead>
+        <tbody>${psRows}</tbody></table></div>` : "";
+      const w = pf.window || {};
+      const uni = eod ? `${fmtNum(w.universeWithData)} names` : `top ${w.universeWithData || "?"}`;
+      const sizing = p.sizing === "equal" ? "equal-weight" : `${p.riskPct}% risk/trade`;
+      return `<div style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <b>📈 Portfolio backtest</b> ${srcBadge}
+          <span style="color:var(--muted);font-size:11px">${pfMoney(o.startCapital)} start · ≤${p.maxPositions} positions · ${sizing} · ${uni} · ${w.days || "?"} sessions · ${fmtNum(w.trades)} signals</span>
+        </div>
+        ${pfEquitySvg(o.equityCurve, o.startCapital)}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${metrics}</div>
+        ${psTable}
+        <div class="chart-note" style="margin-top:8px">Realistic book: capital is finite and tied up while a position is open, and only ${p.maxPositions} can be held at once — when more signals fire, the extras are <b>skipped</b> (that's the ${fmtNum(o.tradesSkippedSlot)} slot + ${fmtNum(o.tradesSkippedCapital)} capital skips above). Open positions are marked at cost, so the curve steps on exits. Same daily-bar caveats as the daily backtest; shorts model margin as full notional. Educational — not advice.</div>
+      </div>`;
     }
 
     // Daily-bar historical backtest over REAL NSE end-of-day data (last N days).
@@ -4786,6 +4902,29 @@
         setBtHtml("btWfResult", "_btWfHtml", `<div class="chart-note">Walk-forward validation failed: ${e}</div>`);
       }
       btn.disabled = false; btn.textContent = "🧪 Walk-forward (out-of-sample)";
+    };
+    document.getElementById("simPortfolio").onclick = async () => {
+      const btn = document.getElementById("simPortfolio");
+      const source = (document.getElementById("simBtSource") || {}).value || "live";
+      const uni = document.getElementById("simBtUniverse").value || "40";
+      const cap = document.getElementById("pfCapital").value || "1000000";
+      const maxPos = document.getElementById("pfMaxPos").value || "5";
+      const sizing = document.getElementById("pfSizing").value || "risk";
+      const risk = document.getElementById("pfRisk").value || "1";
+      btn.disabled = true; btn.textContent = "⏳ Simulating the book…";
+      const q = `capital=${cap}&maxPositions=${maxPos}&sizing=${sizing}&riskPct=${risk}`;
+      const url = source === "eod"
+        ? `/api/sim/portfolio?days=90&source=eod&${q}`
+        : `/api/sim/portfolio?days=90&universe=${uni}&${q}`;
+      const scope = source === "eod" ? "the whole ingested bhavcopy universe (~2400 names)" : "a curated NSE universe";
+      setBtHtml("btPortfolioResult", "_btPfHtml", `<div class="loading" style="margin-top:12px">Running a 90-session daily backtest over ${scope}, then replaying every trade through a real book — finite capital (₹${(+cap).toLocaleString("en-IN")}), at most ${maxPos} concurrent positions, ${sizing === "equal" ? "equal-weight" : risk + "% risk"} sizing — to build the equity curve. ${source === "eod" ? "Reads the local EOD cache (load history first with ⬇ Load EOD)." : "Instant if cached, else ~1-3 min cold."} (The dashboard keeps refreshing meanwhile.)</div>`);
+      try {
+        const pf = await fetch(url).then(r => r.json());
+        setBtHtml("btPortfolioResult", "_btPfHtml", renderPortfolio(pf));
+      } catch (e) {
+        setBtHtml("btPortfolioResult", "_btPfHtml", `<div class="chart-note">Portfolio backtest failed: ${e}</div>`);
+      }
+      btn.disabled = false; btn.textContent = "📈 Portfolio backtest";
     };
     const renderEodStatus = (s) => {
       const el = document.getElementById("eodStatus");

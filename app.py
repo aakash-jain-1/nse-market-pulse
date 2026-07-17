@@ -750,6 +750,40 @@ def api_sim_walkforward():
     ))
 
 
+@app.route("/api/sim/portfolio")
+def api_sim_portfolio():
+    """Portfolio-level backtest: replay the daily-backtest trades through a REAL book
+    (finite capital, a cap on concurrent positions, risk/equal sizing) to get an
+    equity curve + CAGR / max-drawdown / Sharpe — not just per-trade R. `source=eod`
+    runs the whole ingested bhavcopy universe (off-hours)."""
+    import portfolio_backtest as pbk
+    import backtest_daily as btd
+    source = "eod" if request.args.get("source") == "eod" else "live"
+    default_uni = 2500 if source == "eod" else 40
+
+    def fnum(name, default):
+        v = request.args.get(name)
+        try:
+            return float(v) if v not in (None, "") else default
+        except ValueError:
+            return default
+
+    return jsonify(pbk.run(
+        days=int(request.args.get("days", 90)),
+        universe_size=int(request.args.get("universe", default_uni)),
+        source=source,
+        start_capital=fnum("capital", 1_000_000.0),
+        max_positions=int(request.args.get("maxPositions", 5)),
+        risk_pct=fnum("riskPct", 1.0),
+        sizing="equal" if request.args.get("sizing") == "equal" else "risk",
+        max_alloc_pct=fnum("maxAllocPct", 25.0),
+        max_hold=int(request.args.get("maxHold", 5)),
+        per_strategy=request.args.get("perStrategy") != "0",
+        min_price=fnum("minPrice", btd.EOD_MIN_PRICE) if source == "eod" else None,
+        min_value_cr=fnum("minValueCr", btd.EOD_MIN_VALUE_CR) if source == "eod" else None,
+    ))
+
+
 @app.route("/api/sim/take", methods=["POST"])
 def api_sim_take():
     import sim

@@ -95,12 +95,13 @@ intrabar.py          Minute-candle trade resolver (target/stop/MFE/MAE) + resolv
 backtest_strategies.py  Offline backtester: replays archived context, resolves on OHLCV
 backtest_daily.py    Daily-bar historical backtest — source="live" (curated NSE) OR "eod" (whole bhavcopy universe from SQLite, off-hours)
 walkforward.py       Walk-forward out-of-sample / overfit validation (pure over trades)
+portfolio_backtest.py Portfolio-level backtest — replay bd trades through a real book (finite capital, max concurrent, sizing) → equity curve + CAGR/DD/Sharpe
 db.py                SQLite store (snapshots/IV/context/sim_trades/ideas/alert_log/EOD/min_bars)
 snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQLite
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 595 across 28 suites (client/quote/paper/strategies/sim/backtests/walkforward/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 612 across 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -243,7 +244,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **595 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **612 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -349,8 +350,14 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   `_load_eod` share the whole analysis pipeline; `?source=eod` (+ `minPrice`/
   `minValueCr` liquidity floors) on `/api/sim/backtest_daily|strategy_of_day|
   walkforward`; Sim-tab **Backtest source** selector (Live NSE ↔ Full-market EOD).
-  *Trade-offs:* Delivery% goes quiet (bhavcopy omits it) and minute re-resolution is
-  forced off (needs per-symbol NSE fetches). *Still open:* a scheduled/auto backfill.
+  *Trade-offs:* minute re-resolution is forced off (needs per-symbol NSE fetches).
+  *Still open:* a scheduled/auto backfill.
+- ✅ **Portfolio-level backtest (`portfolio_backtest.py`)** — replays the daily-backtest
+  trades through a REAL book (finite capital, concurrent-position cap, risk/equal
+  sizing) → equity curve + CAGR / max-DD / Sharpe / profit-factor, overall + per
+  strategy. Turns per-trade R into "could I actually have traded this?". Pure
+  `simulate()`; `run()` sources trades from `bd.run(_collect=True)`. *Still open:*
+  conviction-ranked same-day selection + daily mark-to-market (currently cost-basis).
 
 **Open (older roadmap, in AGENTS.md):**
 - Route paper-trading fills / `get_price` through the broker feed; extend Live tab
@@ -374,6 +381,37 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Portfolio-level backtest (`portfolio_backtest.py`, suite 595 → 612)
+- **Why:** `backtest_daily` reports per-trade **expectancy in R** — great for "does this
+  signal have an edge?", useless for "could I have traded it?". It implicitly assumes
+  infinite capital and that every signal is taken. Real trading has a **concurrent-
+  position cap** and **finite capital tied up** in open positions.
+- **What:** `simulate(trades, …)` (PURE) replays the exact `bd.run(_collect=True)` trades
+  through a book: walks date-by-date, closes exits first (frees capital), then opens the
+  day's signals in a look-ahead-free order while **slots + cash** allow. Sizing: `risk`
+  (lose ~`riskPct`% of equity at the stop) or `equal` (equity / maxPositions), capped by
+  `maxAllocPct` + available cash. Opening reserves `qty×entry`; closing returns
+  `reserve + pnl` (shorts model margin as full notional). Open positions marked **at
+  cost** (curve steps on exits). Metrics: end capital, total return, **CAGR**, **max
+  drawdown**, **Sharpe** (daily rets ×√252), win%, profit-factor, exposure, max
+  concurrent, trades taken vs **skipped (slot/capital)**.
+- **`run()`** (impure): pulls trades from `bd.run` (live or full EOD universe), simulates
+  overall + **per strategy** (ranked by total return → which one actually compounds).
+- **API/UI:** `/api/sim/portfolio` (`capital`/`maxPositions`/`riskPct`/`sizing`/`source`/
+  `days`/`universe`/`minPrice`/`minValueCr`) + a **📈 Portfolio backtest** button with an
+  SVG equity curve, a metric grid and a per-strategy table in the Sim tab.
+- **Finding (EOD, 209 names, 90 sessions):** 5,712 raw signals but only **74 taken** with
+  5 slots (5,637 slot-skipped) → −2.5%, CAGR −9.9%, Sharpe −0.98; `squeeze` the only
+  positive strategy (+2.4%). Exactly the reality the per-trade R view hides — and strong
+  motivation for conviction-ranked selection next.
+- **Gotcha fixed:** never emit `float('inf')` for profit-factor (Flask would serialise the
+  invalid `Infinity` JSON token) — return `None` when there are no losing trades; UI shows
+  ∞ when win-rate is 100%.
+- **Tests:** +17 (suite **595 → 612**): `test_portfolio_backtest.py` (16, pure — usable
+  filter, direction-aware pnl/move, drawdown/Sharpe, risk/equal sizing + caps, single
+  winner/loser compounding, slot + capital gating, shorts, capital-frees-for-reuse,
+  rank_key, `run()` wiring + no-trades) + 1 route arg-parsing test. Lint clean.
 
 ### 2026-07-17 — Akamai/WAF block backoff + gentle backfill pacing (suite 578 → 595)
 - **Why:** the user hit **"Access Denied … edgesuite.net Reference #…"** in Chrome —
