@@ -862,6 +862,72 @@ def peek_regime_leaderboard():
     return None
 
 
+# ----------------------------------------------------------------------------
+# Walk-forward robustness overlay. The regime leaderboard's "best" edge is
+# IN-SAMPLE, so it can be curve-fit. We overlay the walk-forward verdict (does the
+# edge survive OUT-OF-SAMPLE?) so strategy-of-the-day / the adaptive playbook can
+# PREFER robust strategies and skip ones flagged overfit. Cached like the
+# leaderboard (heavy-ish, recomputed <=1/6h); `peek` never computes (hot path).
+# ----------------------------------------------------------------------------
+_WF_TTL_S = 6 * 3600
+_wf_cache = {"key": None, "ts": 0.0, "data": None}
+_wf_lock = threading.Lock()
+
+# Verdicts (walkforward._verdict) whose out-of-sample edge we DON'T trust.
+UNTRUSTED_VERDICTS = frozenset({"overfit", "no-edge"})
+
+
+def cached_walkforward(days=120, universe_size=60, resolve="daily"):
+    """Memoised walk-forward report (recomputed <=1/6h). Lazy import to dodge the
+    walkforward↔backtest_daily cycle; serialised through the shared run lock."""
+    key = (int(days), int(universe_size), resolve)
+    c = _wf_cache
+    if c["key"] == key and c["data"] and (time.time() - c["ts"]) < _WF_TTL_S:
+        return c["data"]
+    with _wf_lock:
+        if c["key"] == key and c["data"] and (time.time() - c["ts"]) < _WF_TTL_S:
+            return c["data"]
+        import walkforward as wf
+        data = wf.run(days=days, universe_size=universe_size, resolve=resolve)
+        _wf_cache.update(key=key, ts=time.time(), data=data)
+        return data
+
+
+def peek_walkforward():
+    """Return the memoised walk-forward report only if fresh — never computes.
+    For the per-minute idea hot path so it can't block on a cold backtest."""
+    c = _wf_cache
+    if c["data"] and (time.time() - c["ts"]) < _WF_TTL_S:
+        return c["data"]
+    return None
+
+
+def robustness_map(wf_data):
+    """{strategy_id: verdict} from a walk-forward report's holdout perStrategy rows
+    (robust / decaying / improving / overfit / no-edge / insufficient). {} if the
+    report is missing or couldn't run (thin history)."""
+    if not wf_data or not wf_data.get("ok"):
+        return {}
+    return {r["id"]: r.get("verdict") for r in wf_data.get("perStrategy", [])
+            if r.get("id")}
+
+
+def _prefer_robust(ranked, robustness):
+    """From regime candidates sorted by IN-SAMPLE expectancy (desc), pick the first
+    whose walk-forward verdict isn't untrusted (overfit/no-edge). Returns
+    (chosen, skipped): `chosen` is the robust pick (or the raw top if none pass /
+    no walk-forward yet); `skipped` is the higher in-sample pick we passed over
+    because it was flagged overfit, else None."""
+    if not ranked:
+        return None, None
+    if not robustness:
+        return ranked[0], None                 # no walk-forward overlay yet
+    for i, cand in enumerate(ranked):
+        if robustness.get(cand["id"]) not in UNTRUSTED_VERDICTS:
+            return cand, (ranked[0] if i > 0 else None)
+    return ranked[0], None                      # everything is untrusted — keep top
+
+
 def strategy_of_day(days=60, universe_size=60, min_closed=5):
     """Today's live regime + the strategy with the best historical expectancy on
     that regime. Falls back to the a-priori regimeFit design when history is thin."""
@@ -893,12 +959,37 @@ def strategy_of_day(days=60, universe_size=60, min_closed=5):
                 })
         ranked.sort(key=lambda x: x["expectancyR"], reverse=True)
 
+    # Walk-forward robustness overlay: annotate every candidate + prefer a robust
+    # pick over a higher-but-overfit in-sample edge.
+    robustness, wf_meta, skipped = {}, None, None
     if ranked:
-        top = ranked[0]
-        pick = {**top,
-                "reason": (f"Best historical edge on {label} days: "
-                           f"{top['expectancyR']:+.2f}R/trade, {top['winRate']}% win "
-                           f"over {top['closed']} trades.")}
+        try:
+            wf_data = cached_walkforward()
+            robustness = robustness_map(wf_data)
+            if wf_data and wf_data.get("ok"):
+                wf_meta = {"ok": True, "trainCut": wf_data.get("trainCut"),
+                           "testN": wf_data.get("testN"), "days": wf_data.get("days")}
+            elif wf_data:
+                wf_meta = {"ok": False, "reason": wf_data.get("reason")}
+        except Exception:
+            robustness = {}
+        for cand in ranked:
+            cand["robustness"] = robustness.get(cand["id"])
+
+    if ranked:
+        top, skipped = _prefer_robust(ranked, robustness)
+        rob = top.get("robustness")
+        reason = (f"Best {'robust ' if rob == 'robust' else ''}edge on {label} days: "
+                  f"{top['expectancyR']:+.2f}R/trade, {top['winRate']}% win "
+                  f"over {top['closed']} trades.")
+        if skipped:
+            reason += (f" Skipped {skipped['name']} ({skipped['expectancyR']:+.2f}R "
+                       f"in-sample) — flagged {skipped.get('robustness')} out-of-sample.")
+        elif rob in UNTRUSTED_VERDICTS:
+            reason += f" ⚠ walk-forward: {rob} (edge did not survive out-of-sample)."
+        elif rob:
+            reason += f" Walk-forward: {rob}."
+        pick = {**top, "reason": reason}
         basis = "history"
     else:
         fit = [s for s in STRATS if label in _regime_fit(s["id"])]
@@ -917,6 +1008,8 @@ def strategy_of_day(days=60, universe_size=60, min_closed=5):
         "basis": basis,
         "pick": pick,
         "ranked": ranked,
+        "walkForward": wf_meta,
+        "skippedOverfit": skipped,
         "sample": {"days": lb_data.get("days"),
                    "universeWithData": lb_data.get("universeWithData"),
                    "range": lb_data.get("range"),

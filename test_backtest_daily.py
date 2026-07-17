@@ -274,6 +274,12 @@ def test_scorecard_daily():
 # ---------------------------------------------------------------------------
 # strategy_of_day — live regime + leaderboard both stubbed
 # ---------------------------------------------------------------------------
+def _wf_report(**verdicts):
+    """Minimal walk-forward report: {strategy_id: verdict} → perStrategy rows."""
+    return {"ok": True, "trainCut": "2026-06-01", "testN": 40, "days": 120,
+            "perStrategy": [{"id": sid, "verdict": v} for sid, v in verdicts.items()]}
+
+
 def test_strategy_of_day_history_pick():
     fake_lb = {"regimeLeaderboard": {"order": ["momentum", "meanrev"], "rows": [
         {"regime": "Trend-Up", "best": "momentum", "cells": {
@@ -281,10 +287,30 @@ def test_strategy_of_day_history_pick():
             "meanrev": None}}]},
         "regimeDist": {"Trend-Up": 12}, "days": 60, "range": None, "universeWithData": 40}
     with _patch(bd.sim, "current_regime", lambda: {"label": "Trend-Up"}), \
-         _patch(bd, "cached_regime_leaderboard", lambda **k: fake_lb):
+         _patch(bd, "cached_regime_leaderboard", lambda **k: fake_lb), \
+         _patch(bd, "cached_walkforward", lambda **k: _wf_report(momentum="robust")):
         out = bd.strategy_of_day()
     assert out["basis"] == "history"
     assert out["pick"]["id"] == "momentum" and out["pick"]["closed"] == 8
+    assert out["pick"]["robustness"] == "robust"
+    assert out["walkForward"]["ok"] is True and out["skippedOverfit"] is None
+
+
+def test_strategy_of_day_prefers_robust_over_overfit():
+    # momentum has the higher in-sample edge but is OVERFIT; meanrev is robust →
+    # the pick should skip momentum and take meanrev, recording skippedOverfit.
+    fake_lb = {"regimeLeaderboard": {"order": ["momentum", "meanrev"], "rows": [
+        {"regime": "Trend-Up", "best": "momentum", "cells": {
+            "momentum": {"closed": 10, "winRate": 60.0, "avgPnlPct": 2.0, "expectancyR": 1.2},
+            "meanrev": {"closed": 9, "winRate": 55.0, "avgPnlPct": 1.4, "expectancyR": 0.6}}}]},
+        "regimeDist": {"Trend-Up": 12}, "days": 60, "range": None, "universeWithData": 40}
+    with _patch(bd.sim, "current_regime", lambda: {"label": "Trend-Up"}), \
+         _patch(bd, "cached_regime_leaderboard", lambda **k: fake_lb), \
+         _patch(bd, "cached_walkforward",
+                lambda **k: _wf_report(momentum="overfit", meanrev="robust")):
+        out = bd.strategy_of_day()
+    assert out["pick"]["id"] == "meanrev" and out["pick"]["robustness"] == "robust"
+    assert out["skippedOverfit"]["id"] == "momentum"
 
 
 def test_strategy_of_day_fit_fallback():
@@ -294,6 +320,33 @@ def test_strategy_of_day_fit_fallback():
          _patch(bd, "cached_regime_leaderboard", lambda **k: empty):
         out = bd.strategy_of_day()
     assert out["basis"] == "fit" and out["pick"]["fits"] is True
+
+
+# ---------------------------------------------------------------------------
+# walk-forward robustness overlay helpers
+# ---------------------------------------------------------------------------
+def test_robustness_map():
+    assert bd.robustness_map(_wf_report(a="robust", b="overfit")) == {"a": "robust", "b": "overfit"}
+    assert bd.robustness_map({"ok": False}) == {}
+    assert bd.robustness_map(None) == {}
+
+
+def test_prefer_robust_skips_overfit():
+    ranked = [{"id": "a", "expectancyR": 1.0}, {"id": "b", "expectancyR": 0.5}]
+    chosen, skipped = bd._prefer_robust(ranked, {"a": "overfit", "b": "robust"})
+    assert chosen["id"] == "b" and skipped["id"] == "a"
+
+
+def test_prefer_robust_no_overlay_keeps_top():
+    ranked = [{"id": "a", "expectancyR": 1.0}, {"id": "b", "expectancyR": 0.5}]
+    chosen, skipped = bd._prefer_robust(ranked, {})     # no walk-forward yet
+    assert chosen["id"] == "a" and skipped is None
+
+
+def test_prefer_robust_all_untrusted_keeps_top():
+    ranked = [{"id": "a", "expectancyR": 1.0}, {"id": "b", "expectancyR": 0.5}]
+    chosen, skipped = bd._prefer_robust(ranked, {"a": "overfit", "b": "no-edge"})
+    assert chosen["id"] == "a" and skipped is None      # nothing trusted → keep top
 
 
 def _main():

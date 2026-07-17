@@ -2454,6 +2454,18 @@
     // best expectancy on that kind of day across the last ~60 sessions of real
     // NSE history (the daily-backtest leaderboard). Richer evidence than the live
     // forward-test ledger, which is sparse early on.
+    // Walk-forward out-of-sample verdict badge (does the edge survive unseen data?).
+    function _wfBadge(v) {
+      if (!v) return "";
+      const m = {
+        robust: ["\u2713 robust", "var(--pos)"], improving: ["\u2191 improving", "#5ea4ff"],
+        decaying: ["\u2193 decaying", "#e0a500"], overfit: ["\u26a0 overfit", "var(--neg)"],
+        "no-edge": ["no edge", "var(--muted)"], insufficient: ["unvalidated", "var(--muted)"],
+      };
+      const [lab, col] = m[v] || [v, "var(--muted)"];
+      return `<span title="Walk-forward out-of-sample verdict" style="display:inline-block;padding:1px 7px;border-radius:10px;border:1px solid ${col};color:${col};font-size:10.5px;font-weight:700;margin-left:6px;vertical-align:middle">WF: ${lab}</span>`;
+    }
+
     function renderStrategyOfDay(sod) {
       if (!sod || !sod.regime || !sod.regime.label) return "";
       const rg = sod.regime, p = sod.pick, smp = sod.sample || {};
@@ -2467,8 +2479,12 @@
         const chips = (sod.ranked || []).slice(1, 3).map(r =>
           `<span style="display:inline-block;padding:1px 7px;border-radius:10px;background:var(--chip,#1c2333);font-size:11px;margin-right:5px" class="${(r.expectancyR||0)>=0?'pos':'neg'}">${r.name.split(" ")[0]} ${_sgn(r.expectancyR)}${r.expectancyR}R</span>`).join("");
         const warn = p.fits ? "" : ` <span style="color:var(--warn,#e0a500)">(⚠ outside its designed regime — this window just happened to favour it)</span>`;
-        body = `<div class="pick-name">${p.name} ${er}</div>
+        const skip = sod.skippedOverfit
+          ? `<div style="margin-top:5px;color:var(--warn,#e0a500);font-size:11px">↩ Skipped <b>${sod.skippedOverfit.name}</b> (${_sgn(sod.skippedOverfit.expectancyR)}${sod.skippedOverfit.expectancyR}R in-sample) — flagged ${sod.skippedOverfit.robustness || "overfit"} out-of-sample.</div>`
+          : "";
+        body = `<div class="pick-name">${p.name} ${er}${_wfBadge(p.robustness)}</div>
           <div class="pick-reason">Best historical edge on <b>${ico} ${rg.label}</b> days — ${p.winRate}% full-target win over ${p.closed} trades.${warn}</div>
+          ${skip}
           ${chips ? `<div style="margin-top:5px;color:var(--muted);font-size:11px">Next best: ${chips}</div>` : ""}`;
       } else if (p && sod.basis === "fit") {
         body = `<div class="pick-name">${p.name}</div>

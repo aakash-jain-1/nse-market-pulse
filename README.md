@@ -407,11 +407,17 @@ flowchart LR
 - **🎯 Strategy of the Day** (`/api/sim/strategy_of_day`): reads today's **live
   regime** and surfaces the strategy with the best **historical** expectancy on
   that kind of day, drawn from the ~60-session daily-backtest leaderboard (far
-  richer evidence than the young forward-test ledger). Falls back to the a-priori
-  `regimeFit` design when a regime is thin in the sample; flags a pick that only
-  wins *outside* its designed regime. The leaderboard is memoised (6h) and
-  pre-warmed in a daemon thread at startup, so the Sim-tab card is instant and the
-  cold ~30s computation never stalls the UI.
+  richer evidence than the young forward-test ledger). **Walk-forward overlay:**
+  the pick now *prefers a walk-forward-robust* strategy and **skips one flagged
+  overfit** out-of-sample — every candidate carries a colour-coded `WF:` verdict
+  (robust / improving / decaying / overfit / no-edge), and when a higher in-sample
+  edge is passed over you see a "↩ Skipped X (overfit)" note. Falls back to the
+  a-priori `regimeFit` design when a regime is thin in the sample; flags a pick
+  that only wins *outside* its designed regime. The leaderboard **and** the
+  walk-forward robustness map are memoised (6h) and pre-warmed in a daemon thread
+  at startup (both over the same daily bars), so the Sim-tab card is instant and
+  the cold computation never stalls the UI. The live Regime-Adaptive track applies
+  the same robust-preference via a non-blocking peek.
 - **All-time performance** (`/api/sim/performance`): a durable, cross-session
   scorecard — one row per strategy over the *entire* SQLite ledger, ranked by
   **expectancy (R)**, with win%, total R, realized P&L, profit factor, average
@@ -729,7 +735,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 405 unit tests, 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
+├── test_*.py               # 410 unit tests, 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

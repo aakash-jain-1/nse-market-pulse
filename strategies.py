@@ -919,9 +919,24 @@ def _regime_playbook_pick(regime_label):
                 lb = data.get("regimeLeaderboard") or {}
                 row = next((r for r in lb.get("rows", [])
                             if r.get("regime") == regime_label), None)
-                if row and row.get("best"):
-                    cell = (row.get("cells") or {}).get(row["best"])
-                    return row["best"], "history", cell
+                if row:
+                    cells = row.get("cells") or {}
+                    ranked = sorted(
+                        [{"id": sid, "expectancyR": c["expectancyR"], "cell": c}
+                         for sid, c in cells.items()
+                         if c and c.get("expectancyR") is not None
+                         and (c.get("closed") or 0) >= 3],
+                        key=lambda x: x["expectancyR"], reverse=True)
+                    if ranked:
+                        # Prefer a walk-forward-robust strategy over a higher-but-
+                        # overfit in-sample edge (non-blocking peek; falls back to
+                        # the raw in-sample best when no walk-forward is warm).
+                        rob = btd.robustness_map(btd.peek_walkforward())
+                        chosen, _skip = btd._prefer_robust(ranked, rob)
+                        if chosen:
+                            return chosen["id"], "history", chosen["cell"]
+                    elif row.get("best"):
+                        return row["best"], "history", cells.get(row["best"])
         except Exception:
             pass
         for s in STRATEGIES:
@@ -1014,8 +1029,17 @@ def gen_adaptive(ctx):
         return []
     regime = ctx.get("regime") or {}
     mult = conviction_mult(basis, cell, regime)
+    # Walk-forward verdict for the delegated strategy (non-blocking; may be absent).
+    verdict = None
+    if basis == "history":
+        try:
+            import backtest_daily as btd
+            verdict = btd.robustness_map(btd.peek_walkforward()).get(sid)
+        except Exception:
+            verdict = None
     lead = (f"Regime playbook: {regime_label} day → {meta['name']}"
-            + (" (best historical edge)" if basis == "history" else " (designed fit)"))
+            + (" (best historical edge)" if basis == "history" else " (designed fit)")
+            + (f", walk-forward {verdict}" if verdict else ""))
     edge_txt = ""
     if basis == "history" and cell and cell.get("expectancyR") is not None:
         edge_txt = (f" — regime edge {cell['expectancyR']:+.2f}R over "

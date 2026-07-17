@@ -737,13 +737,21 @@ if __name__ == "__main__":
         # Live realtime feed (Angel One or Dhan). No-op unless credentials + SDK
         # are present, so the app runs unchanged for users who haven't set it up.
         live_feed.start()
-        # Pre-warm the strategy-of-the-day leaderboard (a cheap, EOD-cached
-        # backtest) in a daemon thread so the Sim tab's card is ready without
-        # stalling the first poll with a cold ~30s computation.
+        # Pre-warm the strategy-of-the-day leaderboard AND the walk-forward
+        # robustness overlay (both EOD-cached backtests over the SAME daily bars, so
+        # the second is ~pure CPU) in a daemon thread, so the Sim tab's card is ready
+        # — with robustness verdicts — without stalling the first poll on a cold run.
         import threading
         import backtest_daily as _btd
-        threading.Thread(target=_btd.cached_regime_leaderboard,
-                         daemon=True).start()
+
+        def _warm_sim():
+            for fn in (_btd.cached_regime_leaderboard, _btd.cached_walkforward):
+                try:
+                    fn()
+                except Exception:
+                    log.warning("sim pre-warm failed (%s)", fn.__name__, exc_info=True)
+
+        threading.Thread(target=_warm_sim, daemon=True).start()
 
         # Show the phone-friendly URLs once (in the serving worker).
         ip = _lan_ip() if HOST == "0.0.0.0" else HOST

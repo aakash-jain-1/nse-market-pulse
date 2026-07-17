@@ -50,7 +50,7 @@ NSE/
 ├── backtest_strategies.py # Offline backtester: replays archived context, resolves on OHLCV
 ├── backtest_daily.py      # Daily-bar historical backtest over real NSE EOD data (9 strategies)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── test_*.py          # 405 unit tests across 23 suites (see below)
+├── test_*.py          # 410 unit tests across 23 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_client.py / test_client_fetchers.py     # nse_client normalizers + raw parsers
@@ -108,7 +108,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 405 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
+python -m pytest -q      # 410 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -450,6 +450,16 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🛡 Walk-forward robustness overlay on strategy-of-the-day** — the regime
+  leaderboard / strategy-of-the-day used to pick the best **in-sample** edge (curve-fit
+  risk). It now **prefers a walk-forward-robust** strategy and **skips ones flagged
+  overfit** out-of-sample. `backtest_daily` gained `cached_walkforward()` (memoised
+  ≤1/6h), `peek_walkforward()` (non-blocking, for the hot path), `robustness_map()` and
+  `_prefer_robust()` (`UNTRUSTED_VERDICTS={overfit,no-edge}`). `strategy_of_day()`
+  returns `pick.robustness`, `ranked[].robustness`, `walkForward`, and `skippedOverfit`;
+  the live `gen_adaptive` picks robustly via the non-blocking peek and annotates its
+  reasons. UI: a colour-coded `WF: <verdict>` badge + "↩ Skipped …" note. Tests +5
+  (suite **405 → 410**).
 - **➕ Seven new strategies (library 10 → 17)** — added `fut_basis` (Futures
   Basis / Cost-of-Carry), `rel_strength` (Relative Strength vs NIFTY), `squeeze`
   (NR7 volatility squeeze), `gap` (Gap-and-Go / Fade), `pcr_extreme` (PCR
@@ -668,7 +678,12 @@ with no creds the app is unchanged.
     strategy-of-the-day), tagging each idea's `reasons` with the playbook choice.
     The pick uses `backtest_daily.peek_regime_leaderboard()` (a NON-blocking cache
     read — lazy import to dodge the `strategies`↔`backtest_daily` cycle; never
-    triggers a cold compute in the per-minute hot path), falling back to the first
+    triggers a cold compute in the per-minute hot path), then **prefers a
+    walk-forward-robust** strategy via `btd._prefer_robust` + `btd.robustness_map(
+    btd.peek_walkforward())` (also non-blocking): among the regime's candidates
+    sorted by in-sample edge, it takes the first whose out-of-sample verdict isn't
+    `overfit`/`no-edge` (falls back to the raw best when no walk-forward is warm),
+    and appends that verdict to the idea's reasons. Falls back to the first
     strategy whose `regimeFit` covers the regime. It's a LIVE-sim track only —
     deliberately absent from `backtest_daily.STRATS` so `cached_regime_leaderboard`
     → `run()` can't recurse — and forward-tests whether "follow the playbook" beats

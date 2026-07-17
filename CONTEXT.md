@@ -95,7 +95,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 405 across 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 410 across 23 suites (client/quote/paper/strategies/sim/backtests/walkforward/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -168,7 +168,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **405 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **410 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -236,6 +236,32 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-17 — Walk-forward robustness overlay on strategy-of-the-day (suite 405 → 410)
+- The regime leaderboard / strategy-of-the-day picked the best **in-sample** edge,
+  which can be curve-fit. Now the pick PREFERS a walk-forward-**robust** strategy and
+  skips one flagged **overfit** out-of-sample.
+- `backtest_daily`: added `cached_walkforward()` (memoised ≤1/6h, lazy-imports
+  `walkforward` to dodge the cycle, serialised on the shared run lock),
+  `peek_walkforward()` (non-blocking — for the per-minute hot path), `robustness_map()`
+  ({strategy_id: verdict} from the holdout `perStrategy`), and `_prefer_robust()`
+  (from candidates sorted by in-sample expectancy, take the first whose verdict isn't
+  `overfit`/`no-edge`; fall back to the raw top if none pass or no walk-forward yet).
+  `UNTRUSTED_VERDICTS = {overfit, no-edge}`.
+- `strategy_of_day()`: overlays a robustness verdict on every ranked candidate, uses
+  `_prefer_robust` for the pick, and returns new fields — `pick.robustness`,
+  `ranked[].robustness`, `walkForward` (ok/trainCut/testN), `skippedOverfit`
+  ({id,name,expectancyR,robustness}) when a higher in-sample pick was passed over.
+- `strategies._regime_playbook_pick()` (live `gen_adaptive`): same robust-preference
+  via the **non-blocking** `peek_walkforward()` (so it never blocks the snapshot loop);
+  `gen_adaptive` appends the delegated strategy's walk-forward verdict to its reasons.
+- **UI:** strategy-of-the-day card shows a colour-coded `WF: <verdict>` badge + a
+  "↩ Skipped X (overfit)" note (`_wfBadge` in `index.html`).
+- Cost note: `strategy_of_day` now also triggers a cached (6h) walk-forward backtest
+  (120d/60u) on cold poll — same synchronous-on-first-poll pattern as the leaderboard;
+  shares the EOD SQLite cache. Live idea generation stays non-blocking (peek only).
+- Tests: +5 in `test_backtest_daily.py` (`robustness_map`, `_prefer_robust` ×3,
+  strategy-of-day prefers-robust integration). Suite 405 → 410.
 
 ### 2026-07-17 — Seven new strategies (library 10 → 17; suite 377 → 405)
 - Added seven researched edges to `strategies.py`, each a standard `gen_*` returning
