@@ -768,7 +768,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/demand` | Composite demand-score board |
 | `GET /api/recommendations[?fno=1]` | Ranked LONG/SHORT trade ideas |
 | `GET /api/deepdive/<sym>` | 30/60/90-day price + delivery + OI deep-dive |
-| `GET /api/quote/<sym>` · `/api/chart/<sym>` | Live quote + market depth · intraday price line |
+| `GET /api/quote/<sym>` · `/api/chart/<sym>` | Live quote + market depth (EOD-close fallback during a WAF block) · intraday price line |
 | `GET /api/depth?symbols=<csv>` | Batch order-book imbalance/spread stats (Scanner "⚖ Order-book scan"; capped, pooled) |
 | `GET /api/eod/status[?refresh=1]` | EOD bhavcopy freshness/coverage (date, #equities, #futures, cache age; no secrets) |
 | `GET /api/eod/price/<sym>` · `/api/eod/quote/<sym>` | Resilient EOD close / full EOD record for **any** listed symbol (works off-hours; static NSE archive) |
@@ -800,7 +800,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
 | `GET /api/iv/rank/<sym>` | IV rank/percentile from logged ATM-IV history |
 | `GET /api/alerts/status` · `POST /api/alerts/test` | Off-screen alert status (no secrets) · send a test Telegram/webhook message |
-| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture) |
+| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture + `nse.blockedForSec` WAF cooldown) |
 
 ---
 
@@ -831,7 +831,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 616 unit tests, 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/…)
+├── test_*.py               # 618 unit tests, 29 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
@@ -886,6 +886,11 @@ short-circuit. `bhavcopy.backfill()` also **paces itself** (a jittered pause per
 day) and **stops early** if a block is detected mid-run. This can't lift an active
 block — only time or a **different network** does (switch to a mobile hotspot,
 clear NSE cookies, or wait it out) — but it stops the app from re-earning it.
+The block is **surfaced, not hidden**: `/api/health` reports `nse.blockedForSec`,
+the dashboard shows a **live countdown banner** ("NSE has temporarily rate-limited
+this network… showing cached/EOD… auto-resuming in *m:ss*"), and `/api/quote/<sym>`
+transparently **falls back to the EOD bhavcopy close** (`stale:true`,
+`source:"eod-bhavcopy"`) so the stock modal keeps working while NSE is paused.
 
 ---
 

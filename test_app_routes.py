@@ -125,6 +125,44 @@ def test_depth_splits_symbols():
     assert seen["syms"] == ["A", "B", "C"]
 
 
+def test_health_reports_nse_block():
+    import nse_client as nse
+    saved = nse._blocked_until
+    try:
+        nse._blocked_until = 0.0
+        st, j = _json("/api/health")
+        assert st == 200 and j["nse"]["blockedForSec"] == 0
+        nse.note_block("test")
+        assert _json("/api/health")[1]["nse"]["blockedForSec"] > 0
+    finally:
+        nse._blocked_until = saved
+
+
+def test_quote_falls_back_to_eod_during_block():
+    import bhavcopy
+    import nse_client as nse
+    import nse_quote as q
+
+    def _boom(s):
+        raise AssertionError("must not hit live NSE while blocked")
+
+    saved = nse._blocked_until
+    try:
+        nse._blocked_until = 0.0
+        nse.note_block("test")
+        with _patches(
+            (q, "get_quote", _boom),
+            (bhavcopy, "eod_quote", lambda s: {"symbol": s.upper(), "close": 100.0,
+                                               "prevClose": 95.0, "date": "2026-07-16"}),
+        ):
+            st, j = _json("/api/quote/ACC")
+        assert st == 200 and j["stale"] is True and j["source"] == "eod-bhavcopy"
+        assert j["ltp"] == 100.0 and j["pChange"] == round((100 / 95 - 1) * 100, 2)
+        assert j["blockedForSec"] > 0
+    finally:
+        nse._blocked_until = saved
+
+
 # ---------------------------------------------------------------------------
 # ideas journal (imported inside the handler)
 # ---------------------------------------------------------------------------

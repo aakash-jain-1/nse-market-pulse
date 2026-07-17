@@ -446,6 +446,9 @@
           onerror="this.onerror=null;var s=document.createElement('script');s.src='/static/vendor/lightweight-charts.standalone.production.js';document.head.appendChild(s);"></script>
 </head>
 <body>
+  <div id="nseBlockBanner" style="display:none;background:#7c2d12;color:#fed7aa;padding:8px 14px;text-align:center;font-size:13px;font-weight:600;border-bottom:1px solid #9a3412">
+    <span id="nseBlockMsg"></span>
+  </div>
   <header>
     <h1>NSE <span>In-Demand</span> Scanner</h1>
     <div class="status">
@@ -4926,6 +4929,32 @@
       }
       btn.disabled = false; btn.textContent = "📈 Portfolio backtest";
     };
+
+    // NSE WAF-block ("Access Denied") banner: /api/health reports the shared cooldown;
+    // while it's active the app serves cached/EOD data, so warn the user (with a live
+    // countdown) instead of silently showing stale numbers.
+    let _nseBlockUntil = 0;
+    function renderBlockBanner() {
+      const el = document.getElementById("nseBlockBanner");
+      if (!el) return;
+      const left = Math.max(0, Math.round((_nseBlockUntil - Date.now()) / 1000));
+      if (left <= 0) { el.style.display = "none"; return; }
+      const m = Math.floor(left / 60), s = left % 60;
+      document.getElementById("nseBlockMsg").innerHTML =
+        `⚠️ NSE has temporarily rate-limited this network (Akamai). Live data is paused — showing <b>cached / EOD</b> values. Auto-resuming in <b>${m}:${String(s).padStart(2, "0")}</b>. Switching network (e.g. mobile hotspot) or just waiting clears it.`;
+      el.style.display = "block";
+    }
+    async function pollNseBlock() {
+      try {
+        const h = await fetch("/api/health").then(r => r.json());
+        const secs = (h.nse && h.nse.blockedForSec) || 0;
+        _nseBlockUntil = secs > 0 ? Date.now() + secs * 1000 : 0;
+      } catch (e) { /* leave the last known state */ }
+      renderBlockBanner();
+    }
+    setInterval(pollNseBlock, 45000);      // re-check the cooldown
+    setInterval(renderBlockBanner, 1000);  // local 1s countdown tick
+    pollNseBlock();
     const renderEodStatus = (s) => {
       const el = document.getElementById("eodStatus");
       if (!el) return;

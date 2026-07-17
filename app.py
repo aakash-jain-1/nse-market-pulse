@@ -277,7 +277,27 @@ def api_deepdive(symbol):
 
 @app.route("/api/quote/<symbol>")
 def api_quote(symbol):
-    return jsonify(nse_quote.get_quote(symbol))
+    """Live per-stock quote + 5-level depth. During a WAF cooldown (or if the live call
+    fails), fall back to the resilient EOD bhavcopy close so the stock modal still works
+    — clearly marked `stale` so the UI can badge it."""
+    import nse_client as nse
+    if not nse.blocked_for():
+        try:
+            return jsonify(nse_quote.get_quote(symbol))
+        except Exception:
+            pass                     # fall through to the EOD close
+    import bhavcopy
+    q = bhavcopy.eod_quote(symbol) or {}
+    c, pc = q.get("close"), q.get("prevClose")
+    q.update(stale=True, source="eod-bhavcopy", blockedForSec=nse.blocked_for())
+    if c is not None:
+        q["ltp"] = c
+        if pc:
+            q.setdefault("change", round(c - pc, 2))
+            q.setdefault("pChange", round((c / pc - 1) * 100, 2))
+    else:
+        q["error"] = "NSE temporarily rate-limited and no EOD close cached yet."
+    return jsonify(q)
 
 
 @app.route("/api/depth")
@@ -856,6 +876,7 @@ def api_health():
     or "NSE session dead" without reading logs (AUDIT.md M5).
     """
     import db
+    import nse_client as nse
     h = snaplog.health()
     try:
         dbsize = os.path.getsize(db.DB_FILE) if os.path.exists(db.DB_FILE) else 0
@@ -871,6 +892,9 @@ def api_health():
         "feed": {"provider": feed.get("provider"),
                  "connected": feed.get("connected"),
                  "configured": feed.get("configured")},
+        # WAF cooldown (Akamai "Access Denied"): >0 → live NSE is paused and the app is
+        # serving cached / EOD data. Powers the dashboard's "NSE cooling down" banner.
+        "nse": {"blockedForSec": nse.blocked_for()},
         "db": {"path": db.DB_FILE, "bytes": dbsize,
                "mb": round(dbsize / 1_048_576, 1)},
         "posture": {"debug": DEBUG, "host": HOST,

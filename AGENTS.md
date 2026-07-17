@@ -56,7 +56,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 616 unit tests across 29 suites (see below)
+├── test_*.py          # 618 unit tests across 29 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -519,6 +519,14 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🛡️ Block-resilience UX** — closes the loop on the Akamai incident. The backoff
+  already stopped us *re-earning* a block, but the UI still silently showed stale numbers
+  and the stock modal 403'd mid-cooldown. Now `/api/health` reports `nse.blockedForSec`;
+  the dashboard shows a **live countdown banner** ("NSE has temporarily rate-limited this
+  network… showing cached/EOD… auto-resuming in m:ss", auto-hides when clear); and
+  **`/api/quote/<sym>` falls back to the EOD bhavcopy close** while blocked (`stale:true`,
+  `source:"eod-bhavcopy"`) — never touching NSE. Scanner lists already serve stale
+  `_fetch` cache, so the app stays useful. Tests **+2** (suite **616 → 618**); lint clean.
 - **📉 Portfolio mark-to-market** — open positions were held at **cost**, so the equity
   curve only stepped on exits and hid intra-trade heat. `bd.run(_collect=True)` now also
   returns traded symbols' daily `closes`; `simulate(closes=…)` marks each open position to
