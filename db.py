@@ -695,6 +695,20 @@ def ideas_for_day(day):
             "SELECT * FROM ideas WHERE day=? ORDER BY firstSeenAt", (day,))]
 
 
+def ideas_all(limit=5000, since=None):
+    """All journaled ideas (newest day first), parsed. `since` = 'YYYY-MM-DD' floor.
+    Used by the conviction-calibration report to score realized outcomes."""
+    q = "SELECT * FROM ideas"
+    args = []
+    if since:
+        q += " WHERE day >= ?"
+        args.append(since)
+    q += " ORDER BY day DESC, firstSeenAt LIMIT ?"
+    args.append(int(limit))
+    with _conn() as c:
+        return [_row_to_idea(r) for r in c.execute(q, tuple(args))]
+
+
 def ideas_days(limit=60):
     """Per-day summary (newest first) for the Ideas history table."""
     with _conn() as c:

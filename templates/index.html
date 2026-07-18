@@ -181,6 +181,15 @@
     .conv-reasons { margin: 4px 0 0; padding-left: 16px; font-size: 11px; color: var(--muted); }
     .conv-reasons li { margin: 1px 0; }
     .conv-warns { margin: 3px 0 0; font-size: 11px; color: #fca5a5; }
+    .calib-verdict { font-size: 13px; line-height: 1.5; padding: 10px 12px; margin-bottom: 12px;
+      border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px;
+      background: rgba(255,255,255,.02); }
+    .calib-metrics { margin-bottom: 6px; }
+    .calib-h { margin: 18px 0 6px; color: var(--muted); font-size: 12px; font-weight: 600; }
+    .calib-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .calib-tbl th, .calib-tbl td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--border); }
+    .calib-tbl th:first-child, .calib-tbl td:first-child { text-align: left; }
+    .calib-tbl th { color: var(--muted); font-weight: 600; }
     .fut-toggle { font-size: 12px; padding: 5px 12px; border-radius: 6px; }
     .fut-toggle.active { background: var(--accent); border-color: var(--accent); color: #fff; }
     .fut-mom { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
@@ -626,6 +635,7 @@
         <span style="width:1px;height:20px;background:var(--border)"></span>
         <button id="cvSave" title="Save this board into the Ideas history (dated to the EOD session) as a durable watchlist you can review later.">💾 Save to Ideas</button>
         <button id="cvDigest" title="Push the top picks to your configured off-screen channel (Telegram/webhook). Set it up in the header 🔔 first.">🔔 Send digest</button>
+        <button id="cvCalib" title="Does the confirmation-stacking actually pay? Scores the realized TARGET/STOP outcomes of your saved conviction ideas — win rate by pillar count, and each pillar's edge.">📊 Calibration</button>
         <span id="cvStatus" style="color:var(--muted);font-size:11px"></span>
       </div>
       <div id="secBar" class="scan-filters" style="display:none">
@@ -843,6 +853,19 @@
           <b>PCR</b> &gt; 1 = more puts (potential support/bullish); &lt; 1 = more calls.
           <b>Max pain</b> = strike where option writers lose least (price often gravitates there near expiry).
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Conviction calibration modal -->
+  <div class="overlay" id="calibOverlay">
+    <div class="modal" style="width:min(920px,96vw)">
+      <div class="modal-head">
+        <h3>📊 Conviction Calibration — does stacking pay?</h3>
+        <button class="close" id="calibClose">✕</button>
+      </div>
+      <div class="modal-body" id="calibBody">
+        <div class="chart-note">Loading…</div>
       </div>
     </div>
   </div>
@@ -1226,6 +1249,77 @@
         ? `<div class="conv-col"><h3 class="conv-col-h">${title} <span style="color:var(--muted);font-weight:400">(${arr.length})</span></h3>${arr.map(convCard).join("")}</div>`
         : "";
       return cov + `<div class="conv-grid">${col("🟢 Longs", longs)}${col("🔴 Shorts", shorts)}</div>`;
+    }
+
+    // --- Conviction calibration (does confirmation-stacking pay?) ---
+    function calibPct(v) { return v == null ? "—" : v.toFixed(1) + "%"; }
+    function calibSigned(v, suffix) {
+      if (v == null) return "—";
+      const s = (v >= 0 ? "+" : "") + v.toFixed(1) + (suffix || "");
+      return `<span style="color:${v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "var(--muted)"}">${s}</span>`;
+    }
+    function calibRow(label, b) {
+      return `<tr><td>${escapeHtml(label)}</td><td>${b.n}</td><td>${b.resolved}</td>
+        <td><b>${calibPct(b.winRate)}</b></td><td>${calibSigned(b.avgOutcomePct, "%")}</td>
+        <td>${calibSigned(b.avgBest, "%")}</td><td>${calibSigned(b.avgWorst, "%")}</td></tr>`;
+    }
+    function renderCalibration(d) {
+      if (d.note) return `<div class="empty">${escapeHtml(d.note)}</div>`;
+      const t = d.totals || {};
+      const head = `<tr><th>Bucket</th><th>Ideas</th><th>Resolved</th><th>Win%</th><th>Avg move</th><th>Avg best</th><th>Avg worst</th></tr>`;
+      const conf = (d.byConfirmations || []).filter(b => b.n > 0)
+        .map(b => calibRow(b.bucket + " signals", b)).join("");
+      const rating = (d.byRating || []).filter(b => b.n > 0)
+        .map(b => calibRow(b.rating, b)).join("");
+      const dir = (d.byDirection || []).filter(b => b.n > 0)
+        .map(b => calibRow(b.direction, b)).join("");
+      const pillLabels = { breakout: "🚀 Breakout", trend: "📈 Trend (DMA)", delivery: "🚚 Delivery%",
+        volume: "🔊 Volume", oi: "🔗 F&O OI buildup", deal: "🐋 Bulk/block deal",
+        sector: "🧭 Leading sector", option: "🎯 Option chain" };
+      const pill = (d.byPillar || []).filter(p => p.with.n > 0).map(p =>
+        `<tr><td>${escapeHtml(pillLabels[p.pillar] || p.pillar)}</td>
+          <td>${p.with.n}</td><td>${calibPct(p.with.winRate)}</td>
+          <td>${p.without.n}</td><td>${calibPct(p.without.winRate)}</td>
+          <td><b>${calibSigned(p.winRateLift, "pp")}</b></td>
+          <td>${calibSigned(p.expLift, "pp")}</td></tr>`).join("");
+      const w = d.warningImpact || {};
+      const warn = (w.withWarn && w.withWarn.n)
+        ? `<h4 class="calib-h">⚠️ Option-chain warning impact</h4>
+           <table class="calib-tbl"><tr><th>Group</th><th>Ideas</th><th>Resolved</th><th>Win%</th><th>Avg move</th><th>Avg best</th><th>Avg worst</th></tr>
+           ${calibRow("With ⚠️ warning", w.withWarn)}${calibRow("No warning", w.noWarn)}</table>
+           <div class="chart-note" style="margin-top:4px">If the soft-veto works, ⚠️ picks should show a lower win rate / worse move than the rest.</div>`
+        : "";
+      return `
+        <div class="calib-verdict">${escapeHtml(d.verdict || "")}</div>
+        <div class="metrics calib-metrics">
+          <div class="metric"><span>Ideas</span><b>${t.n || 0}</b></div>
+          <div class="metric"><span>Resolved</span><b>${t.resolved || 0}</b></div>
+          <div class="metric"><span>Win rate</span><b>${calibPct(t.winRate)}</b></div>
+          <div class="metric"><span>Avg move</span><b>${t.avgOutcomePct == null ? "—" : t.avgOutcomePct.toFixed(1) + "%"}</b></div>
+          <div class="metric"><span>Span</span><b>${t.days || 0}d</b></div>
+        </div>
+        <h4 class="calib-h">Does stacking pay? — win rate by pillar count</h4>
+        <table class="calib-tbl">${head}${conf}</table>
+        <h4 class="calib-h">By rating</h4>
+        <table class="calib-tbl">${head}${rating}</table>
+        <h4 class="calib-h">By direction</h4>
+        <table class="calib-tbl">${head}${dir}</table>
+        <h4 class="calib-h">Per-pillar lift — win rate WITH vs WITHOUT each pillar</h4>
+        <table class="calib-tbl"><tr><th>Pillar</th><th>With n</th><th>With win%</th><th>Without n</th><th>Without win%</th><th>Win lift</th><th>Move lift</th></tr>${pill}</table>
+        ${warn}
+        <div class="chart-note" style="margin-top:10px">Win rate is over <b>resolved</b> ideas (hit TARGET or STOP). “Avg best/worst” are the mean best/worst move (MFE/MAE) across all ideas in the bucket — informative even before an idea resolves. Educational — NOT advice.</div>`;
+    }
+    async function openCalibration() {
+      const ov = document.getElementById("calibOverlay");
+      const body = document.getElementById("calibBody");
+      body.innerHTML = `<div class="chart-note">Loading…</div>`;
+      ov.classList.add("show");
+      try {
+        const d = await fetch("/api/eod/conviction/calibration").then(r => r.json());
+        body.innerHTML = renderCalibration(d);
+      } catch (e) {
+        body.innerHTML = `<div class="empty">Couldn’t load calibration: ${escapeHtml(String(e))}</div>`;
+      }
     }
 
     function sectorsQuery() {
@@ -4913,6 +5007,12 @@
     document.getElementById("cvFno").onchange = load;
     document.getElementById("cvSave").onclick = () => convAction("save");
     document.getElementById("cvDigest").onclick = () => convAction("digest");
+    document.getElementById("cvCalib").onclick = openCalibration;
+    document.getElementById("calibClose").onclick =
+      () => document.getElementById("calibOverlay").classList.remove("show");
+    document.getElementById("calibOverlay").onclick = (e) => {
+      if (e.target.id === "calibOverlay") e.currentTarget.classList.remove("show");
+    };
     document.getElementById("secApply").onclick = load;
     document.getElementById("secNames").onchange = load;
     document.getElementById("secLead").onchange = load;

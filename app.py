@@ -472,6 +472,20 @@ def api_eod_conviction_digest():
     return jsonify(notify.send_digest())
 
 
+@app.route("/api/eod/conviction/calibration")
+def api_eod_conviction_calibration():
+    """Does the board's confirmation-stacking pay? Scores realized TARGET/STOP
+    outcomes of the saved conviction ideas, bucketed by pillar count / rating /
+    direction / individual pillar / option-chain warning. ?days=N optional."""
+    import conviction_calibration
+    days = request.args.get("days")
+    try:
+        days = int(days) if days not in (None, "") else None
+    except ValueError:
+        days = None
+    return jsonify(conviction_calibration.report(days=days))
+
+
 @app.route("/api/eod/scheduler")
 def api_eod_scheduler():
     """State of the auto post-close EOD refresh (enabled? when? last run + result)."""

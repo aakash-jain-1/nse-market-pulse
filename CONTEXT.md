@@ -88,6 +88,7 @@ eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/O
 eod_scheduler.py     Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest), persists last-run in eod_meta
 sectors.py           Curated NSE symbol→sector map (17 sectors, ~303 names) — dependency-free static data + sector_of()/all_sectors()
 sector_scan.py       Sector relative-strength (rotation) board over db.eod_bars — cross-sectional RS vs market median, ranks sectors + surfaces leaders/laggards; strength_map()/context() = the reusable sector pillar the EOD Scan + Conviction boards fold in
+conviction_calibration.py  Does confirmation-stacking pay? Scores realized TARGET/STOP outcomes of saved conviction ideas — win rate by pillar count / rating / direction, per-pillar lift, option-⚠️ impact, honest verdict (pure math + one db.ideas_all() read)
 angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
 notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger
@@ -104,7 +105,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 678 across 32 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 698 across 33 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -182,6 +183,16 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   `save()` writes picks into the `ideas` table (dated to the EOD session, reasons
   prefixed "🏆 EOD conviction") WITHOUT clobbering a live idea. `notify.send_digest()`
   pushes the top picks off-screen. `/api/eod/conviction[/save|/digest]`; 🏆 Conviction tab.
+- **Conviction calibration (`conviction_calibration.py`)**: closes the loop — does
+  the confirmation-stacking thesis actually hold on realized results? Reads back
+  the saved conviction ideas (`db.ideas_all`, tag-filtered), scores each by its
+  candle-accurate `TARGET`/`STOP` outcome, and buckets them: win rate by **pillar
+  count** (do 4-signal picks beat 2-signal?), by rating/direction, the **per-pillar
+  lift** (win rate WITH vs WITHOUT each of breakout/trend/delivery/volume/oi/deal/
+  sector/option), and the **option-⚠️ warning impact** (does the soft-veto flag
+  worse trades?). All maths pure + tested; `report()` = one DB read. Emits an honest
+  one-line `verdict`. `/api/eod/conviction/calibration?days=N`; 📊 Calibration button
+  (modal) on the 🏆 Conviction tab.
 - **Data flow**: `nse_client`/`nse_quote` normalize NSE fields into stable keys
   (`symbol`, `ltp`, `pChange`, `volume`, ...). `app.py` (JSON API) + `nse_demand.py`
   (CLI) consume them; the frontend polls `/api/<view>` and renders client-side.
@@ -218,7 +229,8 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   bulk|block&limit=`** (+ `?status=1` for freshness), **`/api/eod/conviction?limit=&
   minPrice=&minValueCr=&minPillars=&fno=1&deals=0`** (stacked-conviction board) +
   **`/conviction/save`** (POST → persist to Ideas) + **`/conviction/digest`** (POST →
-  off-screen digest), **`/api/eod/backfill`** (POST {days} starts a background
+  off-screen digest) + **`/conviction/calibration?days=N`** (did the stacking pay? —
+  realized win rate by pillar count + per-pillar lift), **`/api/eod/backfill`** (POST {days} starts a background
   history load — now also merges delivery%; GET polls), **`/api/eod/optionchain/
   <sym>[?expiry]`** + **`/summary`** (resilient EOD option chain from the FO bhavcopy
   — PCR/max-pain/OI walls, off-hours).
@@ -252,7 +264,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **678 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **698 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -264,7 +276,8 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   `test_deals.py` (bulk/block parse incl. NO-RECORDS + cached fetch),
   `test_eod_scanner.py` (incl. delivery view + deals xref),
   `test_eod_conviction.py` (OI-state quadrants / pillars / 2R plan / stacked board /
-  save-skip), `test_app.py`
+  save-skip), `test_conviction_calibration.py` (pillar/confirmation parsing +
+  bucket stats + per-pillar lift + verdict + report() on a temp DB), `test_app.py`
   (middleware) + `test_app_routes.py` (every endpoint via the Flask test client),
   `test_db.py`, `test_logger.py`, `test_feeds.py`, `test_book.py`, `test_notify.py`.
 - Coverage: `python -m coverage run -m pytest && coverage report -m --omit="test_*.py"`
@@ -368,6 +381,13 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   contention is **conviction-ranked** (every `bd` trade carries an entry-time `score`);
   open positions are **marked to market** on daily closes (`bd` also returns traded
   symbols' `closes`) for true intra-trade drawdown. *Feature complete.*
+- ✅ **Conviction calibration (`conviction_calibration.py`)** — measures whether the
+  board's confirmation-stacking actually pays on realized outcomes: reads back the saved
+  conviction ideas, scores their candle-accurate `TARGET`/`STOP` results, and reports win
+  rate by **pillar count** (do 4-signal beat 2-signal?), by rating/direction, the
+  **per-pillar lift** (WITH vs WITHOUT each of the 8 pillars), and the **option-⚠️ warning
+  impact**, with an honest verdict. `/api/eod/conviction/calibration`; 📊 Calibration modal
+  on the 🏆 Conviction tab. Closes the confirmation-stacking loop with data. *Feature complete.*
 
 **Open (older roadmap, in AGENTS.md):**
 - Route paper-trading fills / `get_price` through the broker feed; extend Live tab
@@ -391,6 +411,25 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-18 — Conviction calibration / hit-rate report (suite 678 → 698)
+- **Why:** the whole conviction thesis is "agreement across INDEPENDENT evidence raises
+  the odds." We stamp every saved board into `ideas` and resolve candle-accurate
+  `TARGET`/`STOP` outcomes — so we can finally *test* the claim instead of asserting it:
+  do 4-pillar picks really beat 2-pillar ones, and does each pillar add or subtract edge?
+- **What:** `conviction_calibration.py` — pure parsers over the saved idea dicts
+  (`is_conviction` tag-filter, `_confirmations_of` reads "(N signals)" with a non-warning
+  fallback, `_pillars_in` maps reason labels → the 8 pillar keys, `has_warning` spots the
+  option ⚠️ soft-veto), plus `_bucket_stats` (win rate over RESOLVED, MFE/MAE over ALL),
+  `_lift` (WITH vs WITHOUT a pillar) and an honest `_verdict`. `report(days, limit)` = the
+  only impure bit: one `db.ideas_all()` read (new — newest-day-first, optional `since`
+  floor), bucketed by pillar count / rating / direction / per-pillar / warning.
+- **API/UI:** `/api/eod/conviction/calibration?days=N`; a **📊 Calibration** button on the
+  🏆 Conviction tab opens a modal — headline verdict + totals, "win rate by pillar count",
+  by rating/direction, per-pillar win/move lift, and the option-⚠️ impact table.
+- **Tests +20** (`test_conviction_calibration.py` 19: parsing / bucket math / lift /
+  verdict / `report()` on a temp DB incl. live-idea exclusion + warning impact; +1 route
+  arg test in `test_app_routes.py`). Suite **678 → 698**, all green.
 
 ### 2026-07-17 — Option chain fused into the Conviction board (suite 667 → 678)
 - **Why:** we already assemble max-pain / PCR / OI walls off the FO bhavcopy, but only

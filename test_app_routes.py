@@ -512,6 +512,25 @@ def test_eod_conviction_save_and_digest():
         assert r.status_code == 200 and j["ok"] is True and j["count"] == 5
 
 
+def test_eod_conviction_calibration_route():
+    import conviction_calibration
+    seen = {}
+
+    def fake(days=None, limit=5000):
+        seen.update(days=days, limit=limit)
+        return {"totals": {"n": 9, "winRate": 55.5}, "byConfirmations": [],
+                "verdict": "ok", "note": None}
+
+    with _patch(conviction_calibration, "report", fake):
+        st, j = _json("/api/eod/conviction/calibration?days=30")
+        assert st == 200 and j["totals"]["n"] == 9 and j["verdict"] == "ok"
+        assert seen["days"] == 30
+        _json("/api/eod/conviction/calibration")          # no days → None
+        assert seen["days"] is None
+        _json("/api/eod/conviction/calibration?days=abc")  # junk → None
+        assert seen["days"] is None
+
+
 def test_eod_scheduler_status_and_run():
     import eod_scheduler as es
     with _patch(es, "status", lambda: {"enabled": True, "runAt": "16:00 IST",
