@@ -105,7 +105,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 698 across 33 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 709 across 33 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -193,6 +193,16 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   worse trades?). All maths pure + tested; `report()` = one DB read. Emits an honest
   one-line `verdict`. `/api/eod/conviction/calibration?days=N`; 📊 Calibration button
   (modal) on the 🏆 Conviction tab.
+- **Adaptive weighting (calibration → scoring)**: closes the loop — the board can feed
+  each pillar's measured edge BACK into its own scoring. `conviction_calibration.
+  pillar_weights()` turns each pillar's realized win-rate lift into a clamped
+  `[0.5,1.5]` scoring multiplier, **shrunk toward 1.0 by sample size** and neutral until
+  a pillar has enough resolved history on both sides (`pillar_of()` is the one shared
+  label→key map). `eod_conviction.board(adaptive=True)` scales pillar weights by it via
+  `_apply_weights` — but the **confirmation COUNT (primary sort key) is untouched**, so
+  weighting only re-orders WITHIN a tier, never overriding how many signals agree.
+  Opt-in (`?adaptive=1`, ⚖️ Adaptive toggle, OFF by default); the board echoes the
+  applied `adaptiveWeights` and the Calibration modal shows each pillar's earned "→ weight".
 - **Data flow**: `nse_client`/`nse_quote` normalize NSE fields into stable keys
   (`symbol`, `ltp`, `pChange`, `volume`, ...). `app.py` (JSON API) + `nse_demand.py`
   (CLI) consume them; the frontend polls `/api/<view>` and renders client-side.
@@ -230,7 +240,8 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   minPrice=&minValueCr=&minPillars=&fno=1&deals=0`** (stacked-conviction board) +
   **`/conviction/save`** (POST → persist to Ideas) + **`/conviction/digest`** (POST →
   off-screen digest) + **`/conviction/calibration?days=N`** (did the stacking pay? —
-  realized win rate by pillar count + per-pillar lift), **`/api/eod/backfill`** (POST {days} starts a background
+  realized win rate by pillar count + per-pillar lift + earned weights); the board
+  itself takes **`?adaptive=1`** to apply those weights, **`/api/eod/backfill`** (POST {days} starts a background
   history load — now also merges delivery%; GET polls), **`/api/eod/optionchain/
   <sym>[?expiry]`** + **`/summary`** (resilient EOD option chain from the FO bhavcopy
   — PCR/max-pain/OI walls, off-hours).
@@ -264,7 +275,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **698 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **709 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -381,13 +392,16 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   contention is **conviction-ranked** (every `bd` trade carries an entry-time `score`);
   open positions are **marked to market** on daily closes (`bd` also returns traded
   symbols' `closes`) for true intra-trade drawdown. *Feature complete.*
-- ✅ **Conviction calibration (`conviction_calibration.py`)** — measures whether the
-  board's confirmation-stacking actually pays on realized outcomes: reads back the saved
-  conviction ideas, scores their candle-accurate `TARGET`/`STOP` results, and reports win
-  rate by **pillar count** (do 4-signal beat 2-signal?), by rating/direction, the
-  **per-pillar lift** (WITH vs WITHOUT each of the 8 pillars), and the **option-⚠️ warning
-  impact**, with an honest verdict. `/api/eod/conviction/calibration`; 📊 Calibration modal
-  on the 🏆 Conviction tab. Closes the confirmation-stacking loop with data. *Feature complete.*
+- ✅ **Conviction calibration + adaptive weighting (`conviction_calibration.py`)** —
+  measures whether the board's confirmation-stacking actually pays on realized outcomes:
+  reads back the saved conviction ideas, scores their candle-accurate `TARGET`/`STOP`
+  results, and reports win rate by **pillar count** (do 4-signal beat 2-signal?), by
+  rating/direction, the **per-pillar lift** (WITH vs WITHOUT each of the 8 pillars), and
+  the **option-⚠️ warning impact**, with an honest verdict. `/api/eod/conviction/calibration`;
+  📊 Calibration modal on the 🏆 Conviction tab. Then **closes the loop**: `pillar_weights()`
+  turns each measured lift into a clamped, sample-shrunk scoring multiplier that the board
+  applies via `board(adaptive=True)` / **⚖️ Adaptive** toggle — re-ordering within a
+  confirmation tier without ever touching the stacking count. *Feature complete.*
 
 **Open (older roadmap, in AGENTS.md):**
 - Route paper-trading fills / `get_price` through the broker feed; extend Live tab
@@ -411,6 +425,28 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-18 — Adaptive pillar weighting: calibration → scoring (suite 698 → 709)
+- **Why:** the calibration report *measures* each pillar's edge but was read-only. The
+  obvious close-the-loop step: feed that measured edge back into the board's scoring so
+  pillars that have actually worked count for more — the board grades its own homework.
+- **What:** `conviction_calibration.pillar_weights()` maps each pillar's realized
+  win-rate lift → a scoring multiplier, **clamped `[0.5,1.5]`, shrunk toward 1.0 by the
+  thinner side's sample size, and neutral until ≥5 resolved on BOTH sides** (`_mult_from_lift`,
+  pure). `pillar_of()` is now the ONE shared label→key classifier (calibration's
+  `_pillars_in` refactored onto it, so the parser and the weighter can't drift).
+  `report()` attaches each pillar's earned `weight` + a top-level `adaptiveWeights` map.
+- **Board:** `eod_conviction.board(adaptive=True)` resolves the weights once and scales
+  pillar weights via `_apply_weights` (the option-pillar bonus too) — crucially the
+  **confirmation COUNT is left untouched**, so adaptive weighting only re-orders WITHIN a
+  confirmation tier and can never let one weighted signal jump the stacking discipline.
+- **API/UI:** `?adaptive=1` on the board + save routes (OFF by default). A **⚖️ Adaptive**
+  toggle on the Conviction tab; when on, the board shows the applied non-neutral weights
+  ("sector ×1.3 · breakout ×0.7") and the 📊 Calibration modal gains a "→ weight" column.
+- **Tests +11** (`test_conviction_calibration.py`: `pillar_of`, gate/clamp/shrink/sign of
+  `_mult_from_lift`, `pillar_weights`, report attaches weights; `test_eod_conviction.py`:
+  `_apply_weights`, weighted `_pick` re-orders within tier / scales option pillar, board
+  adaptive returns weights + neutral-history no-op; +1 route arg). Suite **698 → 709**.
 
 ### 2026-07-18 — Conviction calibration / hit-rate report (suite 678 → 698)
 - **Why:** the whole conviction thesis is "agreement across INDEPENDENT evidence raises

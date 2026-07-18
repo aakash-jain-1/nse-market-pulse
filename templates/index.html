@@ -631,6 +631,7 @@
         <label>Min value (Cr)<input type="number" id="cvMinVal" min="0" step="1" style="width:70px" value="2"></label>
         <label>Show<input type="number" id="cvLimit" min="5" max="100" step="5" style="width:64px" value="25"></label>
         <label class="chk"><input type="checkbox" id="cvFno"> F&amp;O only</label>
+        <label class="chk" title="Adaptive weighting: nudge each pillar's scoring weight by its realized win-rate edge (from 📊 Calibration), so pillars that have actually worked count for more. Only re-orders WITHIN a confirmation tier — never overrides how many signals agree — and stays neutral until a pillar has enough resolved history."><input type="checkbox" id="cvAdaptive"> ⚖️ Adaptive</label>
         <button id="cvApply">Apply</button>
         <span style="width:1px;height:20px;background:var(--border)"></span>
         <button id="cvSave" title="Save this board into the Ideas history (dated to the EOD session) as a durable watchlist you can review later.">💾 Save to Ideas</button>
@@ -891,7 +892,7 @@
       { key: "eod",        label: "🌐 EOD Scan", title: "Full-Market EOD / Swing Scanner",
         desc: "Scans the WHOLE cash market (~2400 names, not just the live hot lists) from NSE's End-of-Day bhavcopy history for swing setups — breakouts/breakdowns of the recent high/low, gaps, unusual volume, trend vs 20/50-day MAs and NR7 squeezes. Works off-hours & weekends. Click ‘Backfill history’ once to load recent daily bars. Educational — NOT advice." },
       { key: "conviction", label: "🏆 Conviction", title: "EOD Conviction Board — tomorrow's watchlist",
-        desc: "FUSES the independent end-of-day signals — breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint, F&O OI buildup, leading/lagging sector and the option chain (max-pain / PCR / OI walls) — into one ranked watchlist. Names are ranked by how many signals AGREE (confirmation stacking), so a setup confirmed 4 ways beats a single strong signal; a chain conflict (target into an OI wall, or pinned against max-pain) shows a ⚠️ and shaves conviction. Save it to the Ideas history or push a digest to your phone. Works off-hours. Educational — NOT advice." },
+        desc: "FUSES the independent end-of-day signals — breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint, F&O OI buildup, leading/lagging sector and the option chain (max-pain / PCR / OI walls) — into one ranked watchlist. Names are ranked by how many signals AGREE (confirmation stacking), so a setup confirmed 4 ways beats a single strong signal; a chain conflict (target into an OI wall, or pinned against max-pain) shows a ⚠️ and shaves conviction. 📊 Calibration scores past boards' realized outcomes; ⚖️ Adaptive then feeds each pillar's measured edge back into scoring. Save it to the Ideas history or push a digest to your phone. Works off-hours. Educational — NOT advice." },
       { key: "sectors",    label: "🧭 Sectors", title: "Sector Relative-Strength — where's the money rotating?",
         desc: "Ranks the ~16 sectors by RELATIVE STRENGTH (each sector's median momentum vs the whole market) so you can see which sectors money is rotating INTO and OUT of, then surfaces the leading names inside the strongest sectors — the actionable watchlist. Cross-sectional RS from the EOD bhavcopy history; works off-hours. The more days you backfill, the better it works. Educational — NOT advice." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
@@ -1209,6 +1210,7 @@
       if (g("cvMinVal").value !== "") p.set("minValueCr", g("cvMinVal").value);
       if (g("cvLimit").value !== "") p.set("limit", g("cvLimit").value);
       if (g("cvFno").checked) p.set("fno", "1");
+      if (g("cvAdaptive").checked) p.set("adaptive", "1");
       return "?" + p.toString();
     }
 
@@ -1238,9 +1240,22 @@
       </div>`;
     }
 
+    // "sector ×1.3 · breakout ×0.7" — only the pillars whose weight left neutral.
+    function adaptiveNote(w) {
+      if (!w) return "";
+      const labels = { breakout: "breakout", trend: "trend", delivery: "delivery",
+        volume: "volume", oi: "F&O OI", deal: "deal", sector: "sector", option: "option" };
+      const parts = Object.keys(w).filter(k => Math.abs((w[k] || 1) - 1) > 0.001)
+        .sort((a, b) => w[b] - w[a])
+        .map(k => `${labels[k] || k} ×${w[k].toFixed(2)}`);
+      return parts.length
+        ? `<div class="chart-note" style="margin:0 0 8px;border-left:3px solid var(--accent);padding-left:8px">⚖️ <b>Adaptive weights on</b> — scoring nudged by each pillar's realized edge (📊 Calibration): ${parts.join(" · ")}. Confirmation COUNT is unchanged; this only re-orders within a tier.</div>`
+        : `<div class="chart-note" style="margin:0 0 8px;border-left:3px solid var(--muted);padding-left:8px">⚖️ <b>Adaptive weights on</b> — but no pillar has enough resolved history yet, so weights are neutral (save boards and let outcomes resolve).</div>`;
+    }
     function renderConviction(data) {
       const longs = data.longs || [], shorts = data.shorts || [];
-      const cov = `<div class="chart-note" style="margin:0 0 8px">🏆 <b>Stacked-conviction board</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names scanned · ${longs.length} long / ${shorts.length} short setups where <b>≥${data.filters ? data.filters.minPillars : 3} independent signals agree</b>. ${data.withDeals ? "Bulk/block deals cross-referenced. " : ""}${data.withOptions ? "Option chain (max-pain/PCR/OI walls) fused. " : ""}🧭 = leading/lagging sector · 🎯 = option-chain view · ⚠️ = a chain conflict (near max-pain / into an OI wall). Prices are the last EOD <b>close</b> (not live).</div>`;
+      const cov = `<div class="chart-note" style="margin:0 0 8px">🏆 <b>Stacked-conviction board</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names scanned · ${longs.length} long / ${shorts.length} short setups where <b>≥${data.filters ? data.filters.minPillars : 3} independent signals agree</b>. ${data.withDeals ? "Bulk/block deals cross-referenced. " : ""}${data.withOptions ? "Option chain (max-pain/PCR/OI walls) fused. " : ""}🧭 = leading/lagging sector · 🎯 = option-chain view · ⚠️ = a chain conflict (near max-pain / into an OI wall). Prices are the last EOD <b>close</b> (not live).</div>`
+        + (data.adaptive ? adaptiveNote(data.adaptiveWeights) : "");
       if (!longs.length && !shorts.length) {
         const hint = data.note || "No names cleared the confirmation bar — lower ‘Min signals’, loosen the price/value filters, or backfill more history (breakouts need ~20+ sessions).";
         return cov + `<div class="empty">${escapeHtml(hint)}</div>`;
@@ -1276,12 +1291,18 @@
       const pillLabels = { breakout: "🚀 Breakout", trend: "📈 Trend (DMA)", delivery: "🚚 Delivery%",
         volume: "🔊 Volume", oi: "🔗 F&O OI buildup", deal: "🐋 Bulk/block deal",
         sector: "🧭 Leading sector", option: "🎯 Option chain" };
+      const wCell = w => {
+        if (w == null) return "—";
+        const c = w > 1.001 ? "var(--green)" : w < 0.999 ? "var(--red)" : "var(--muted)";
+        return `<span style="color:${c}">×${w.toFixed(2)}</span>`;
+      };
       const pill = (d.byPillar || []).filter(p => p.with.n > 0).map(p =>
         `<tr><td>${escapeHtml(pillLabels[p.pillar] || p.pillar)}</td>
           <td>${p.with.n}</td><td>${calibPct(p.with.winRate)}</td>
           <td>${p.without.n}</td><td>${calibPct(p.without.winRate)}</td>
           <td><b>${calibSigned(p.winRateLift, "pp")}</b></td>
-          <td>${calibSigned(p.expLift, "pp")}</td></tr>`).join("");
+          <td>${calibSigned(p.expLift, "pp")}</td>
+          <td><b>${wCell(p.weight)}</b></td></tr>`).join("");
       const w = d.warningImpact || {};
       const warn = (w.withWarn && w.withWarn.n)
         ? `<h4 class="calib-h">⚠️ Option-chain warning impact</h4>
@@ -1304,8 +1325,8 @@
         <table class="calib-tbl">${head}${rating}</table>
         <h4 class="calib-h">By direction</h4>
         <table class="calib-tbl">${head}${dir}</table>
-        <h4 class="calib-h">Per-pillar lift — win rate WITH vs WITHOUT each pillar</h4>
-        <table class="calib-tbl"><tr><th>Pillar</th><th>With n</th><th>With win%</th><th>Without n</th><th>Without win%</th><th>Win lift</th><th>Move lift</th></tr>${pill}</table>
+        <h4 class="calib-h">Per-pillar lift — win rate WITH vs WITHOUT each pillar <span style="color:var(--muted);font-weight:400">(→ weight = what ⚖️ Adaptive applies)</span></h4>
+        <table class="calib-tbl"><tr><th>Pillar</th><th>With n</th><th>With win%</th><th>Without n</th><th>Without win%</th><th>Win lift</th><th>Move lift</th><th>→ weight</th></tr>${pill}</table>
         ${warn}
         <div class="chart-note" style="margin-top:10px">Win rate is over <b>resolved</b> ideas (hit TARGET or STOP). “Avg best/worst” are the mean best/worst move (MFE/MAE) across all ideas in the bucket — informative even before an idea resolves. Educational — NOT advice.</div>`;
     }
@@ -1409,6 +1430,7 @@
           minValueCr: document.getElementById("cvMinVal").value,
           limit: document.getElementById("cvLimit").value,
           fno: document.getElementById("cvFno").checked ? "1" : "0",
+          adaptive: document.getElementById("cvAdaptive").checked ? "1" : "0",
         });
         const r = await fetch("/api/eod/conviction/" + kind, {
           method: "POST", headers: { "Content-Type": "application/json" }, body,
@@ -5005,6 +5027,7 @@
     document.getElementById("cvApply").onclick = load;
     document.getElementById("cvPillars").onchange = load;
     document.getElementById("cvFno").onchange = load;
+    document.getElementById("cvAdaptive").onchange = load;
     document.getElementById("cvSave").onclick = () => convAction("save");
     document.getElementById("cvDigest").onclick = () => convAction("digest");
     document.getElementById("cvCalib").onclick = openCalibration;

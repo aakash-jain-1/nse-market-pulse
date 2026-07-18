@@ -477,22 +477,22 @@ def test_eod_conviction_arg_parsing():
     seen = {}
 
     def fake(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
-             fno_only=False, with_deals=True, with_options=True):
+             fno_only=False, with_deals=True, with_options=True, adaptive=False):
         seen.update(limit=limit, min_price=min_price, min_value_cr=min_value_cr,
                     min_pillars=min_pillars, fno_only=fno_only, with_deals=with_deals,
-                    with_options=with_options)
+                    with_options=with_options, adaptive=adaptive)
         return {"date": "2026-07-15", "longs": [], "shorts": [], "count": 0}
 
     with _patch(eod_conviction, "board", fake):
-        st, j = _json("/api/eod/conviction?limit=10&minPrice=50&minValueCr=5&minPillars=4&fno=1&deals=0&options=0")
+        st, j = _json("/api/eod/conviction?limit=10&minPrice=50&minValueCr=5&minPillars=4&fno=1&deals=0&options=0&adaptive=1")
         assert st == 200 and j["date"] == "2026-07-15"
         assert seen == {"limit": 10, "min_price": 50.0, "min_value_cr": 5.0,
                         "min_pillars": 4, "fno_only": True, "with_deals": False,
-                        "with_options": False}
-        _json("/api/eod/conviction")                  # defaults (deals + options ON)
+                        "with_options": False, "adaptive": True}
+        _json("/api/eod/conviction")                  # defaults (deals + options ON, adaptive OFF)
         assert seen["limit"] == 25 and seen["min_pillars"] == 2
         assert seen["min_price"] == 20.0 and seen["with_deals"] is True
-        assert seen["with_options"] is True
+        assert seen["with_options"] is True and seen["adaptive"] is False
 
 
 def test_eod_conviction_save_and_digest():

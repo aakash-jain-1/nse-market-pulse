@@ -50,6 +50,15 @@ PILLAR_KEYS = [k for k, _ in _PILLARS]
 
 _CONF_BUCKETS = [("2", 2, 2), ("3", 3, 3), ("4", 4, 4), ("5+", 5, 99)]
 
+# --- adaptive weighting (feed measured edge back into the board's scoring) ---
+# A pillar's SCORING weight is nudged by its realized win-rate lift, but only once
+# it has enough resolved history on BOTH sides, shrunk toward neutral by sample size,
+# and clamped — so a still-thin history can't swing the board around.
+_W_MIN_SAMPLE = 5      # need >= this many RESOLVED ideas with AND without the pillar
+_W_N0 = 12             # shrinkage: mult moves ~halfway to raw at 12 resolved/side
+_W_K = 1.5             # winRateLift(pp)/100 × K → raw multiplier delta (±20pp → ±0.30)
+_W_LO, _W_HI = 0.5, 1.5  # hard clamp on any multiplier
+
 
 # ---------------------------------------------------------------------------
 # pure helpers
@@ -71,18 +80,26 @@ def _confirmations_of(idea):
     return sum(1 for r in rs[1:] if not str(r).startswith("⚠️"))
 
 
+def pillar_of(label):
+    """Map ONE pillar reason label to its pillar key (or None for a warning / unknown).
+    The single source of truth for label→key, shared by the calibration parser AND the
+    board's adaptive weighting (so the two can never drift apart)."""
+    low = str(label).lower()
+    if low.startswith("⚠️"):
+        return None
+    for key, pred in _PILLARS:
+        if pred(low):
+            return key
+    return None
+
+
 def _pillars_in(idea):
     """Set of pillar keys that fired for an idea (parsed from its reason labels)."""
     out = set()
     for r in (idea.get("reasons") or [])[1:]:
-        r = str(r)
-        if r.startswith("⚠️"):
-            continue
-        low = r.lower()
-        for key, pred in _PILLARS:
-            if pred(low):
-                out.add(key)
-                break
+        key = pillar_of(r)
+        if key:
+            out.add(key)
     return out
 
 
@@ -151,13 +168,42 @@ def _verdict(by_conf, totals):
             "gather more resolved history before trusting it.")
 
 
+def _mult_from_lift(lift, n_with, n_without):
+    """One pillar's SCORING multiplier from its realized win-rate lift (pp). Neutral
+    (1.0) until both sides clear `_W_MIN_SAMPLE` resolved; then a clamped raw multiplier
+    shrunk toward 1.0 by the thinner side's sample size. Pure."""
+    if lift is None or n_with < _W_MIN_SAMPLE or n_without < _W_MIN_SAMPLE:
+        return 1.0
+    raw = 1.0 + _W_K * (lift / 100.0)
+    raw = _W_LO if raw < _W_LO else _W_HI if raw > _W_HI else raw
+    n_eff = min(n_with, n_without)
+    shrink = n_eff / (n_eff + _W_N0)
+    return round(1.0 + shrink * (raw - 1.0), 2)
+
+
+def pillar_weights(days=None, rep=None):
+    """Turn each pillar's measured edge into a gentle SCORING multiplier the conviction
+    board can apply (adaptive weighting → the board learns from its own realized
+    results). Returns {pillar_key: mult in [0.5, 1.5]}; 1.0 = neutral / not enough
+    history. Pass `rep` to reuse an already-built report(). Educational — NOT advice."""
+    if rep is None:
+        rep = report(days=days)
+    out = {}
+    for row in rep.get("byPillar", []):
+        a, b = row.get("with") or {}, row.get("without") or {}
+        out[row.get("pillar")] = _mult_from_lift(
+            row.get("winRateLift"), a.get("resolved", 0), b.get("resolved", 0))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # report (impure: reads db.ideas)
 # ---------------------------------------------------------------------------
 def report(days=None, limit=5000):
     """Calibration of the saved EOD-conviction ideas. `days` optionally restricts to
     the last N calendar days. Returns {totals, byConfirmations, byRating, byDirection,
-    byPillar, warningImpact, verdict, note}."""
+    byPillar (each with its earned `weight`), warningImpact, adaptiveWeights, verdict,
+    note}."""
     import db
     since = None
     if days:
@@ -205,6 +251,12 @@ def report(days=None, limit=5000):
     warn = {"withWarn": _bucket_stats([i for i in ideas if has_warning(i)]),
             "noWarn": _bucket_stats([i for i in ideas if not has_warning(i)])}
 
+    # Adaptive scoring multipliers derived from the same per-pillar lift, attached so
+    # the board can apply them and the UI can show each pillar's earned weight inline.
+    weights = pillar_weights(rep={"byPillar": by_pillar})
+    for row in by_pillar:
+        row["weight"] = weights.get(row["pillar"], 1.0)
+
     return {
         "totals": totals,
         "byConfirmations": by_conf,
@@ -212,6 +264,7 @@ def report(days=None, limit=5000):
         "byDirection": by_dir,
         "byPillar": by_pillar,
         "warningImpact": warn,
+        "adaptiveWeights": weights,
         "verdict": _verdict(by_conf, totals),
         "filters": {"days": int(days) if days else None, "limit": limit},
         "note": None if ideas else (

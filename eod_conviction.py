@@ -300,11 +300,27 @@ def _option_overlay(direction, entry, target, opt):
             "confirms": confirms, "warns": warns}
 
 
-def _pick(f, bars, oi, deal_side, deal_list, sector=None, opt=None):
+def _apply_weights(pillars, weights):
+    """Scale each pillar's SCORING weight by its calibration-derived multiplier
+    (adaptive weighting). The confirmation COUNT is deliberately left untouched — only
+    the blended score shifts, so a proven pillar re-orders names WITHIN a confirmation
+    tier without ever letting one weighted signal jump the stacking discipline."""
+    if not weights:
+        return pillars
+    import conviction_calibration as _cc
+    out = []
+    for lbl, w in pillars:
+        key = _cc.pillar_of(lbl)
+        out.append((lbl, w * (weights.get(key, 1.0) if key else 1.0)))
+    return out
+
+
+def _pick(f, bars, oi, deal_side, deal_list, sector=None, opt=None, weights=None):
     """Build the best (LONG or SHORT) conviction pick for one name, or None.
-    Chooses the side with more confirming pillars (higher score breaks ties)."""
-    longs = _pillars_long(f, oi, deal_side, sector)
-    shorts = _pillars_short(f, oi, deal_side, sector)
+    Chooses the side with more confirming pillars (higher score breaks ties).
+    `weights` (optional {pillar_key: mult}) applies adaptive scoring — see board()."""
+    longs = _apply_weights(_pillars_long(f, oi, deal_side, sector), weights)
+    shorts = _apply_weights(_pillars_short(f, oi, deal_side, sector), weights)
     if not longs and not shorts:
         return None
     lscore, sscore = sum(w for _, w in longs), sum(w for _, w in shorts)
@@ -322,7 +338,7 @@ def _pick(f, bars, oi, deal_side, deal_list, sector=None, opt=None):
     if ov and ov["confirms"]:
         reasons.append("🎯 option chain: " + "; ".join(ov["confirms"][:2]))
         confirmations += 1
-        raw += _OPT_W
+        raw += _OPT_W * (weights.get("option", 1.0) if weights else 1.0)
     warnings = list(ov["warns"]) if ov else []
     raw -= _OPT_WARN * len(warnings)
     conviction = round(_clip(raw, 0, 100), 1)
@@ -364,14 +380,21 @@ def _pick(f, bars, oi, deal_side, deal_list, sector=None, opt=None):
 # ---------------------------------------------------------------------------
 def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
           with_deals=True, fno_only=False, lookback=_es.LOOKBACK,
-          with_options=True):
+          with_options=True, adaptive=False):
     """Rank the whole ingested EOD universe by STACKED conviction.
 
     A name makes the board only when at least `min_pillars` INDEPENDENT signals
     agree (breakout / delivery / volume / trend / OI buildup / bulk-deal). Rows are
     sorted by confirmations first, then the blended conviction score. Needs no
-    network beyond one tiny cached deals CSV (when `with_deals`). Returns
-    {date, longs, shorts, count, universe, scanned, filters, coverage, note}.
+    network beyond one tiny cached deals CSV (when `with_deals`).
+
+    `adaptive` feeds the confirmation-calibration back into scoring: each pillar's
+    weight is nudged by its measured realized edge (win-rate lift), so pillars that
+    have actually worked count for more. The confirmation COUNT (the primary sort key)
+    is untouched — weighting only re-orders within a tier — and multipliers are
+    neutral until a pillar has enough resolved history. Returns
+    {date, longs, shorts, count, universe, scanned, filters, coverage,
+    adaptive, adaptiveWeights, note}.
     """
     import db
     try:
@@ -409,6 +432,17 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
             log.warning("board: option-chain fuse failed", exc_info=True)
             omap = {}
 
+    # Adaptive scoring weights from the confirmation calibration (best-effort): each
+    # pillar's realized win-rate lift → a clamped, sample-shrunk scoring multiplier.
+    weights = None
+    if adaptive:
+        try:
+            import conviction_calibration as _cc
+            weights = _cc.pillar_weights()
+        except Exception:
+            log.warning("board: adaptive-weight lookup failed", exc_info=True)
+            weights = None
+
     fno = None
     if fno_only:
         try:
@@ -433,7 +467,7 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         oi = _oi_state(oi_all.get(sym), price_up)
         dlist = deal_map.get(sym) or []
         sctx = _ss.context(smap, sym) if (_ss and smap) else None
-        pick = _pick(f, bars, oi, _deal_side(dlist), dlist, sctx, omap.get(sym))
+        pick = _pick(f, bars, oi, _deal_side(dlist), dlist, sctx, omap.get(sym), weights)
         if not pick or pick["confirmations"] < min_pillars:
             continue
         picks.append(pick)
@@ -451,10 +485,12 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         "scanned": scanned,
         "withDeals": bool(deal_map),
         "withOptions": bool(omap),
+        "adaptive": bool(adaptive),
+        "adaptiveWeights": (weights if adaptive else None),
         "filters": {"minPrice": min_price, "minValueCr": min_value_cr,
                     "minPillars": min_pillars, "fnoOnly": bool(fno_only),
                     "withDeals": bool(with_deals), "withOptions": bool(with_options),
-                    "limit": limit},
+                    "adaptive": bool(adaptive), "limit": limit},
         "coverage": _es.status(),
         "note": None if grouped else (
             "No EOD history yet — load it first (⬇ Backfill history on the EOD "

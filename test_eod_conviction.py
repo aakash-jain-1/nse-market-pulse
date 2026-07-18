@@ -344,6 +344,59 @@ def test_pick_option_warning_shaves_conviction_not_pillars():
 
 
 # ---------------------------------------------------------------------------
+# adaptive weighting (calibration-derived pillar multipliers)
+# ---------------------------------------------------------------------------
+def test_apply_weights_scales_by_pillar_key():
+    pillars = [("breakout — at/above 20d high", 30.0),
+               ("uptrend (close > 20 > 50-DMA)", 16.0),
+               ("🧭 IT is a leading sector (#1/12, RS +5)", 14.0)]
+    out = dict(ec._apply_weights(pillars, {"breakout": 0.5, "sector": 1.5}))
+    assert out["breakout — at/above 20d high"] == 15.0        # ×0.5
+    assert out["uptrend (close > 20 > 50-DMA)"] == 16.0       # no key → ×1.0
+    assert out["🧭 IT is a leading sector (#1/12, RS +5)"] == 21.0  # ×1.5
+    # None weights = passthrough (the default, non-adaptive path)
+    assert ec._apply_weights(pillars, None) == pillars
+
+
+def test_pick_weights_reorder_within_tier_not_confirmations():
+    f = _feat(pctFromHigh=0.5, trend="up", delivPct=70.0)
+    bars = [_bar(d, 100.0) for d in _dates(14)]
+    sec = _sec(sector="IT", rank=1, total=12, strength=95.0, leading=True)
+    base = ec._pick(dict(f), bars, None, None, [], sec)
+    # up-weight the pillars that fired → higher conviction, SAME confirmation count
+    up = ec._pick(dict(f), bars, None, None, [], sec,
+                  weights={"breakout": 1.4, "delivery": 1.4, "sector": 1.4, "trend": 1.4})
+    down = ec._pick(dict(f), bars, None, None, [], sec,
+                    weights={"breakout": 0.6, "delivery": 0.6, "sector": 0.6, "trend": 0.6})
+    assert up["confirmations"] == base["confirmations"] == down["confirmations"]
+    assert up["reasons"] == base["reasons"]                  # labels untouched
+    assert up["conviction"] > base["conviction"] > down["conviction"]
+
+
+def test_pick_weights_scale_option_pillar():
+    f = _feat(pctFromHigh=0.5, trend="up", delivPct=70.0)
+    bars = [_bar(d, 100.0) for d in _dates(14)]
+    opt = _opt(maxPain=120.0, pcr=1.5, resistance=[{"strike": 140.0, "oi": 9000}])
+    base = ec._pick(dict(f), bars, None, None, [], None, opt)
+    up = ec._pick(dict(f), bars, None, None, [], None, opt, weights={"option": 1.5})
+    assert up["confirmations"] == base["confirmations"]      # still one option pillar
+    assert up["conviction"] > base["conviction"]             # but worth more
+
+
+def test_board_adaptive_returns_weights_and_is_off_by_default():
+    with _temp_db() as db, _no_options():
+        _seed(db)
+        off = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2)
+        assert off["adaptive"] is False and off["adaptiveWeights"] is None
+        on = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2, adaptive=True)
+        assert on["adaptive"] is True and isinstance(on["adaptiveWeights"], dict)
+        # no resolved idea history seeded → every multiplier neutral (no swing)
+        assert all(v == 1.0 for v in on["adaptiveWeights"].values())
+        # neutral weights ⇒ identical ranking to the non-adaptive board
+        assert [p["symbol"] for p in on["longs"]] == [p["symbol"] for p in off["longs"]]
+
+
+# ---------------------------------------------------------------------------
 # board() / save() against a seeded DB
 # ---------------------------------------------------------------------------
 def _seed(db):

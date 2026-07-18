@@ -420,7 +420,7 @@ def api_eod_conviction():
     """Stacked-conviction board ('tomorrow's watchlist'): fuses breakout + delivery%
     + bulk/block deals + F&O OI buildup + sector RS + option chain, ranked by how many
     independent signals agree. Off-hours.
-    ?limit=&minPrice=&minValueCr=&minPillars=&fno=1&deals=0&options=0."""
+    ?limit=&minPrice=&minValueCr=&minPillars=&fno=1&deals=0&options=0&adaptive=1."""
     import eod_conviction
 
     def fnum(name, default):
@@ -438,6 +438,7 @@ def api_eod_conviction():
         fno_only=request.args.get("fno") == "1",
         with_deals=request.args.get("deals") != "0",     # on by default
         with_options=request.args.get("options") != "0",  # on by default
+        adaptive=request.args.get("adaptive") == "1",     # off by default
     ))
 
 
@@ -460,7 +461,8 @@ def api_eod_conviction_save():
         min_value_cr=num("minValueCr", 2.0), min_pillars=int(num("minPillars", 2)),
         fno_only=(body.get("fno") or request.args.get("fno")) == "1",
         with_deals=(body.get("deals", request.args.get("deals")) != "0"),
-        with_options=(body.get("options", request.args.get("options")) != "0"))
+        with_options=(body.get("options", request.args.get("options")) != "0"),
+        adaptive=(body.get("adaptive", request.args.get("adaptive")) == "1"))
     return jsonify(eod_conviction.save(b))
 
 

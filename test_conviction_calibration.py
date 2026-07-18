@@ -114,6 +114,23 @@ def test_has_warning():
     assert cc.has_warning(_idea()) is False
 
 
+def test_pillar_of_maps_live_and_saved_labels():
+    # exactly the labels the board emits (before the 🏆 prefix / ⚠️ warnings)
+    assert cc.pillar_of("breakout — at/above 20d high") == "breakout"
+    assert cc.pillar_of("coiling just under the 20d high") == "breakout"
+    assert cc.pillar_of("breakdown — at/below 20d low") == "breakout"
+    assert cc.pillar_of("uptrend (close > 20 > 50-DMA)") == "trend"
+    assert cc.pillar_of("delivery 72% — real accumulation") == "delivery"
+    assert cc.pillar_of("1.8x average volume") == "volume"
+    assert cc.pillar_of("F&O long buildup (OI +12%)") == "oi"
+    assert cc.pillar_of("F&O short covering (OI -9%)") == "oi"
+    assert cc.pillar_of("🐋 bulk/block BUY (institutional print)") == "deal"
+    assert cc.pillar_of("🧭 IT is a leading sector (#1/12, RS +5)") == "sector"
+    assert cc.pillar_of("🎯 option chain: room to call OI wall ₹130") == "option"
+    assert cc.pillar_of("⚠️ target runs into call OI wall ₹110") is None
+    assert cc.pillar_of("random noise") is None
+
+
 # ---------------------------------------------------------------------------
 # bucket stats / lift / verdict (pure)
 # ---------------------------------------------------------------------------
@@ -183,6 +200,49 @@ def test_verdict_not_helping_when_falling():
     ]
     tot = {"resolved": 10}
     assert "NOT helping" in cc._verdict(by_conf, tot)
+
+
+# ---------------------------------------------------------------------------
+# adaptive weighting (pure)
+# ---------------------------------------------------------------------------
+def test_mult_gate_and_neutral():
+    # too few resolved on the WITH side → neutral
+    assert cc._mult_from_lift(20.0, 3, 50) == 1.0
+    # too few on the WITHOUT side → neutral
+    assert cc._mult_from_lift(20.0, 50, 3) == 1.0
+    # no measurable lift → neutral
+    assert cc._mult_from_lift(None, 50, 50) == 1.0
+
+
+def test_mult_clamped():
+    hi = cc._mult_from_lift(80.0, 500, 500)     # huge +lift, ample sample
+    lo = cc._mult_from_lift(-90.0, 500, 500)    # huge -lift
+    assert cc._W_LO <= lo < 1.0 < hi <= cc._W_HI
+
+
+def test_mult_shrinks_toward_neutral_with_thin_sample():
+    thin = cc._mult_from_lift(20.0, cc._W_MIN_SAMPLE + 1, cc._W_MIN_SAMPLE + 1)
+    ample = cc._mult_from_lift(20.0, 500, 500)
+    assert 1.0 < thin < ample                    # both up, thin closer to neutral
+
+
+def test_mult_direction_matches_sign_of_lift():
+    assert cc._mult_from_lift(15.0, 100, 100) > 1.0   # helped → up-weight
+    assert cc._mult_from_lift(-15.0, 100, 100) < 1.0  # hurt → down-weight
+
+
+def test_pillar_weights_from_report_shape():
+    rep = {"byPillar": [
+        {"pillar": "sector", "winRateLift": 30.0,
+         "with": {"resolved": 100}, "without": {"resolved": 100}},
+        {"pillar": "breakout", "winRateLift": -20.0,
+         "with": {"resolved": 100}, "without": {"resolved": 100}},
+        {"pillar": "option", "winRateLift": 40.0,
+         "with": {"resolved": 2}, "without": {"resolved": 100}},   # thin → neutral
+    ]}
+    w = cc.pillar_weights(rep=rep)
+    assert w["sector"] > 1.0 and w["breakout"] < 1.0 and w["option"] == 1.0
+    assert cc._W_LO <= w["sector"] <= cc._W_HI
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +320,19 @@ def test_report_by_rating_and_direction_shapes():
         assert ratings["High"]["n"] == 4 and ratings["Medium"]["n"] == 5
         dirs = {b["direction"]: b for b in r["byDirection"]}
         assert dirs["LONG"]["n"] == 9 and dirs["SHORT"]["n"] == 0
+
+
+def test_report_attaches_adaptive_weights():
+    with _temp_db() as db:
+        _seed(db)
+        r = cc.report()
+        # every pillar row carries its earned weight, and the top-level map agrees
+        assert "adaptiveWeights" in r
+        for row in r["byPillar"]:
+            assert row["weight"] == r["adaptiveWeights"][row["pillar"]]
+            assert cc._W_LO <= row["weight"] <= cc._W_HI
+        # the seed is small (< min-sample), so weights are neutral — never a swing
+        assert all(w == 1.0 for w in r["adaptiveWeights"].values())
 
 
 if __name__ == "__main__":

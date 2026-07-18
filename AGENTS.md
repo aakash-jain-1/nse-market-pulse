@@ -49,7 +49,7 @@ NSE/
 ├── eod_scheduler.py   # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
 ├── sectors.py         # Curated NSE symbol→sector map (17 sectors, ~303 names) — static data + sector_of()/all_sectors()
 ├── sector_scan.py     # Sector relative-strength board over db.eod_bars — cross-sectional RS vs market, ranks sectors + leaders/laggards; strength_map/context = the reusable sector pillar the EOD Scan + Conviction boards fold in
-├── conviction_calibration.py # Does confirmation-stacking pay? Scores realized TARGET/STOP of saved conviction ideas — win rate by pillar count / per-pillar lift / option-⚠️ impact + verdict
+├── conviction_calibration.py # Does confirmation-stacking pay? Scores realized TARGET/STOP of saved conviction ideas — win rate by pillar count / per-pillar lift / option-⚠️ impact + verdict; pillar_weights() feeds that edge back into board scoring (adaptive)
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
@@ -60,7 +60,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 698 unit tests across 33 suites (see below)
+├── test_*.py          # 709 unit tests across 33 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -68,7 +68,7 @@ NSE/
 │   ├── test_deals.py                                # bulk/block deal parse (incl. NO-RECORDS) + cached fetch/recent/by_symbol/status + keep-cache-during-block
 │   ├── test_eod_scanner.py                          # full-market swing scanner: features/tags/score/views/scan/status + delivery view + deals xref
 │   ├── test_eod_conviction.py                       # conviction board: OI-state quadrants / pillars / 2R plan / stacked ranking / save-skip
-│   ├── test_conviction_calibration.py               # calibration: pillar/confirmation parsing / bucket stats / per-pillar lift / verdict / report() on temp DB
+│   ├── test_conviction_calibration.py               # calibration: pillar_of / bucket stats / per-pillar lift / verdict / adaptive pillar_weights (gate/clamp/shrink) / report() on temp DB
 │   ├── test_eod_options.py                          # resilient EOD option chain: parse/assemble/chain/summary/analytics
 │   ├── test_eod_scheduler.py                        # auto post-close refresh: pure should_run gating / job orchestration / tick recording / routes
 │   ├── test_sectors.py                              # sector map integrity: reverse index / canonicalisation / coverage / first-wins
@@ -128,7 +128,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 698 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/db/app+routes/feeds/…)
+python -m pytest -q      # 709 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -388,13 +388,16 @@ with no creds the app is unchanged.
   to the EOD session, never clobbers a live idea); **Send digest** pushes the top picks
   off-screen via `notify.send_digest()`. 🏆 Conviction tab; `/api/eod/conviction[/save|
   /digest]`. Off-hours.
-- **📊 Conviction calibration (`conviction_calibration.py`)** — the honest scorecard for
-  the board above: reads back the saved conviction ideas, scores their candle-accurate
-  `TARGET`/`STOP` outcomes, and reports whether stacking actually pays — win rate by
-  **pillar count** (4-signal vs 2-signal), by rating/direction, the **per-pillar lift**
-  (win rate WITH vs WITHOUT each pillar) and the **option-⚠️ warning impact**, plus a
-  one-line verdict. 📊 Calibration button (modal) on the Conviction tab;
-  `/api/eod/conviction/calibration?days=N`.
+- **📊 Conviction calibration + ⚖️ adaptive weighting (`conviction_calibration.py`)** —
+  the honest scorecard for the board above, then the feedback loop: reads back the saved
+  conviction ideas, scores their candle-accurate `TARGET`/`STOP` outcomes, and reports
+  whether stacking actually pays — win rate by **pillar count** (4-signal vs 2-signal), by
+  rating/direction, the **per-pillar lift** (win rate WITH vs WITHOUT each pillar) and the
+  **option-⚠️ warning impact**, plus a one-line verdict. `pillar_weights()` then turns each
+  measured lift into a clamped, sample-shrunk scoring multiplier the board applies with
+  `board(adaptive=True)` — re-ordering WITHIN a confirmation tier without touching the
+  stacking count. 📊 Calibration modal + ⚖️ Adaptive toggle on the Conviction tab;
+  `/api/eod/conviction/calibration?days=N`, `/api/eod/conviction?adaptive=1`.
 - **Demand Score** — composite ranking combining volume-gainers (volume
   multiple), most-active-by-value (money flow rank), and top-gainers (% gain).
   See `get_demand_score()`.
@@ -531,12 +534,24 @@ with no creds the app is unchanged.
   daily-backtest trades through a real book (finite capital, concurrent-position cap,
   risk/equal sizing, **conviction-ranked** same-day picks, **daily mark-to-market**) →
   equity curve + CAGR / max-DD / Sharpe. *Feature complete.*
-- ✅ *(done — see below)* conviction calibration (`conviction_calibration.py`) — scores the
-  saved conviction ideas' realized TARGET/STOP outcomes to test whether confirmation-stacking
-  actually pays (win rate by pillar count, per-pillar lift, option-⚠️ impact + verdict).
+- ✅ *(done — see below)* conviction calibration + adaptive weighting (`conviction_calibration.py`)
+  — scores the saved conviction ideas' realized TARGET/STOP outcomes to test whether
+  confirmation-stacking pays (win rate by pillar count, per-pillar lift, option-⚠️ impact +
+  verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
 
+- **⚖️ Adaptive pillar weighting (calibration → scoring)** — the calibration report *measured*
+  each pillar's edge but was read-only; this feeds it back so the board learns from its own
+  realized results. `conviction_calibration.pillar_weights()` maps each pillar's win-rate lift
+  → a scoring multiplier **clamped `[0.5,1.5]`, shrunk toward 1.0 by sample size, neutral until
+  ≥5 resolved on both sides** (`_mult_from_lift`, pure). `pillar_of()` is now the ONE shared
+  label→key classifier (the parser refactored onto it so it can't drift from the weighter).
+  `eod_conviction.board(adaptive=True)` scales pillar weights via `_apply_weights` (option
+  bonus too) but **leaves the confirmation COUNT alone** — weighting only re-orders within a
+  tier, never overriding how many signals agree. `?adaptive=1` on the board + save routes +
+  a **⚖️ Adaptive** toggle (OFF by default); the board echoes applied non-neutral weights and
+  the 📊 Calibration modal gains a "→ weight" column. Tests **+11** (suite **698 → 709**); lint clean.
 - **📊 Conviction calibration / hit-rate report** — closes the confirmation-stacking loop with
   DATA: does a 4-pillar pick actually beat a 2-pillar one, and does each pillar add or subtract
   edge? `conviction_calibration.py` reads back the saved conviction ideas (`db.ideas_all`, new —
