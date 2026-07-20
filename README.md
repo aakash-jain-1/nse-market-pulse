@@ -919,7 +919,9 @@ all at a single choke point: **at most 4 connections in flight**, request starts
 worker fan-outs (the cold snapshot-logger / context-build cycle) — the exact per-IP burst
 Akamai's rate detector flags — into a steady, browser-like stream. Requests also now carry
 **modern-Chrome headers** (client hints + `Sec-Fetch-*`) so they look less scripted.
-`/api/health.nse` exposes the pacer state (`blockCount`, `reqLastMin`, `concurrency`).
+`/api/health.nse` exposes the pacer state (`blockCount`, `reqLastMin`, `concurrency`),
+and a small **header chip** shows the live NSE request rate vs the soft ceiling
+(green/amber/red) so you can see headroom before a block.
 
 **Block prevention (fewer needless hits).** Beyond recovery, the app trims NSE load
 proactively. Per-symbol quote/chart/candles are served **from the broker** (Angel)

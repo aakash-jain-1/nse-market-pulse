@@ -405,6 +405,12 @@
     .src-chip.broker { color: #a5f3fc; background: rgba(14,116,144,0.30); border: 1px solid #0e7490; }
     .src-chip.nse { color: #c7d2fe; background: rgba(67,56,202,0.30); border: 1px solid #4338ca; }
     .src-chip.eod { color: #fed7aa; background: rgba(124,45,18,0.35); border: 1px solid #9a3412; }
+    /* Live NSE request-rate headroom chip (from /api/health.nse pacer stats). */
+    .nse-pulse { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 20px; white-space: nowrap; letter-spacing: 0.3px; vertical-align: middle; cursor: help; border: 1px solid; }
+    .nse-pulse.ok      { color: #bbf7d0; background: rgba(22,101,52,0.28); border-color: #166534; }
+    .nse-pulse.warn    { color: #fde68a; background: rgba(133,77,14,0.30); border-color: #854d0e; }
+    .nse-pulse.hot     { color: #fecaca; background: rgba(153,27,27,0.32); border-color: #991b1b; }
+    .nse-pulse.blocked { color: #fed7aa; background: rgba(124,45,18,0.40); border-color: #9a3412; }
     .live-chart { width: 100%; height: 470px; }
     .live-nse-banner { grid-column: 1 / -1; font-size: 12px; color: var(--muted); background: var(--panel-2);
       border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
@@ -502,6 +508,7 @@
         <button id="logBtn" title="Snapshot log & backtest">📊 Log</button>
       </span>
       <span><span class="dot" id="liveDot"></span> <span id="updated">—</span></span>
+      <span id="nsePulse" class="nse-pulse ok" style="display:none" title="Live NSE request rate">NSE —</span>
     </div>
   </header>
 
@@ -5400,6 +5407,27 @@
         `⚠️ NSE has temporarily rate-limited this network (Akamai). Live data is paused — showing <b>cached / EOD</b> values. Auto-resuming in <b>${m}:${String(s).padStart(2, "0")}</b>.${esc} Switching network (e.g. mobile hotspot) or just waiting clears it.`;
       el.style.display = "block";
     }
+    // Header chip: live NSE request rate (last-60s pacer window) vs the soft ceiling,
+    // so you can SEE headroom before a block instead of guessing. Fed by /api/health.
+    function renderNsePulse(n) {
+      const el = document.getElementById("nsePulse");
+      if (!el) return;
+      if (!n || typeof n.reqLastMin !== "number") { el.style.display = "none"; return; }
+      const cap = n.softRpm || 120, rpm = n.reqLastMin || 0;
+      const blocked = (n.blockedForSec || 0) > 0;
+      let cls = "ok", txt = `NSE ${rpm}/min`;
+      if (blocked) {
+        cls = "blocked";
+        txt = `NSE blocked${n.blockCount > 1 ? " \u00d7" + n.blockCount : ""}`;
+      } else if (rpm >= cap * 0.9) { cls = "hot"; }
+      else if (rpm >= cap * 0.6) { cls = "warn"; }
+      el.className = "nse-pulse " + cls;
+      el.textContent = txt;
+      el.title = blocked
+        ? `NSE is in an Akamai cooldown (${Math.round(n.blockedForSec)}s left${n.blockCount > 1 ? ", repeat block #" + n.blockCount : ""}). Serving cached / EOD data.`
+        : `Live NSE request rate: ${rpm} of a soft ${cap}/min ceiling (\u2264${n.concurrency} concurrent). Green = headroom, amber = busy, red = near the cap.`;
+      el.style.display = "";
+    }
     async function pollNseBlock() {
       try {
         const h = await fetch("/api/health").then(r => r.json());
@@ -5408,6 +5436,7 @@
         _nseBlockCount = (h.nse && h.nse.blockCount) || 0;
         if (h.logger && typeof h.logger.marketHours === "boolean")
           _marketOpen = h.logger.marketHours;
+        renderNsePulse(h.nse);
       } catch (e) { /* leave the last known state */ }
       renderBlockBanner();
       scheduleRefresh();   // re-plan the movers cadence when block / market state changes

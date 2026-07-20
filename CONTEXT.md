@@ -470,6 +470,15 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-07-20 — Header NSE-rate chip (pacer headroom visible) (suite 776, UI only)
+- **Why:** the pacer/blocks were only observable via `/api/health` JSON. Surface the live
+  request rate so you can *see* headroom before a block.
+- **What (`templates/index.html`):** a small `#nsePulse` chip in the header, fed by the
+  existing 45s `pollNseBlock()` from `/api/health.nse`. Shows `NSE <reqLastMin>/min` and
+  colours by load — green (<60% of `softRpm`) / amber (60-90%) / red (≥90%), and
+  `NSE blocked ×N` during an Akamai cooldown. Tooltip explains the soft ceiling +
+  concurrency. No backend change (fields already shipped + tested); no new tests.
+
 ### 2026-07-20 — Trim NSE load at the source: slower logger cadence + smaller fan-out (suite 772 → 776)
 - **Why:** complements the pacer — fewer *total* hits during market hours, not just smoother
   bursts. The dominant server-side NSE consumer is the snapshot logger's 60s loop, whose
