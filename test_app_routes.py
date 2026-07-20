@@ -870,6 +870,13 @@ def test_index_renders():
     assert b'id="nsePulse"' in r.data and b'id="nseTls"' in r.data
 
 
+def test_force_utf8_stdio_is_idempotent_and_safe():
+    # Guards the startup banner (⚠/…/box glyphs) against a UnicodeEncodeError on a
+    # non-UTF-8 stdout (Windows cp1252 / piped output). Must never raise, even twice.
+    webapp._force_utf8_stdio()
+    webapp._force_utf8_stdio()
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

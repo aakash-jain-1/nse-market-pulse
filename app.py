@@ -16,9 +16,25 @@ origin and hijacks requests. A fresh port sidesteps that stale cache.
 import hmac
 import logging
 import os
+import sys
 import time
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
+
+
+def _force_utf8_stdio():
+    """Make stdout/stderr UTF-8 so the startup banner's box-drawing + ⚠/… glyphs never
+    crash on a non-UTF-8 console (Windows cp1252) or when piped to a file. Must run
+    BEFORE deps that wrap stdout via colorama (smartapi→logzero) are imported; errors=
+    "replace" keeps it crash-proof even if a glyph can't be rendered."""
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_force_utf8_stdio()
 
 from flask import Flask, g, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException

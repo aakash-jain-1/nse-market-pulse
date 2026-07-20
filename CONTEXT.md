@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 796 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 797 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -338,7 +338,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **796 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **797 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -494,6 +494,16 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Fix: startup banner crashed on non-UTF-8 stdout (suite 796 → 797)
+- **Why:** the "dashboard is live" banner prints `⚠`/`…`/box-drawing glyphs. On a **cp1252**
+  stdout (a plain Windows console, or output piped to a file) `print()` raised
+  `UnicodeEncodeError` and **killed launch** — surfaced when restarting the app under a
+  non-UTF-8 shell. A UTF-8 terminal (the usual case) never hit it, so it lurked.
+- **What (`app.py`):** `_force_utf8_stdio()` reconfigures `sys.stdout`/`stderr` to
+  `utf-8, errors="replace"` at the very top — BEFORE the deps that wrap stdout via colorama
+  (smartapi→logzero) load — so the banner (and any glyph) is crash-proof on every console,
+  keeping the emoji where it renders. Tests **+1** (idempotent/no-raise guard). Suite **796 → 797**.
 
 ### 2026-07-20 — Per-endpoint NSE request budget (data-driven trimming) (suite 791 → 796)
 - **Why:** the pacer knows the *total* rate but not WHERE it goes. To target the next volume
