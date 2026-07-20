@@ -493,6 +493,17 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-07-20 — Header 🛡 Chrome-TLS badge (transport visible) (suite 791, UI only)
+- **Why:** auto-failover flips the transport to a real Chrome handshake on repeat blocks, but
+  that was invisible — only in `/api/health` JSON. Make the self-healing *show*.
+- **What (`templates/index.html`):** a violet **`#nseTls` badge** next to the rate chip that
+  appears ONLY when `nse.impersonate` is in effect ("🛡 Chrome TLS"), with a tooltip noting
+  auto-failover vs always-on (from `nse.impersonateMode`); hidden on the normal requests path.
+  The WAF-block banner also gains a line ("Now routing NSE through a real Chrome TLS handshake")
+  when impersonation engages. Fed by the existing 45s `pollNseBlock()`; no backend change.
+  Tests: `/api/health.nse` now asserts `impersonate`/`impersonateMode`, and `test_index_renders`
+  asserts the badge markup. Suite stays **791**.
+
 ### 2026-07-20 — Auto-failover to impersonation + live-verified curl_cffi (suite 785 → 791)
 - **Why:** Phase 2 landed impersonation but as a manual env toggle (default was always-on
   `chrome124`). Better: run the *light* pure-requests transport normally and only pay for the

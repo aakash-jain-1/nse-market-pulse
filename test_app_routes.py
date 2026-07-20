@@ -144,6 +144,8 @@ def test_health_reports_nse_block():
             assert j["nse"]["blockCount"] == 0
             assert j["nse"]["concurrency"] == nse._NSE_MAX_CONCURRENCY
             assert "reqLastMin" in j["nse"]
+            # Impersonation fields the header TLS badge reads (present even without the dep).
+            assert "impersonate" in j["nse"] and "impersonateMode" in j["nse"]
             assert "autoEod" in j and "enabled" in j["autoEod"]
             # The dashboard's adaptive refresh reads logger.marketHours to throttle the
             # movers poll off-hours — lock that contract here.
@@ -862,6 +864,8 @@ def test_envflag():
 def test_index_renders():
     r = client.get("/")
     assert r.status_code == 200 and r.mimetype == "text/html"
+    # Header widgets the pacer/impersonation UX depends on are wired into the template.
+    assert b'id="nsePulse"' in r.data and b'id="nseTls"' in r.data
 
 
 def _main():

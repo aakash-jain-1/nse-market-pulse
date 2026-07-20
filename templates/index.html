@@ -411,6 +411,10 @@
     .nse-pulse.warn    { color: #fde68a; background: rgba(133,77,14,0.30); border-color: #854d0e; }
     .nse-pulse.hot     { color: #fecaca; background: rgba(153,27,27,0.32); border-color: #991b1b; }
     .nse-pulse.blocked { color: #fed7aa; background: rgba(124,45,18,0.40); border-color: #9a3412; }
+    /* TLS-transport badge: shown only when curl_cffi Chrome impersonation is in effect. */
+    .nse-tls { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 20px; white-space: nowrap;
+      letter-spacing: 0.3px; vertical-align: middle; cursor: help; margin-left: 2px;
+      color: #ddd6fe; background: rgba(76,29,149,0.35); border: 1px solid #6d28d9; }
     .live-chart { width: 100%; height: 470px; }
     .live-nse-banner { grid-column: 1 / -1; font-size: 12px; color: var(--muted); background: var(--panel-2);
       border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
@@ -509,6 +513,7 @@
       </span>
       <span><span class="dot" id="liveDot"></span> <span id="updated">—</span></span>
       <span id="nsePulse" class="nse-pulse ok" style="display:none" title="Live NSE request rate">NSE —</span>
+      <span id="nseTls" class="nse-tls" style="display:none" title="NSE TLS transport">🛡 TLS</span>
     </div>
   </header>
 
@@ -5392,6 +5397,7 @@
     // countdown) instead of silently showing stale numbers.
     let _nseBlockUntil = 0;
     let _nseBlockCount = 0;   // consecutive blocks (server escalates the cooldown each time)
+    let _nseImpersonate = null;   // curl_cffi profile in effect now (null = plain requests)
     function renderBlockBanner() {
       const el = document.getElementById("nseBlockBanner");
       if (!el) return;
@@ -5403,16 +5409,25 @@
       const esc = _nseBlockCount > 1
         ? ` <b>Repeat block #${_nseBlockCount}</b> — backing off longer so the edge can cool down.`
         : "";
+      // Auto-failover: after repeat blocks we upgrade to a real Chrome TLS handshake.
+      const imp = _nseImpersonate
+        ? ` Now routing NSE through a real <b>Chrome TLS</b> handshake (auto-failover).`
+        : "";
       document.getElementById("nseBlockMsg").innerHTML =
-        `⚠️ NSE has temporarily rate-limited this network (Akamai). Live data is paused — showing <b>cached / EOD</b> values. Auto-resuming in <b>${m}:${String(s).padStart(2, "0")}</b>.${esc} Switching network (e.g. mobile hotspot) or just waiting clears it.`;
+        `⚠️ NSE has temporarily rate-limited this network (Akamai). Live data is paused — showing <b>cached / EOD</b> values. Auto-resuming in <b>${m}:${String(s).padStart(2, "0")}</b>.${esc}${imp} Switching network (e.g. mobile hotspot) or just waiting clears it.`;
       el.style.display = "block";
     }
     // Header chip: live NSE request rate (last-60s pacer window) vs the soft ceiling,
     // so you can SEE headroom before a block instead of guessing. Fed by /api/health.
     function renderNsePulse(n) {
       const el = document.getElementById("nsePulse");
+      const tls = document.getElementById("nseTls");
       if (!el) return;
-      if (!n || typeof n.reqLastMin !== "number") { el.style.display = "none"; return; }
+      if (!n || typeof n.reqLastMin !== "number") {
+        el.style.display = "none";
+        if (tls) tls.style.display = "none";
+        return;
+      }
       const cap = n.softRpm || 120, rpm = n.reqLastMin || 0;
       const blocked = (n.blockedForSec || 0) > 0;
       let cls = "ok", txt = `NSE ${rpm}/min`;
@@ -5427,6 +5442,20 @@
         ? `NSE is in an Akamai cooldown (${Math.round(n.blockedForSec)}s left${n.blockCount > 1 ? ", repeat block #" + n.blockCount : ""}). Serving cached / EOD data.`
         : `Live NSE request rate: ${rpm} of a soft ${cap}/min ceiling (\u2264${n.concurrency} concurrent). Green = headroom, amber = busy, red = near the cap.`;
       el.style.display = "";
+      // TLS-transport badge: visible only when curl_cffi impersonation is actually in
+      // effect (auto-failover engaged, or an always-on profile), so you can SEE the
+      // handshake upgrade kick in on repeat blocks. Hidden in the normal requests path.
+      if (tls) {
+        if (n.impersonate) {
+          const auto = (n.impersonateMode || "") === "auto";
+          tls.textContent = "🛡 Chrome TLS";
+          tls.title = `NSE is using a real Chrome TLS handshake (curl_cffi ${n.impersonate}`
+            + `${auto ? ", auto-failover after repeat blocks" : ", always-on"}).`;
+          tls.style.display = "";
+        } else {
+          tls.style.display = "none";
+        }
+      }
     }
     async function pollNseBlock() {
       try {
@@ -5434,6 +5463,7 @@
         const secs = (h.nse && h.nse.blockedForSec) || 0;
         _nseBlockUntil = secs > 0 ? Date.now() + secs * 1000 : 0;
         _nseBlockCount = (h.nse && h.nse.blockCount) || 0;
+        _nseImpersonate = (h.nse && h.nse.impersonate) || null;
         if (h.logger && typeof h.logger.marketHours === "boolean")
           _marketOpen = h.logger.marketHours;
         renderNsePulse(h.nse);

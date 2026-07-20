@@ -921,7 +921,9 @@ Akamai's rate detector flags — into a steady, browser-like stream. Requests al
 **modern-Chrome headers** (client hints + `Sec-Fetch-*`) so they look less scripted.
 `/api/health.nse` exposes the pacer state (`blockCount`, `reqLastMin`, `concurrency`),
 and a small **header chip** shows the live NSE request rate vs the soft ceiling
-(green/amber/red) so you can see headroom before a block.
+(green/amber/red) so you can see headroom before a block. A second **🛡 Chrome TLS
+badge** lights up beside it whenever the impersonated transport is actually in effect
+(see below), so the auto-failover is visible at a glance.
 
 **Optional: real Chrome TLS fingerprint (`curl_cffi`) with auto-failover.** Pacing + headers
 fix the *rate* and the *headers*, but plain `requests` still presents a Python TLS/HTTP2

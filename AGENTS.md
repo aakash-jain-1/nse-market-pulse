@@ -552,6 +552,11 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Header 🛡 Chrome-TLS badge (UI)** — auto-failover flips the transport invisibly; now a violet
+  `#nseTls` badge appears next to the NSE-rate chip only when `nse.impersonate` is in effect
+  (tooltip: auto vs always-on, from `nse.impersonateMode`), and the WAF-block banner notes when
+  it engages. Fed by the existing `pollNseBlock()`; no backend change. `/api/health.nse` test
+  now asserts `impersonate`/`impersonateMode`, `test_index_renders` asserts the badge. Suite 791.
 - **Auto-failover to impersonation + live-verified curl_cffi** — turned Phase 2 from a manual
   env toggle into self-healing. `NSE_TLS_IMPERSONATE` gained an **`auto` mode (now default)**:
   run the light pure-requests transport normally and only escalate to the curl_cffi Chrome
