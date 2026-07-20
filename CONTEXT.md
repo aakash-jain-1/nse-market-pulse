@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 753 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 757 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -287,7 +287,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **753 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **757 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -439,6 +439,29 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Live-verified the Angel REST path + hardened getCandleData rate limits (suite 753 → 757)
+- **Live check (real creds, read-only, no orders):** logged into Angel with the configured
+  `angel_config.json`, exercised `rest_quote` / `rest_chart` / `rest_ohlc` on RELIANCE.
+  **All work** and return real data with correct **IST-baked timestamps**: quote =
+  LTP+OHLC+5-level depth; candles at **1m / 5m / 15m / 1D** (e.g. 1m from 09:15→now, daily
+  = 20 sessions). So the whole broker-first migration is real, not just fake-tested.
+- **The one real gap the fakes couldn't catch:** Angel's **historical (getCandleData) API is
+  rate-limited on three sliding windows — 3/s, 180/min, 5000/hr** (per Angel's docs) — and
+  returns a plain-text *"Access denied because of exceeding access rate"* (SDK → `DataException`)
+  when bursted (clicking through 1m/5m/15m/D, flicking between stocks). The nasty one is the
+  **sliding per-minute window**: 180 calls in the first 10s blocks you for the rest of the
+  minute even at zero req/s after. Isolated calls always succeed; only bursts trip it. Left
+  unhandled it silently falls back to NSE, defeating broker-first.
+- **Fix (`angel_feed._get_candles` + `_candle_throttle`):** a **serialized, rate-limit-aware**
+  wrapper both `rest_chart` and `rest_ohlc` now use — proactively honors the **3/s min gap
+  (~0.4s)** AND the **180/min sliding cap** (deque of recent call times, with headroom), and on
+  an actual trip backs off **exponentially (1s→2s→4s)**, Angel's own recommendation; other
+  errors fail fast. Bursts degrade to a small delay instead of an NSE hit; None→NSE stays the
+  final safety net. (Live prices already stream over the WebSocket, not REST — so only the
+  historical path needs this.)
+- **Tests +4** (`_get_candles`: retries-then-succeeds, gives-up→None, no-retry-on-other-error;
+  `_candle_throttle` waits on a full minute-window). Suite **753 → 757**.
 
 ### 2026-07-20 — Data-source provenance chip: see which feed served each number (suite 753)
 - **Why:** after the broker-first migration + adaptive refresh, a given number in the

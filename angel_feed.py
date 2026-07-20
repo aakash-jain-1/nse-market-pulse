@@ -28,6 +28,7 @@ API *order execution*. This module only streams market DATA (no orders), which
 has no such requirement — it works fine on a normal home/dynamic IP.
 """
 
+import collections
 import json
 import os
 import threading
@@ -506,6 +507,61 @@ def rest_quote(symbol):
     return None
 
 
+# Angel's historical (getCandleData) API is rate-limited on THREE sliding windows —
+# per Angel's own docs: 3/sec, 180/min, 5000/hour. When bursted it returns a plain-text
+# "Access denied because of exceeding access rate" (surfaced by the SDK as a
+# DataException) — e.g. a user clicking through 1m/5m/15m/D or flicking between stocks.
+# The nasty one is the *sliding* per-minute window: 180 calls in the first 10s blocks
+# you for the rest of the minute even if your per-second rate is then zero. So we
+# proactively honor BOTH the per-second gap and the per-minute cap (with headroom), and
+# on an actual trip we back off exponentially (1s→2s→4s, Angel's recommendation). This
+# keeps broker-first candles instead of needlessly falling back to NSE. Verified live:
+# the calls are correct; only bursts trip it.
+_candle_lock = threading.Lock()
+_candle_calls = collections.deque()      # epoch secs of recent calls (sliding 60s window)
+_CANDLE_MIN_GAP = 0.4                     # per-second cap 3/s → ~0.4s apart (headroom)
+_CANDLE_PER_MIN = 170                     # per-minute cap 180 (sliding) → keep headroom
+_CANDLE_BACKOFF = (1.0, 2.0, 4.0)        # exponential backoff on a rate-limit response
+
+
+def _candle_throttle():
+    """Block until a getCandleData call fits Angel's 3/s + 180/min sliding limits.
+    Assumes _candle_lock is held (serializes all candle traffic)."""
+    now = time.time()
+    if _candle_calls:                                    # per-second: min gap
+        gap = now - _candle_calls[-1]
+        if gap < _CANDLE_MIN_GAP:
+            time.sleep(_CANDLE_MIN_GAP - gap)
+            now = time.time()
+    while _candle_calls and now - _candle_calls[0] > 60:  # drop calls out of the window
+        _candle_calls.popleft()
+    if len(_candle_calls) >= _CANDLE_PER_MIN:            # per-minute: wait for room
+        wait = 60 - (now - _candle_calls[0]) + 0.05
+        if wait > 0:
+            time.sleep(wait)
+        now = time.time()
+        while _candle_calls and now - _candle_calls[0] > 60:
+            _candle_calls.popleft()
+
+
+def _get_candles(smart, params):
+    """Serialized, rate-limit-aware getCandleData → list of candle rows (possibly
+    empty), or None on failure. Honors Angel's documented historical limits (3/s +
+    180/min sliding) and, on an actual rate-limit response, backs off exponentially
+    (1s→2s→4s) so bursts degrade to a small delay instead of an NSE fallback."""
+    with _candle_lock:
+        for attempt in range(len(_CANDLE_BACKOFF) + 1):
+            _candle_throttle()
+            _candle_calls.append(time.time())            # count the attempt (Angel does)
+            try:
+                return (smart.getCandleData(params) or {}).get("data") or []
+            except Exception as e:
+                if attempt >= len(_CANDLE_BACKOFF) or "access rate" not in str(e).lower():
+                    return None
+                time.sleep(_CANDLE_BACKOFF[attempt])     # exponential backoff, then retry
+    return None
+
+
 def rest_chart(symbol, days=5):
     """Intraday 5-min candles from Angel's getCandleData, shaped like
     nse_quote.get_chart() (points:[{t: epoch_ms, price}]). Works off-hours
@@ -517,15 +573,14 @@ def rest_chart(symbol, days=5):
     tok = resolve(sym)
     if not tok:
         return None
-    try:
-        now = datetime.now(IST)
-        params = {
-            "exchange": "NSE", "symboltoken": tok, "interval": "FIVE_MINUTE",
-            "fromdate": (now - timedelta(days=max(1, days))).strftime("%Y-%m-%d %H:%M"),
-            "todate": now.strftime("%Y-%m-%d %H:%M"),
-        }
-        rows = (smart.getCandleData(params) or {}).get("data") or []
-    except Exception:
+    now = datetime.now(IST)
+    params = {
+        "exchange": "NSE", "symboltoken": tok, "interval": "FIVE_MINUTE",
+        "fromdate": (now - timedelta(days=max(1, days))).strftime("%Y-%m-%d %H:%M"),
+        "todate": now.strftime("%Y-%m-%d %H:%M"),
+    }
+    rows = _get_candles(smart, params)
+    if rows is None:
         return None
     points = []
     for r in rows:
@@ -563,15 +618,14 @@ def rest_ohlc(symbol, interval=1, chart_type="I", days=None):
         iv = 1
     ang_iv = "ONE_DAY" if daily else _ANGEL_IV.get(iv, "ONE_MINUTE")
     lookback = days or (120 if daily else 5)
-    try:
-        now = datetime.now(IST)
-        params = {
-            "exchange": "NSE", "symboltoken": tok, "interval": ang_iv,
-            "fromdate": (now - timedelta(days=max(1, lookback))).strftime("%Y-%m-%d %H:%M"),
-            "todate": now.strftime("%Y-%m-%d %H:%M"),
-        }
-        rows = (smart.getCandleData(params) or {}).get("data") or []
-    except Exception:
+    now = datetime.now(IST)
+    params = {
+        "exchange": "NSE", "symboltoken": tok, "interval": ang_iv,
+        "fromdate": (now - timedelta(days=max(1, lookback))).strftime("%Y-%m-%d %H:%M"),
+        "todate": now.strftime("%Y-%m-%d %H:%M"),
+    }
+    rows = _get_candles(smart, params)
+    if rows is None:
         return None
     points = []
     for r in rows:

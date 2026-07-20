@@ -353,6 +353,68 @@ def test_angel_rest_guards_return_none():
         assert angel_feed.rest_ohlc("RELIANCE") is None
 
 
+class _RateThenOk:
+    """Fake SmartConnect.getCandleData: raise Angel's rate-limit text `fails` times,
+    then succeed. Mirrors the live finding (bursts trip 'exceeding access rate')."""
+    def __init__(self, fails):
+        self.fails, self.calls = fails, 0
+
+    def getCandleData(self, params):
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise RuntimeError("Access denied because of exceeding access rate")
+        return {"data": [["2026-07-20T09:15:00+05:30", 1, 2, 3, 4, 5]]}
+
+
+def _fresh_candle_window():
+    """A patch that resets the sliding-window deque so a test starts clean."""
+    return _patch(angel_feed, "_candle_calls", angel_feed.collections.deque())
+
+
+def test_angel_get_candles_retries_then_succeeds():
+    # 2 rate-limit trips, success on the 3rd → rows, no NSE fallback.
+    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_window():
+        f = _RateThenOk(2)
+        rows = angel_feed._get_candles(f, {})
+    assert rows and f.calls == 3
+
+
+def test_angel_get_candles_gives_up_after_retries():
+    # persistent rate-limit → None (caller falls back to NSE) after backoff+1 tries
+    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_window():
+        f = _RateThenOk(99)
+        assert angel_feed._get_candles(f, {}) is None
+        assert f.calls == len(angel_feed._CANDLE_BACKOFF) + 1
+
+
+def test_angel_get_candles_no_retry_on_other_error():
+    # a non-rate error (e.g. bad token) shouldn't burn retries — fail fast to NSE.
+    class _Boom:
+        def __init__(self):
+            self.calls = 0
+
+        def getCandleData(self, p):
+            self.calls += 1
+            raise RuntimeError("Invalid token")
+
+    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_window():
+        f = _Boom()
+        assert angel_feed._get_candles(f, {}) is None
+        assert f.calls == 1
+
+
+def test_angel_candle_throttle_waits_on_full_per_minute_window():
+    # A full sliding minute-window must block (Angel's 180/min "accumulation" trap),
+    # waiting for the oldest call to age out (~60s) rather than firing and getting banned.
+    slept = []
+    now = time.time()
+    dq = angel_feed.collections.deque([now - 1] * angel_feed._CANDLE_PER_MIN)
+    with _patch(angel_feed.time, "sleep", lambda s: slept.append(s)), \
+            _patch(angel_feed, "_candle_calls", dq):
+        angel_feed._candle_throttle()
+    assert slept and max(slept) > 50
+
+
 def test_angel_baked_iso_to_ms():
     assert angel_feed._baked_iso_to_ms("bad") is None
     assert angel_feed._baked_iso_to_ms(None) is None
