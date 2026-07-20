@@ -811,7 +811,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
 | `GET /api/iv/rank/<sym>` | IV rank/percentile from logged ATM-IV history |
 | `GET /api/alerts/status` · `POST /api/alerts/test` | Off-screen alert status (no secrets) · send a test Telegram/webhook message |
-| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture + `nse.blockedForSec` WAF cooldown) |
+| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture + `nse` pacer/WAF stats: `blockedForSec`, `blockCount`, `reqLastMin`, `concurrency`) |
 
 ---
 
@@ -847,7 +847,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 760 unit tests, 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
+├── test_*.py               # 772 unit tests, 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
@@ -883,7 +883,8 @@ sequenceDiagram
     C->>N: GET /api/<endpoint> (reusing warmed session)
     N-->>C: JSON ✅
     Note over C: on expiry → rebuild session automatically
-    Note over C,N: on a 403 "Access Denied" (Akamai block) → 10-min cooldown, pause ALL NSE traffic
+    Note over C: every hit is paced (≤4 in flight, ~5/s, soft 120/min) to avoid bursts
+    Note over C,N: on a 403 "Access Denied" (Akamai) → escalating cooldown (10→20→40 min), pause ALL NSE traffic
 ```
 
 Every endpoint response is normalized into stable keys (`symbol`, `ltp`,
@@ -895,7 +896,9 @@ HTTP 403 *"Access Denied … edgesuite.net"* page once it looks bot-like — usu
 from **bursty automated fetches**, mainly repeated full-history **backfills**.
 Retrying (especially rebuilding the session, which re-GETs the homepage) only
 deepens it, so the first 403 starts a **shared 10-minute cooldown**
-(`nse_client.blocked_for()`): while active, live fetches serve stale cache or fail
+(`nse_client.blocked_for()`) that **escalates on repeat blocks** (10 → 20 → 40 min,
+capped at 1 h, resetting after a clean gap — backing off harder is what actually lets
+the edge cool down): while active, live fetches serve stale cache or fail
 fast, the session isn't warmed up, and `bhavcopy`/`deals` archive downloads **and
 every per-stock quote/depth/chart/option-chain call** (`nse_quote._sget`)
 short-circuit. `bhavcopy.backfill()` also **paces itself** (a jittered pause per
@@ -907,6 +910,16 @@ the dashboard shows a **live countdown banner** ("NSE has temporarily rate-limit
 this network… showing cached/EOD… auto-resuming in *m:ss*"), and `/api/quote/<sym>`
 transparently **falls back to the EOD bhavcopy close** (`stale:true`,
 `source:"eod-bhavcopy"`) so the stock modal keeps working while NSE is paused.
+
+**Global request pacer (burst smoothing).** Every NSE hit — live lists (`_fetch`),
+per-stock quotes/candles (`nse_quote`), archive ZIPs (`bhavcopy`) — shares the one
+warmed session, so `_build_session()` returns a **`_PacedSession`** that throttles them
+all at a single choke point: **at most 4 connections in flight**, request starts **~0.2 s
+(+jitter) apart**, and a **soft ~120/min ceiling**. This turns the burst from the 6-8
+worker fan-outs (the cold snapshot-logger / context-build cycle) — the exact per-IP burst
+Akamai's rate detector flags — into a steady, browser-like stream. Requests also now carry
+**modern-Chrome headers** (client hints + `Sec-Fetch-*`) so they look less scripted.
+`/api/health.nse` exposes the pacer state (`blockCount`, `reqLastMin`, `concurrency`).
 
 **Block prevention (fewer needless hits).** Beyond recovery, the app trims NSE load
 proactively. Per-symbol quote/chart/candles are served **from the broker** (Angel)

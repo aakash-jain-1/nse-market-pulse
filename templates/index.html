@@ -5384,14 +5384,20 @@
     // while it's active the app serves cached/EOD data, so warn the user (with a live
     // countdown) instead of silently showing stale numbers.
     let _nseBlockUntil = 0;
+    let _nseBlockCount = 0;   // consecutive blocks (server escalates the cooldown each time)
     function renderBlockBanner() {
       const el = document.getElementById("nseBlockBanner");
       if (!el) return;
       const left = Math.max(0, Math.round((_nseBlockUntil - Date.now()) / 1000));
       if (left <= 0) { el.style.display = "none"; return; }
       const m = Math.floor(left / 60), s = left % 60;
+      // On a repeat block the server doubles the cooldown (backing off harder is what
+      // actually lets Akamai cool down), so tell the user why the wait grew.
+      const esc = _nseBlockCount > 1
+        ? ` <b>Repeat block #${_nseBlockCount}</b> — backing off longer so the edge can cool down.`
+        : "";
       document.getElementById("nseBlockMsg").innerHTML =
-        `⚠️ NSE has temporarily rate-limited this network (Akamai). Live data is paused — showing <b>cached / EOD</b> values. Auto-resuming in <b>${m}:${String(s).padStart(2, "0")}</b>. Switching network (e.g. mobile hotspot) or just waiting clears it.`;
+        `⚠️ NSE has temporarily rate-limited this network (Akamai). Live data is paused — showing <b>cached / EOD</b> values. Auto-resuming in <b>${m}:${String(s).padStart(2, "0")}</b>.${esc} Switching network (e.g. mobile hotspot) or just waiting clears it.`;
       el.style.display = "block";
     }
     async function pollNseBlock() {
@@ -5399,6 +5405,7 @@
         const h = await fetch("/api/health").then(r => r.json());
         const secs = (h.nse && h.nse.blockedForSec) || 0;
         _nseBlockUntil = secs > 0 ? Date.now() + secs * 1000 : 0;
+        _nseBlockCount = (h.nse && h.nse.blockCount) || 0;
         if (h.logger && typeof h.logger.marketHours === "boolean")
           _marketOpen = h.logger.marketHours;
       } catch (e) { /* leave the last known state */ }

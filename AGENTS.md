@@ -61,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 760 unit tests across 34 suites (see below)
+├── test_*.py          # 772 unit tests across 35 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -130,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 760 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 772 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -548,6 +548,18 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Global NSE request pacer + escalating cooldown + browser headers** — user kept hitting
+  the **NSE Akamai** block. An audit showed every NSE hit funnels through the one warmed
+  `requests.Session`, and nothing smoothed the **bursts** from the 6-8 worker fan-outs (cold
+  `snapshot_logger`/`build_context()`) — the per-IP burst the WAF flags. `_build_session()`
+  now returns a **`_PacedSession`** whose `send()` paces ALL NSE traffic at one choke point:
+  ≤`_NSE_MAX_CONCURRENCY=4` in flight, starts `_NSE_MIN_GAP=0.20s`(+jitter) apart, soft
+  `_NSE_SOFT_RPM=120`/min ceiling (`nse_quote`/`bhavcopy` inherit it, no changes). `note_block`
+  now **escalates** the cooldown on repeat blocks (600→1200→2400…, cap `_BLOCK_MAX=3600`,
+  resets after a clean gap). `HEADERS` gained modern-Chrome client hints + `Sec-Fetch-*`
+  (warm-ups use navigation `_NAV_HEADERS`). `/api/health.nse` = `pacer_stats()` (blockCount/
+  reqLastMin/…); the banner notes repeat blocks. Pure-Python (curl_cffi TLS swap deferred to
+  Phase 2). Tests **+12** (`test_nse_client.py`); suite **760 → 772**.
 - **Short TTL cache for broker candles** — re-opening the same stock/interval (or the modal's
   rest_ohlc + rest_chart fallback + the Live seed wanting the same series) was re-hitting
   Angel's rate-limited getCandleData. Added `angel_feed._candle_cache` (keyed by token,

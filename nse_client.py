@@ -10,7 +10,9 @@ cookies, then reuse that session for the API calls. Sessions expire, so we
 lazily rebuild them on failure.
 """
 
+import collections
 import logging
+import random
 import threading
 import time
 from datetime import datetime
@@ -22,6 +24,18 @@ log = logging.getLogger("nse_client")
 
 BASE = "https://www.nseindia.com"
 
+# Only advertise brotli if we can actually decode it (requests decodes gzip/deflate
+# always, br only when brotli/brotlicffi is installed). Advertising br without the
+# codec would hand us undecodable bytes — so we match Chrome's list only when safe.
+import importlib.util as _ilu
+_ACCEPT_ENCODING = "gzip, deflate, br" if (
+    _ilu.find_spec("brotli") or _ilu.find_spec("brotlicffi")
+) else "gzip, deflate"
+
+# Header set for the API (XHR) calls. Akamai fingerprints not just the TLS handshake
+# but the presence/shape of a real browser's headers (client hints + Sec-Fetch-*). A
+# bare UA+Accept looks scripted; this mirrors what Chrome 124 sends on a same-origin
+# fetch() so our requests blend in better (the UA major matches the sec-ch-ua version).
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -29,7 +43,29 @@ HEADERS = {
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": _ACCEPT_ENCODING,
     "Referer": BASE + "/",
+    "Connection": "keep-alive",
+    "DNT": "1",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+# Warm-up GETs are page NAVIGATIONS, not XHRs — Chrome sends different Sec-Fetch-*
+# and an HTML Accept for those. Sending API headers on a navigation is itself a tell,
+# so the two cookie-warm-up hits (homepage, then the market page) override these.
+_NAV_HEADERS = {
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,image/apng,*/*;q=0.8"),
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 ENDPOINTS = {
@@ -57,8 +93,12 @@ _SESSION_TTL = 300  # seconds before we proactively refresh cookies
 # starts a cooldown during which ALL NSE traffic (live API + static archives via
 # bhavcopy) short-circuits instead of hammering. This can't un-block us (only time
 # / a new IP does), but it stops us re-earning or extending the block.
-_BLOCK_COOLDOWN = 600  # seconds to pause NSE traffic after a WAF block
+_BLOCK_COOLDOWN = 600   # base seconds to pause NSE traffic after a WAF block
+_BLOCK_MAX = 3600       # cap on the escalated cooldown (1h)
 _blocked_until = 0.0
+_block_count = 0        # consecutive fresh blocks — escalates the cooldown
+_last_block_ts = 0.0    # when the last fresh block started (for the reset gap)
+_prev_cooldown = 0.0    # length of the previous cooldown (for the reset gap)
 # Response bodies/status that mean "the edge is blocking us" (not a real 404 miss).
 _BLOCK_MARKERS = ("access denied", "edgesuite.net", "reference #", "akamai")
 
@@ -69,17 +109,41 @@ def blocked_for():
     return max(0.0, round(_blocked_until - time.time(), 1))
 
 
+def _cooldown_for(count):
+    """Escalating cooldown: base, then 2x, 4x … capped at _BLOCK_MAX. Repeated blocks
+    in a short window mean the edge is still hot, so backing off HARDER (rather than
+    re-poking it every 10 min) is what actually lets it cool down."""
+    if count <= 0:
+        return _BLOCK_COOLDOWN
+    return min(_BLOCK_COOLDOWN * (2 ** (count - 1)), _BLOCK_MAX)
+
+
 def note_block(source="nse"):
-    """Record that NSE's edge is blocking us — start/extend the cooldown. Idempotent
-    within a cooldown; logs once per fresh block so logs don't flood."""
-    global _blocked_until
-    fresh = _blocked_until <= time.time()
-    _blocked_until = time.time() + _BLOCK_COOLDOWN
+    """Record that NSE's edge is blocking us — start/extend the cooldown. Logs once
+    per fresh block so logs don't flood. Consecutive fresh blocks escalate the
+    cooldown (2x each time, capped); a genuinely clean gap resets the ladder."""
+    global _blocked_until, _block_count, _last_block_ts, _prev_cooldown
+    now = time.time()
+    fresh = _blocked_until <= now
     if fresh:
+        # Reset the escalation ladder only after a clean gap since the last block
+        # cleared (its whole cooldown elapsed + a base-length grace). Otherwise the
+        # edge is still punishing us, so keep climbing.
+        if now - _last_block_ts > _prev_cooldown + _BLOCK_COOLDOWN:
+            _block_count = 0
+        _block_count += 1
+        cd = _cooldown_for(_block_count)
+        _prev_cooldown = cd
+        _last_block_ts = now
+        _blocked_until = now + cd
         log.warning("NSE edge is blocking us (Akamai 403 via %s) — pausing NSE "
-                    "requests for %ds. Your IP is temporarily rate-limited; this "
-                    "clears on its own (or use a different network).",
-                    source, _BLOCK_COOLDOWN)
+                    "requests for %ds (block #%d). Your IP is temporarily rate-"
+                    "limited; this clears on its own (or use a different network).",
+                    source, int(cd), _block_count)
+    else:
+        # A straggler request tripped during an active cooldown (we shouldn't have
+        # hit NSE at all). Extend to the current ladder length but don't climb.
+        _blocked_until = max(_blocked_until, now + _cooldown_for(_block_count))
 
 
 def is_blocked_response(resp):
@@ -97,8 +161,86 @@ def is_blocked_response(resp):
     return False
 
 
+# --- Global request pacer -------------------------------------------------
+# Everything NSE (live API via _fetch, per-symbol quotes/candles via nse_quote,
+# archive ZIPs via bhavcopy) flows through the ONE shared session below, so pacing
+# it here paces ALL NSE traffic at a single choke point. The 15s _fetch cache and
+# per-endpoint TTLs cut duplicate reads, but nothing smooths BURSTS: a cold snapshot
+# logger / build_context() cycle fans out across 6-8 worker pools and fires dozens
+# of near-simultaneous connections — the exact per-IP burst Akamai's rate detector
+# flags (why the block builds up over time and clears on a network switch). The pacer
+# turns that burst into a steady, browser-like stream: at most _NSE_MAX_CONCURRENCY
+# in flight, request STARTS at least _NSE_MIN_GAP (+jitter) apart, and a soft
+# per-minute ceiling. Same proven shape as angel_feed's candle throttle.
+_NSE_MAX_CONCURRENCY = 4    # simultaneous in-flight NSE connections
+_NSE_MIN_GAP = 0.20         # min seconds between request STARTS
+_NSE_JITTER = 0.15          # + up to this much random (de-syncs from a fixed cadence)
+_NSE_SOFT_RPM = 120         # soft per-minute ceiling on request starts
+
+_NSE_GATE = threading.BoundedSemaphore(_NSE_MAX_CONCURRENCY)
+_pace_lock = threading.Lock()
+_last_start = 0.0
+_req_calls = collections.deque()   # epoch secs of recent request starts (60s window)
+
+
+def _pace():
+    """Block until it's polite to start the next NSE request: enforce a soft
+    per-minute ceiling, then a min-gap (+jitter) between starts. Serialized by
+    _pace_lock so the spacing is global across all worker threads; records the
+    start timestamp in the sliding window. Does NOT touch _NSE_GATE (that bounds
+    concurrency around the actual network wait, separately)."""
+    global _last_start
+    with _pace_lock:
+        now = time.time()
+        while _req_calls and now - _req_calls[0] > 60:   # drop starts out of the window
+            _req_calls.popleft()
+        if len(_req_calls) >= _NSE_SOFT_RPM:             # per-minute: wait for room
+            wait = 60 - (now - _req_calls[0]) + 0.05
+            if wait > 0:
+                time.sleep(wait)
+            now = time.time()
+            while _req_calls and now - _req_calls[0] > 60:
+                _req_calls.popleft()
+        gap = now - _last_start                          # per-start: min gap + jitter
+        need = _NSE_MIN_GAP + random.uniform(0, _NSE_JITTER)
+        if gap < need:
+            time.sleep(need - gap)
+            now = time.time()
+        _last_start = now
+        _req_calls.append(now)
+
+
+class _PacedSession(requests.Session):
+    """A requests.Session that paces every outgoing hit through the global gate.
+    Overriding send() catches all verbs + redirect hops. Callers (nse_quote,
+    bhavcopy, _fetch) need no changes — they just use the shared session."""
+    def send(self, request, **kwargs):
+        _pace()                                  # rate-limit the START of the hit
+        with _NSE_GATE:                          # cap simultaneous in-flight connections
+            return super().send(request, **kwargs)
+
+
+def pacer_stats():
+    """Snapshot of the pacer + WAF-block state for /api/health. Cheap; also prunes
+    the sliding window so `reqLastMin` is accurate."""
+    now = time.time()
+    with _pace_lock:
+        while _req_calls and now - _req_calls[0] > 60:
+            _req_calls.popleft()
+        rpm = len(_req_calls)
+    return {
+        "blockedForSec": blocked_for(),
+        "blockCount": _block_count,
+        "cooldownSec": int(_cooldown_for(_block_count)) if _block_count else 0,
+        "reqLastMin": rpm,
+        "concurrency": _NSE_MAX_CONCURRENCY,
+        "minGap": _NSE_MIN_GAP,
+        "softRpm": _NSE_SOFT_RPM,
+    }
+
+
 def _build_session():
-    s = requests.Session()
+    s = _PacedSession()
     s.headers.update(HEADERS)
     # Size the connection pool above our fan-out. Several features sweep NSE with
     # 6-worker thread pools (intrabar catch-up, daily backtest, futures sweep) and
@@ -109,8 +251,12 @@ def _build_session():
     adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
-    s.get(BASE, timeout=15)
-    s.get(BASE + "/market-data/live-equity-market", timeout=15)
+    # The two cookie warm-ups are page navigations, not XHRs — send navigation
+    # Sec-Fetch-* / HTML Accept so the handshake looks like a real browser landing.
+    s.get(BASE, timeout=15, headers=_NAV_HEADERS)
+    s.get(BASE + "/market-data/live-equity-market", timeout=15,
+          headers=dict(_NAV_HEADERS, **{"Sec-Fetch-Site": "same-origin",
+                                        "Referer": BASE + "/"}))
     return s
 
 

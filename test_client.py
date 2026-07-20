@@ -31,13 +31,19 @@ def _patch(obj, name, value):
 
 @contextlib.contextmanager
 def _reset_block():
-    """Clear + restore the WAF-block cooldown and session pointers around a test."""
-    saved = (nse._blocked_until, nse._session, nse._session_ts)
+    """Clear + restore the WAF-block cooldown (incl. the escalation ladder) and
+    session pointers around a test, so each starts from a clean 'block #1' state."""
+    saved = (nse._blocked_until, nse._session, nse._session_ts,
+             nse._block_count, nse._last_block_ts, nse._prev_cooldown)
     nse._blocked_until = 0.0
+    nse._block_count = 0
+    nse._last_block_ts = 0.0
+    nse._prev_cooldown = 0.0
     try:
         yield
     finally:
-        nse._blocked_until, nse._session, nse._session_ts = saved
+        (nse._blocked_until, nse._session, nse._session_ts,
+         nse._block_count, nse._last_block_ts, nse._prev_cooldown) = saved
 
 
 @contextlib.contextmanager

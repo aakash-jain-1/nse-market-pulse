@@ -1044,9 +1044,11 @@ def api_health():
         "feed": {"provider": feed.get("provider"),
                  "connected": feed.get("connected"),
                  "configured": feed.get("configured")},
-        # WAF cooldown (Akamai "Access Denied"): >0 → live NSE is paused and the app is
-        # serving cached / EOD data. Powers the dashboard's "NSE cooling down" banner.
-        "nse": {"blockedForSec": nse.blocked_for()},
+        # WAF cooldown (Akamai "Access Denied") + request pacer stats. blockedForSec>0
+        # → live NSE is paused and the app is serving cached / EOD data (powers the
+        # dashboard's "NSE cooling down" banner). blockCount/reqLastMin surface how hard
+        # we're backing off and how much NSE traffic the pacer is currently letting out.
+        "nse": nse.pacer_stats(),
         # Auto post-close EOD refresh (bhavcopy + deals + optional digest).
         "autoEod": {"enabled": sch.get("enabled"), "runAt": sch.get("runAt"),
                     "lastRunDate": sch.get("lastRunDate"), "running": sch.get("running")},

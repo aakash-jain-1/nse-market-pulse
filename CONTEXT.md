@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 760 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 772 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -119,12 +119,29 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   (M3). `HTTPAdapter(pool_connections=16, pool_maxsize=32)` avoids pool-full warns.
   **`_fetch()`** has a path-keyed **15s TTL micro-cache** (shared read-only object;
   callers must not mutate) that cut duplicate hot-list GETs ~72%/cycle.
+- **Global NSE request pacer (`nse_client._PacedSession`/`_pace`/`pacer_stats`)**: the
+  15s cache + TTLs cut *duplicate* reads but nothing smoothed **bursts** — a cold
+  `snapshot_logger`/`build_context()` cycle fans out across 6-8 worker pools and fires
+  dozens of near-simultaneous NSE connections (the per-IP burst Akamai's rate detector
+  flags; why the block builds over time and clears on a network switch). Because **every**
+  NSE hit (live `_fetch`, per-stock `nse_quote._sget`/`_charting_get`, archive
+  `bhavcopy._download`) shares the one warmed session, `_build_session()` returns a
+  `_PacedSession(requests.Session)` whose `send()` throttles **all** of them at one choke
+  point: at most **`_NSE_MAX_CONCURRENCY=4`** in flight, request STARTS **`_NSE_MIN_GAP=0.20s`
+  (+jitter)** apart, and a **soft `_NSE_SOFT_RPM=120`/min** ceiling (sliding-window `deque`,
+  same shape as `angel_feed._candle_throttle`). Callers need no changes. Turns the burst
+  into a steady, browser-like stream; foreground UX barely changes (movers = ~7 endpoints,
+  modal/Live are broker-first) since the heavy fan-outs are background.
 - **Akamai/WAF block backoff (`nse_client.blocked_for`/`note_block`/`is_blocked_response`)**:
   NSE fronts everything with Akamai, which returns **HTTP 403 "Access Denied"
   (edgesuite.net, "Reference #…")** to EVERY request once our IP looks bot-like.
   Retrying — *especially* rebuilding the session, which itself GETs the homepage +
   market page — pours more requests into the block and lengthens it. So the **first
-  403 starts a 10-min cooldown** (`_BLOCK_COOLDOWN=600`) during which ALL NSE traffic
+  403 starts a 10-min cooldown** (`_BLOCK_COOLDOWN=600`), and **consecutive blocks
+  escalate** it — `note_block` doubles the pause each time (600 → 1200 → 2400 …, capped
+  at `_BLOCK_MAX=3600`) via `_cooldown_for(_block_count)`, resetting the ladder only after
+  a genuinely clean gap (backing off *harder* when the edge is still hot is what lets it
+  cool down, vs re-poking it every 10 min). During a cooldown ALL NSE traffic
   short-circuits: `_fetch()` serves stale cache or fails fast (no NSE hit, no rebuild),
   `get_session()` reuses the stale session instead of warming up, `bhavcopy._download`
   returns `None` without retrying, and every per-stock call in `nse_quote` (via `_sget`)
@@ -138,6 +155,12 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   m:ss"), and **`/api/quote/<sym>` falls back to the EOD bhavcopy close** (`stale:true`,
   `source:"eod-bhavcopy"`) instead of erroring — so the stock modal still works during a
   block. All live scanner lists already serve their stale `_fetch` cache during a block.
+  `/api/health.nse` = **`pacer_stats()`**: `blockedForSec`, `blockCount` (repeat blocks →
+  the banner adds a "backing off longer" note), `cooldownSec`, `reqLastMin` (pacer window),
+  `concurrency`/`minGap`/`softRpm`. **Header hardening:** `HEADERS` now sends modern-Chrome
+  client hints (`sec-ch-ua*`, `Sec-Fetch-*`, `Accept-Encoding` — brotli only if decodable)
+  matching the UA major, and the two cookie warm-ups send navigation-shaped `_NAV_HEADERS`
+  so the handshake looks like a real browser landing rather than a bare script.
 - **NextApi gateway (`nse_quote.py`)**: the old `/api/quote-equity` is 403 and
   `/api/chart-databyindex` is empty. The site's `/api/NextApi/apiClient/GetQuoteApi`
   (with a stock-specific Referer) unlocks per-stock quotes, **5-level depth**
@@ -287,13 +310,15 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **760 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **772 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
   math), `test_ideas.py` + `test_ideas_journal.py`, `test_fetch_cache.py`,
   `test_client.py` + `test_client_fetchers.py` (normalizers + raw-payload
-  parsers), `test_quote.py` + `test_quote_more.py`, `test_paper.py`,
+  parsers), `test_nse_client.py` (global request pacer: min-gap/soft-RPM/concurrency
+  + escalating WAF cooldown + browser headers + `pacer_stats`), `test_quote.py`
+  + `test_quote_more.py`, `test_paper.py`,
   `test_strategies.py`, `test_bhavcopy.py` (EOD UDiFF + sec_bhavdata_full delivery
   parsers + fetch walk-back + price/lot fallback + delivery-merge wiring),
   `test_deals.py` (bulk/block parse incl. NO-RECORDS + cached fetch),
@@ -439,6 +464,38 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Global NSE request pacer + escalating cooldown + browser headers (suite 760 → 772)
+- **Why:** user kept hitting the **NSE Akamai** block. The 10-min cooldown, 15s `_fetch`
+  cache and per-endpoint TTLs cut *duplicate* reads but nothing smoothed **bursts** — a cold
+  `snapshot_logger`/`build_context()` cycle fans out over 6-8 worker pools and fires dozens of
+  near-simultaneous connections, the exact per-IP burst Akamai's rate detector flags (block
+  builds up over time, clears on a network switch → rate/IP based). An audit confirmed every
+  NSE hit funnels through the **one** warmed `requests.Session`, so a single choke point can
+  pace all of it. Pure-Python; the stronger `curl_cffi` TLS-fingerprint swap is deferred to a
+  Phase 2 only if blocks persist.
+- **What (`nse_client`):**
+  - **Global pacer** — `_build_session()` now returns a **`_PacedSession(requests.Session)`**
+    whose `send()` gates every hit: a bounded semaphore (**`_NSE_MAX_CONCURRENCY=4`** in
+    flight), a lock-serialized **min-gap** (`_NSE_MIN_GAP=0.20s` + up to `_NSE_JITTER=0.15s`)
+    between STARTS, and a soft **`_NSE_SOFT_RPM=120`/min** sliding-window ceiling (`_pace()`).
+    `nse_quote`/`bhavcopy` inherit it for free (no call-site changes).
+  - **Escalating cooldown** — `note_block` now doubles the pause on consecutive fresh blocks
+    (`_cooldown_for(_block_count)`: 600 → 1200 → 2400 …, capped `_BLOCK_MAX=3600`), resetting
+    the ladder only after a clean gap; a straggler hit *during* a cooldown extends without
+    climbing.
+  - **Browser headers** — `HEADERS` gains modern-Chrome client hints (`sec-ch-ua*`,
+    `Sec-Fetch-*`, `Connection`, `DNT`, `Accept-Encoding` — brotli only if decodable) matching
+    the UA major; the two warm-up GETs send navigation-shaped `_NAV_HEADERS`.
+  - **Observability** — `pacer_stats()` (blockedForSec/blockCount/cooldownSec/reqLastMin/
+    concurrency/minGap/softRpm) is now the `/api/health.nse` payload; the dashboard banner
+    adds a "repeat block #N — backing off longer" note when `blockCount > 1`.
+- **Trade-off:** background sweeps get slower (steady ~4 concurrent); foreground UX barely
+  changes (movers = ~7 endpoints; modal/Live are broker-first).
+- **Tests +12** (`test_nse_client.py`): min-gap, soft-RPM wait/no-wait, concurrency cap
+  (threaded), cooldown ladder + reset + straggler, header/nav-header shape, `pacer_stats`,
+  `_build_session` paced + 2 warm-ups. `test_client._reset_block` + the `/api/health` route
+  test now save/restore the escalation ladder. Suite **760 → 772**, full suite green, lint clean.
 
 ### 2026-07-20 — Short TTL cache for broker candles (suite 757 → 760)
 - **Why:** builds on the rate-limit work. Re-opening the same stock/interval — or the

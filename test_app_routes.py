@@ -129,7 +129,7 @@ def test_health_reports_nse_block():
     import nse_client as nse
     # Stub the unrelated heavy collaborators (feed connect / snaplog) so this test
     # only exercises the NEW block + scheduler fields; test_app.py covers the rest.
-    saved = nse._blocked_until
+    saved = (nse._blocked_until, nse._block_count, nse._last_block_ts, nse._prev_cooldown)
     with _patches(
         (webapp.snaplog, "health", lambda: {"healthy": True, "marketHours": False}),
         (webapp.live_feed, "public_status",
@@ -137,16 +137,23 @@ def test_health_reports_nse_block():
     ):
         try:
             nse._blocked_until = 0.0
+            nse._block_count = 0
             st, j = _json("/api/health")
             assert st == 200 and j["nse"]["blockedForSec"] == 0
+            # Pacer observability contract read by the dashboard banner + docs.
+            assert j["nse"]["blockCount"] == 0
+            assert j["nse"]["concurrency"] == nse._NSE_MAX_CONCURRENCY
+            assert "reqLastMin" in j["nse"]
             assert "autoEod" in j and "enabled" in j["autoEod"]
             # The dashboard's adaptive refresh reads logger.marketHours to throttle the
             # movers poll off-hours — lock that contract here.
             assert j["logger"]["marketHours"] is False
             nse.note_block("test")
-            assert _json("/api/health")[1]["nse"]["blockedForSec"] > 0
+            j2 = _json("/api/health")[1]["nse"]
+            assert j2["blockedForSec"] > 0 and j2["blockCount"] == 1
         finally:
-            nse._blocked_until = saved
+            (nse._blocked_until, nse._block_count,
+             nse._last_block_ts, nse._prev_cooldown) = saved
 
 
 def test_quote_falls_back_to_eod_during_block():
