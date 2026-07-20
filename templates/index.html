@@ -400,6 +400,11 @@
     .live-chip.on { color: var(--green); border: 1px solid var(--green); background: rgba(38,208,124,0.1); }
     .live-chip.off { color: var(--muted); border: 1px solid var(--border); }
     .live-provider { font-size: 11px; padding: 3px 8px; border-radius: 20px; white-space: nowrap; color: var(--accent); border: 1px solid var(--border); }
+    /* Data-source provenance chip: which feed served this payload (broker vs NSE vs EOD). */
+    .src-chip { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 20px; white-space: nowrap; letter-spacing: 0.4px; vertical-align: middle; cursor: help; }
+    .src-chip.broker { color: #a5f3fc; background: rgba(14,116,144,0.30); border: 1px solid #0e7490; }
+    .src-chip.nse { color: #c7d2fe; background: rgba(67,56,202,0.30); border: 1px solid #4338ca; }
+    .src-chip.eod { color: #fed7aa; background: rgba(124,45,18,0.35); border: 1px solid #9a3412; }
     .live-chart { width: 100%; height: 470px; }
     .live-nse-banner { grid-column: 1 / -1; font-size: 12px; color: var(--muted); background: var(--panel-2);
       border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
@@ -691,7 +696,10 @@
   <div class="overlay" id="overlay">
     <div class="modal">
       <div class="modal-head">
-        <h3 id="mSym">—</h3>
+        <div style="display:flex;align-items:center;gap:9px">
+          <h3 id="mSym">—</h3>
+          <span id="mSrc"></span>
+        </div>
         <div style="display:flex;gap:8px;align-items:center">
           <button id="mAnalyze" title="Deep-dive analysis">🔬 Analyze</button>
           <button id="mOptions" title="View option chain">⛓ Options</button>
@@ -1823,9 +1831,31 @@
     }
 
     // ---- Detail modal ----
+    // Provenance of a data payload → a short label + chip class. Angel/Dhan = broker
+    // (no NSE hit), NSE = live NSE JSON API, EOD = end-of-day bhavcopy close (served
+    // during a WAF block or off-hours). Lets you SEE which feed each number came from.
+    function srcInfo(src) {
+      if (src === "angel" || src === "dhan")
+        return { name: src === "dhan" ? "Dhan" : "Angel", cls: "broker",
+                 tip: "Live from your broker feed (" + (src === "dhan" ? "Dhan" : "Angel One") + ") — no NSE hit" };
+      if (src === "eod-bhavcopy")
+        return { name: "EOD", cls: "eod",
+                 tip: "End-of-day bhavcopy close — NSE live was blocked or the market is closed" };
+      return { name: "NSE", cls: "nse", tip: "Live from NSE's public JSON API" };
+    }
+    function srcChipHtml(src) {
+      const s = srcInfo(src);
+      return `<span class="src-chip ${s.cls}" title="${s.tip}">${s.name}</span>`;
+    }
+    function setSrcChip(id, src) {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = src ? srcChipHtml(src) : "";
+    }
+
     function openDetail(sym) {
       window._detailSym = sym;
       document.getElementById("mTradeMsg").textContent = "";
+      setSrcChip("mSrc", null);   // cleared until the live quote resolves (loadDepth)
       const h = history[sym] || [];
       const rowData = (window._lastRows || []).find(r => r.symbol === sym) || {};
       document.getElementById("mSym").textContent = sym;
@@ -1946,8 +1976,8 @@
           chartEl.innerHTML = ohlcChart(pts);
           attachOhlcHover(chartEl, pts, daily);
           const kind = daily ? "daily" : iv + "m";
-          note.textContent =
-            `Real NSE OHLCV · ${kind} · ${pts.length} candles · ` +
+          note.innerHTML =
+            `${srcChipHtml(d.source)} OHLCV · ${kind} · ${pts.length} candles · ` +
             (daily ? `${istDate(pts[0].t)}–${istDate(pts[pts.length-1].t)}`
                    : `${istTime(pts[0].t)}–${istTime(pts[pts.length-1].t)}`);
           return;
@@ -1963,8 +1993,8 @@
         }
         chartEl.innerHTML = realChart(c.points, c.prevClose);
         attachChartHover(chartEl, c.points, c.prevClose);
-        note.textContent =
-          `Real NSE intraday (price only) · ${c.points.length} points · ${istTime(c.points[0].t)}–${istTime(c.points[c.points.length-1].t)}`;
+        note.innerHTML =
+          `${srcChipHtml(c.source)} intraday (price only) · ${c.points.length} points · ${istTime(c.points[0].t)}–${istTime(c.points[c.points.length-1].t)}`;
       } catch (e) {
         note.textContent = "Chart unavailable: " + e.message;
       }
@@ -2186,7 +2216,9 @@
     async function loadDepth(sym) {
       try {
         const q = await (await fetch("/api/quote/" + encodeURIComponent(sym))).json();
-        if (window._detailSym !== sym || q.error) return;
+        if (window._detailSym !== sym) return;
+        setSrcChip("mSrc", q.source);   // show where this quote/depth came from
+        if (q.error) return;
         // Enrich metrics with real quote fields when available.
         const extra = [];
         const add = (k, v) => extra.push(`<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`);
@@ -3890,7 +3922,12 @@
     // the single source of truth used by both the seed note and (implicitly) the
     // status chips, so the UI never claims "broker" while NSE is actually feeding it.
     function liveSourceLabel() {
-      if (window._liveNSE || window._liveNsePoll) return "NSE · polled ~12s";
+      if (window._liveNSE || window._liveNsePoll) {
+        const s = window._livePollSrc;
+        if (s === "angel" || s === "dhan")
+          return (s === "dhan" ? "Dhan" : "Angel") + " REST · polled ~12s";
+        return "NSE · polled ~12s";
+      }
       if (window._liveConnected) return "streaming live via " + (window._liveProviderName || "your broker feed");
       return "connecting to " + (window._liveProviderName || "broker feed") + "…";
     }
@@ -3935,7 +3972,7 @@
         window._lwc.chart.timeScale().fitContent();
         window._lwc.lastBar = cd[cd.length - 1];
         window._lwc.seedIv = iv;
-        window._liveSeedMsg = `Seeded ${cd.length} ${daily ? "daily" : iv + "m"} candles`;
+        window._liveSeedMsg = `Seeded ${cd.length} ${daily ? "daily" : iv + "m"} candles from ${srcInfo(d.source).name}`;
         liveRenderNote();
       } catch (e) { window._liveSeedMsg = null; if (note) note.textContent = "Seed failed: " + e.message; }
     }
@@ -4015,7 +4052,7 @@
       return {
         symbol: sym, ltp: q.ltp, open: q.open, high: q.dayHigh, low: q.dayLow,
         prevClose: q.prevClose, close: q.prevClose, volume: q.volume,
-        atp: q.vwap, depth: q.depth || null,
+        atp: q.vwap, depth: q.depth || null, source: q.source,
       };
     }
 
@@ -4045,21 +4082,30 @@
       const rec = window._liveQuotes[window._liveFocus];
       const hasDepth = rec && rec.depth &&
         ((rec.depth.bids || []).some(b => b.qty) || (rec.depth.asks || []).some(a => a.qty));
+      // /api/quote is broker-first, so this "poll" may actually be served by the broker
+      // REST (WebSocket down but REST up) — label it honestly instead of always "NSE".
+      const src = rec && rec.source;
+      window._livePollSrc = src;
+      const broker = src === "angel" || src === "dhan";
+      const brokerName = src === "dhan" ? "Dhan" : "Angel";
       const chip = document.getElementById("liveStatus");
       if (chip) {
-        chip.textContent = hasDepth ? "● NSE · ~12s" : "● NSE · market closed";
-        chip.className = "live-chip " + (hasDepth ? "on" : "off");
+        chip.textContent = broker ? `● ${brokerName} · ~12s`
+          : (hasDepth ? "● NSE · ~12s" : "● NSE · market closed");
+        chip.className = "live-chip " + ((broker || hasDepth) ? "on" : "off");
       }
       const prov = document.getElementById("liveProvider");
       if (prov) {
-        prov.textContent = "◷ NSE polled";
-        prov.title = "Quotes + 5-level depth polled ~12s from NSE. Real-time tick streaming needs a connected broker feed (Angel One, free).";
+        prov.textContent = broker ? `◷ ${brokerName} REST` : "◷ NSE polled";
+        prov.title = broker
+          ? `Quotes polled ~12s from ${brokerName === "Dhan" ? "Dhan" : "Angel One"} (broker REST) — no NSE hit. Tick streaming resumes when the broker WebSocket reconnects.`
+          : "Quotes + 5-level depth polled ~12s from NSE. Real-time tick streaming needs a connected broker feed (Angel One, free).";
         prov.style.display = "";
       }
       const dot = document.getElementById("liveDot");
-      if (dot) dot.style.background = hasDepth ? "var(--green)" : "var(--muted)";
+      if (dot) dot.style.background = (broker || hasDepth) ? "var(--green)" : "var(--muted)";
       const upd = document.getElementById("updated");
-      if (upd) upd.textContent = "NSE " + new Date().toLocaleTimeString("en-IN");
+      if (upd) upd.textContent = (broker ? brokerName + " " : "NSE ") + new Date().toLocaleTimeString("en-IN");
       liveRenderNote();
       liveRenderWatch();
       liveHeader(rec);

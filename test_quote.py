@@ -176,6 +176,7 @@ def test_get_quote_normalizes_and_builds_depth():
     assert out["vwap"] == 100.4 and out["deliveryPct"] == 60
     assert len(out["depth"]["bids"]) == 5 and len(out["depth"]["asks"]) == 5
     assert out["depth"]["bids"][0] == {"price": 99.0, "qty": 10.0}
+    assert out["source"] == "nse"   # provenance chip: dashboard shows where each number came from
 
 
 def test_get_chart_parses_points():
@@ -185,6 +186,7 @@ def test_get_chart_parses_points():
         out = q.get_chart("acme")
     assert out["prevClose"] == 99.0
     assert out["points"] == [{"t": 1000, "price": 100.5}, {"t": 2000, "price": 101.0}]
+    assert out["source"] == "nse"
 
 
 # ---------------------------------------------------------------------------

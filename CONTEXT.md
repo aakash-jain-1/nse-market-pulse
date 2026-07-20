@@ -440,6 +440,23 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-07-20 — Data-source provenance chip: see which feed served each number (suite 753)
+- **Why:** after the broker-first migration + adaptive refresh, a given number in the
+  detail modal / Live tab could come from **Angel (broker)**, **NSE**, or the **EOD
+  bhavcopy** fallback — but the UI never said which. Made provenance visible so you can
+  confirm the broker-first/fallback chain is actually working.
+- **Backend:** `nse_quote.get_quote/get_chart/get_ohlc` now stamp `source:"nse"` (Angel
+  already stamps `source:"angel"`; the EOD fallback already stamped `source:"eod-bhavcopy"`),
+  so every quote/chart/candle payload self-identifies.
+- **Frontend (index.html):** a small colored `.src-chip` helper (`srcInfo`/`srcChipHtml`) —
+  **Angel/Dhan** (broker, no NSE hit) / **NSE** / **EOD** (block/off-hours). Shows next to
+  the symbol in the **detail modal** header (from the quote's `source`), inside the chart
+  note (OHLCV/intraday), in the **Live-tab seed note** ("…candles from Angel/NSE"), and the
+  Live-tab **NSE-poll** path now labels itself honestly (it's broker-first, so a WS-down /
+  REST-up poll reads "Angel REST · polled ~12s", not "NSE").
+- **Tests:** frontend + self-describing keys, so no new test *function*; locked
+  `get_quote`/`get_chart` now return `source:"nse"`. Suite stays **753**; JS `node --check` clean.
+
 ### 2026-07-20 — Adaptive auto-refresh: throttle/pause the last foreground NSE hit (frontend; suite 753)
 - **Why:** after the broker-first migration, the 30s movers auto-refresh is the ONE
   remaining foreground NSE hit (no broker offers market-wide movers/OI — can't move it

@@ -917,6 +917,9 @@ return), **pauses during a WAF cooldown** (waking as it clears), and **slows to 
 min when the market is closed** (the lists are static off-hours). The only
 irreplaceable foreground NSE traffic left is the market-wide discovery lists
 themselves, and only while you're actually watching them during market hours.
+A small **provenance chip** (Angel/Dhan · NSE · EOD) on the stock-detail modal and
+the Live tab shows exactly which feed served each quote/chart, so the broker-first →
+NSE → EOD fallback chain is visible rather than guessed.
 
 **Auto EOD refresh.** `eod_scheduler.py` runs **one paced, block-aware refresh**
 (bhavcopy backfill → deals → optional conviction digest) shortly after the 15:30

@@ -193,6 +193,7 @@ def get_quote(symbol, series="EQ"):
         "priceBand": price.get("priceBand"),
         "lastUpdateTime": resp.get("lastUpdateTime"),
         "depth": {"bids": bids, "asks": asks},
+        "source": "nse",
     }
     _cache_put(key, out)
     return out
@@ -217,6 +218,7 @@ def get_chart(symbol, days="1D"):
         "name": data.get("name"),
         "prevClose": _num(data.get("closePrice")),
         "points": points,
+        "source": "nse",
     }
     _cache_put(key, out)
     return out
@@ -388,7 +390,7 @@ def get_ohlc(symbol, interval=1, chart_type="I", days=None,
         frm, to = _ist_session_start_epoch(), now
 
     out = {"symbol": symbol, "token": token, "interval": interval,
-           "chartType": chart_type, "points": []}
+           "chartType": chart_type, "points": [], "source": "nse"}
     if not token:
         out["error"] = "token-not-found"
         return out

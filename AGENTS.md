@@ -548,6 +548,13 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Data-source provenance chip** — a given number in the detail modal / Live tab can come
+  from Angel (broker), NSE, or the EOD bhavcopy fallback; now the UI *shows which*. Backend:
+  `nse_quote.get_quote/get_chart/get_ohlc` stamp `source:"nse"` (Angel already stamps
+  `"angel"`, EOD `"eod-bhavcopy"`), so payloads self-identify. Frontend: a colored `.src-chip`
+  (Angel/Dhan · NSE · EOD) next to the modal symbol + in the chart note + Live seed note, and
+  the Live NSE-poll path now labels broker-served polls honestly ("Angel REST · polled ~12s").
+  Frontend-only + self-describing keys; suite stays **753**.
 - **Adaptive auto-refresh (throttle/pause the last foreground NSE hit)** — the 30s movers
   refresh is the only foreground NSE call left (no broker offers market-wide movers/OI), so
   instead of a blind `setInterval` it's now a self-scheduling `setTimeout` loop that **pauses
