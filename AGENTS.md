@@ -51,7 +51,7 @@ NSE/
 ├── sector_scan.py     # Sector relative-strength board over db.eod_bars — cross-sectional RS vs market, ranks sectors + leaders/laggards; strength_map/context = the reusable sector pillar the EOD Scan + Conviction boards fold in
 ├── conviction_calibration.py # Does confirmation-stacking pay? Scores realized TARGET/STOP of saved conviction ideas — win rate by pillar count / per-pillar lift / option-⚠️ impact + verdict; pillar_weights() feeds that edge back into board scoring (adaptive)
 ├── rollover.py        # Futures rollover tracker off the FO bhavcopy — near-vs-next month rollover% / roll cost (contango·backwardation) / basis / net-OI state, cross-sectionally ranked; board() + rank_map() (the market-wide {sym:metrics} the Conviction board folds in as a pillar); reuses eod_options' cached FO text (off-hours)
-├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
+├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store; + rest_quote/rest_chart (detail modal from the broker, not NSE)
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
 ├── strategies.py      # Strategy library (17 generators) + market-regime detector
@@ -61,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 740 unit tests across 34 suites (see below)
+├── test_*.py          # 750 unit tests across 34 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -130,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 740 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 750 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -548,6 +548,15 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Stock-detail modal served from the broker (Angel), not NSE** — answers the "aren't we
+  using Angel/Dhan?" question. The app is a deliberate hybrid: NSE for market-wide discovery
+  (movers/OI/scanner/option-chain/EOD — no broker offers those), broker for live ticks on
+  symbols you drill into. The detail modal was still hitting NSE per row-click, so added
+  `angel_feed.rest_quote()` / `rest_chart()` (SmartConnect `getMarketData` FULL → LTP+OHLC+
+  depth, `ltpData` fallback; `getCandleData` → points) mapped to the `nse_quote` shapes, and
+  made `/api/quote` + `/api/chart` **broker-first when connected → NSE → EOD** (every hop
+  guarded, so a miss falls back — safe before Angel is even live-verified). `dhan_feed` gets
+  safe no-op `rest_*` stubs. Tests **+10**; suite **740 → 750**.
 - **🔄 Rollover in the EOD Scan tab** — the rollover signal was only actionable on the
   Conviction board; now the market-wide scanner carries it too. `eod_scanner._rollover_map()`
   (reuses `rollover.rank_map()`'s cached FO text) + `_attach_rollover()` tag F&O rows that

@@ -241,6 +241,104 @@ def test_angel_update_bar():
 
 
 # ---------------------------------------------------------------------------
+# angel on-demand REST (stock-detail modal served from the broker, not NSE)
+# ---------------------------------------------------------------------------
+class _FakeSmart:
+    """Minimal SmartConnect stand-in with the documented response shapes."""
+    def __init__(self, market=True):
+        self._market = market
+
+    def getMarketData(self, mode, tokens):
+        assert mode == "FULL"
+        return {"data": {"fetched": [{
+            "tradingSymbol": "RELIANCE-EQ", "ltp": 1450.5, "open": 1440.0,
+            "high": 1460.0, "low": 1435.0, "close": 1442.0, "netChange": 8.5,
+            "percentChange": 0.59, "avgPrice": 1448.0, "tradeVolume": 1234567,
+            "52WeekHigh": 1600.0, "52WeekLow": 1100.0,
+            "exchFeedTime": "2026-07-20 15:30:00",
+            "depth": {"buy": [{"price": 1450.4, "quantity": 100, "orders": 3}],
+                      "sell": [{"price": 1450.6, "quantity": 80, "orders": 4}]}}]}}
+
+    def getCandleData(self, params):
+        assert params["exchange"] == "NSE" and params["interval"] == "FIVE_MINUTE"
+        return {"data": [["2026-07-20T09:15:00+05:30", 1440, 1445, 1439, 1443, 10000],
+                         ["2026-07-20T09:20:00+05:30", 1443, 1448, 1442, 1447, 12000]]}
+
+
+class _LtpOnlySmart:
+    """Older SDK: only ltpData (no getMarketData) → quote without depth."""
+    def ltpData(self, exch, tsym, tok):
+        assert exch == "NSE" and tsym == "RELIANCE-EQ" and tok == "2885"
+        return {"data": {"ltp": 1451.0, "open": 1440.0, "high": 1460.0,
+                         "low": 1435.0, "close": 1442.0}}
+
+
+@contextlib.contextmanager
+def _angel_rest(smart):
+    with _feed_state(angel_feed):
+        angel_feed._sym2sec.update({"RELIANCE": "2885"})
+        angel_feed._sec2sym.update({"2885": "RELIANCE"})
+        angel_feed._scrip_at = time.time()          # no network
+        with _patch(angel_feed, "_smart", smart):
+            yield
+
+
+def test_angel_rest_quote_full_market_data():
+    with _angel_rest(_FakeSmart()):
+        q = angel_feed.rest_quote("reliance")
+    assert q["symbol"] == "RELIANCE" and q["source"] == "angel"
+    assert q["ltp"] == 1450.5 and q["change"] == 8.5 and q["prevClose"] == 1442.0
+    assert q["volume"] == 1234567 and q["yearHigh"] == 1600.0
+    assert len(q["depth"]["bids"]) == 5 and len(q["depth"]["asks"]) == 5
+    assert q["depth"]["bids"][0] == {"price": 1450.4, "qty": 100}
+    assert q["depth"]["asks"][1] == {"price": None, "qty": None}   # padded to 5
+
+
+def test_angel_rest_quote_ltp_fallback_no_depth():
+    with _angel_rest(_LtpOnlySmart()):
+        q = angel_feed.rest_quote("RELIANCE")
+    assert q["ltp"] == 1451.0 and q["source"] == "angel"
+    assert q["change"] == 9.0 and round(q["pChange"], 2) == 0.62
+    assert q["depth"]["bids"][0] == {"price": None, "qty": None}   # ltpData has no depth
+
+
+def test_angel_rest_chart_maps_candles_to_points():
+    with _angel_rest(_FakeSmart()):
+        c = angel_feed.rest_chart("reliance")
+    assert c["symbol"] == "RELIANCE" and c["source"] == "angel"
+    assert len(c["points"]) == 2 and c["points"][0]["price"] == 1443
+    expect = int(datetime.fromisoformat("2026-07-20T09:15:00+05:30").timestamp() * 1000)
+    assert c["points"][0]["t"] == expect
+
+
+def test_angel_rest_guards_return_none():
+    # no logged-in client → None
+    with _feed_state(angel_feed), _patch(angel_feed, "_smart", None):
+        assert angel_feed.rest_quote("RELIANCE") is None
+        assert angel_feed.rest_chart("RELIANCE") is None
+    # unknown symbol → None; a raising client → None (caller falls back to NSE)
+    with _angel_rest(_FakeSmart()):
+        assert angel_feed.rest_quote("NOSUCH") is None
+
+    class _Boom:
+        def getMarketData(self, *a):
+            raise RuntimeError("angel down")
+        def ltpData(self, *a):
+            raise RuntimeError("angel down")
+        def getCandleData(self, *a):
+            raise RuntimeError("angel down")
+    with _angel_rest(_Boom()):
+        assert angel_feed.rest_quote("RELIANCE") is None
+        assert angel_feed.rest_chart("RELIANCE") is None
+
+
+def test_angel_iso_to_ms():
+    assert angel_feed._iso_to_ms("bad") is None and angel_feed._iso_to_ms(None) is None
+    assert angel_feed._iso_to_ms("2026-07-20T09:15:00+05:30") == int(
+        datetime.fromisoformat("2026-07-20T09:15:00+05:30").timestamp() * 1000)
+
+
+# ---------------------------------------------------------------------------
 # dhan
 # ---------------------------------------------------------------------------
 def test_dhan_market_open():
@@ -293,6 +391,12 @@ def test_dhan_set_watch_snapshot():
 
 def test_dhan_update_bar():
     _check_update_bar(dhan_feed)
+
+
+def test_dhan_rest_stubs_return_none():
+    # Dhan's data API isn't wired (paid plan) → safe no-ops so app.py falls back to NSE
+    assert dhan_feed.rest_quote("RELIANCE") is None
+    assert dhan_feed.rest_chart("RELIANCE") is None
 
 
 def _main():

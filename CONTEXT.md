@@ -90,7 +90,7 @@ sectors.py           Curated NSE symbol→sector map (17 sectors, ~303 names) �
 sector_scan.py       Sector relative-strength (rotation) board over db.eod_bars — cross-sectional RS vs market median, ranks sectors + surfaces leaders/laggards; strength_map()/context() = the reusable sector pillar the EOD Scan + Conviction boards fold in
 conviction_calibration.py  Does confirmation-stacking pay? Scores realized TARGET/STOP outcomes of saved conviction ideas — win rate by pillar count / rating / direction, per-pillar lift, option-⚠️ impact, honest verdict (pure math + one db.ideas_all() read); pillar_weights() feeds that edge back into board scoring (adaptive)
 rollover.py          Futures rollover tracker off the FO bhavcopy — near-vs-next month rollover% / roll-cost (contango·backwardation) / basis / net-OI state, cross-sectionally ranked; board() + rank_map() (the market-wide {sym:metrics} the Conviction board folds in as a pillar); reuses eod_options' cached FO text (off-hours)
-angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default)
+angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default); also rest_quote/rest_chart (on-demand quote+chart for the detail modal → no NSE hit)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
 notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger; EOD digest carries a calibration-sourced track-record footer (does stacking pay?)
 paper.py             Paper-trading engine (equity + long/short options + long/short futures, margin-based; JSON-persisted)
@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 740 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 750 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -287,7 +287,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **740 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **750 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -439,6 +439,27 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Stock-detail modal served from the broker (Angel), not NSE (suite 740 → 750)
+- **Why (the "aren't we using Angel?" question):** the app is a deliberate hybrid —
+  NSE for market-wide *discovery* (movers / OI / scanner / option chain / EOD bhavcopy —
+  no broker offers those), Angel/Dhan for *live ticks* on symbols you drill into. But the
+  stock-detail modal was still calling NSE per row-click (`/api/quote` + `/api/chart`),
+  a big chunk of avoidable Akamai load. Audit of NSE call paths: foreground = the 30s
+  auto-refresh of the movers views (irreplaceable) + the detail modal (replaceable);
+  background = snapshot_logger's 60s market-hours loop + the once-a-day EOD scheduler.
+  `_fetch` already de-dupes NSE JSON for 15s.
+- **What:** `angel_feed.rest_quote()` / `rest_chart()` — on-demand REST for ARBITRARY
+  symbols (not just the streamed watch set) via SmartConnect `getMarketData` FULL (LTP +
+  OHLC + 5-level depth; falls back to `ltpData`) and `getCandleData` (5-min points),
+  mapped to the exact `nse_quote.get_quote/get_chart` shapes. `app.py` `/api/quote` +
+  `/api/chart` are now **broker-first when connected** → NSE NextApi → EOD close, each
+  guarded so any miss cleanly falls back (so it's safe even before Angel is live-verified).
+  Broker REST isn't behind NSE's Akamai, so this dodges the block entirely. `dhan_feed`
+  gets safe `rest_*` no-op stubs (paid data plan not wired) for interface parity.
+- **Tests +10** (Angel FULL→quote+depth map, ltpData fallback, candle→points, guards/raise
+  →None, iso→ms; Dhan stubs; route broker-first / falls back on miss / skipped when
+  disconnected / chart empty→NSE). Suite **740 → 750**.
 
 ### 2026-07-20 — Rollover surfaced in the EOD Scan tab (suite 735 → 740)
 - **Why:** rollover was only actionable on the Conviction board. This puts the same

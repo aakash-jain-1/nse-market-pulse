@@ -172,6 +172,82 @@ def test_quote_falls_back_to_eod_during_block():
 
 
 # ---------------------------------------------------------------------------
+# stock-detail modal served from the broker (Angel) instead of NSE when connected
+# ---------------------------------------------------------------------------
+def test_quote_prefers_broker_when_connected():
+    import types
+    import nse_quote as q
+
+    def _boom(s):
+        raise AssertionError("must not hit NSE when the broker serves the quote")
+
+    fake = types.SimpleNamespace(
+        public_status=lambda: {"provider": "angel", "connected": True},
+        rest_quote=lambda s: {"symbol": s.upper(), "ltp": 1450.5, "source": "angel"})
+    with _patches((webapp, "live_feed", fake), (q, "get_quote", _boom)):
+        st, j = _json("/api/quote/reliance")
+    assert st == 200 and j["source"] == "angel" and j["ltp"] == 1450.5
+
+
+def test_quote_falls_back_to_nse_when_broker_misses():
+    import types
+    import nse_client as nse
+    import nse_quote as q
+
+    # connected, but broker returns None (or a quote without ltp) → NSE serves it
+    fake = types.SimpleNamespace(public_status=lambda: {"connected": True},
+                                 rest_quote=lambda s: None)
+    saved = nse._blocked_until
+    try:
+        nse._blocked_until = 0.0
+        with _patches((webapp, "live_feed", fake),
+                      (q, "get_quote", lambda s: {"symbol": s.upper(), "ltp": 7, "source": "nse"})):
+            st, j = _json("/api/quote/acc")
+        assert st == 200 and j["source"] == "nse" and j["ltp"] == 7
+    finally:
+        nse._blocked_until = saved
+
+
+def test_quote_broker_skipped_when_disconnected():
+    import types
+    import nse_client as nse
+    import nse_quote as q
+
+    def _boom_rest(s):
+        raise AssertionError("rest_quote must not be called while disconnected")
+
+    fake = types.SimpleNamespace(public_status=lambda: {"connected": False},
+                                 rest_quote=_boom_rest)
+    saved = nse._blocked_until
+    try:
+        nse._blocked_until = 0.0
+        with _patches((webapp, "live_feed", fake),
+                      (q, "get_quote", lambda s: {"symbol": s.upper(), "ltp": 3, "source": "nse"})):
+            assert _json("/api/quote/acc")[1]["source"] == "nse"
+    finally:
+        nse._blocked_until = saved
+
+
+def test_chart_prefers_broker_then_falls_back():
+    import types
+    import nse_quote as q
+    connected = types.SimpleNamespace(
+        public_status=lambda: {"connected": True},
+        rest_chart=lambda s: {"symbol": s.upper(), "points": [{"t": 1, "price": 2}],
+                              "source": "angel"})
+    with _patches((webapp, "live_feed", connected),
+                  (q, "get_chart", lambda s: (_ for _ in ()).throw(
+                      AssertionError("must not hit NSE when the broker has candles")))):
+        assert _json("/api/chart/tcs")[1]["source"] == "angel"
+    # broker connected but returns no points → fall back to NSE
+    empty = types.SimpleNamespace(public_status=lambda: {"connected": True},
+                                  rest_chart=lambda s: {"symbol": s, "points": []})
+    with _patches((webapp, "live_feed", empty),
+                  (q, "get_chart", lambda s: {"symbol": s.upper(), "points": [], "source": "nse"})):
+        assert _json("/api/chart/tcs")[1]["source"] == "nse"
+
+
+# ---------------------------------------------------------------------------
 # ideas journal (imported inside the handler)
 # ---------------------------------------------------------------------------
 def test_ideas_endpoints():

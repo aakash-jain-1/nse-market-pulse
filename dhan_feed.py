@@ -360,6 +360,18 @@ def snapshot(symbols=None):
         return out
 
 
+# On-demand REST for the stock-detail modal — parity with angel_feed's interface so
+# app.py can call live_feed.rest_quote/rest_chart uniformly. Dhan's data API is a
+# paid plan we don't wire here, so these are safe no-ops → the caller falls back to
+# NSE. (Implement against dhanhq's historical/quote API if a Dhan data plan is added.)
+def rest_quote(symbol):
+    return None
+
+
+def rest_chart(symbol, days=5):
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Connection lifecycle
 # ---------------------------------------------------------------------------

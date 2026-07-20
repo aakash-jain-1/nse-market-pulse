@@ -422,6 +422,132 @@ def snapshot(symbols=None):
 
 
 # ---------------------------------------------------------------------------
+# On-demand REST (stock-detail modal) — serve quote/chart from Angel instead of
+# NSE for ARBITRARY symbols (not just the streamed watch set), so drilling into a
+# stock stops hitting NSE per-symbol. Works off-hours (historical candles / last
+# close). Every helper returns None on any miss so the caller falls back to NSE.
+# ---------------------------------------------------------------------------
+def _rest_depth(depth):
+    """Angel getMarketData FULL depth {buy:[{price,quantity}],sell:[…]} → the
+    {bids:[{price,qty}×5], asks:[…]} shape nse_quote.get_quote emits."""
+    def side(rows):
+        out = [{"price": _to_f(r.get("price")), "qty": r.get("quantity")}
+               for r in (rows or [])[:5]]
+        out += [{"price": None, "qty": None}] * (5 - len(out))
+        return out
+    return {"bids": side(depth.get("buy")), "asks": side(depth.get("sell"))}
+
+
+def _map_market_data(symbol, row):
+    """Angel getMarketData FULL row → nse_quote.get_quote() shape (incl. depth)."""
+    ltp, close = _to_f(row.get("ltp")), _to_f(row.get("close"))
+    ch = row.get("netChange")
+    pch = row.get("percentChange")
+    return {
+        "symbol": symbol, "companyName": None,
+        "ltp": ltp,
+        "change": _to_f(ch) if ch is not None else (
+            round(ltp - close, 2) if (ltp is not None and close is not None) else None),
+        "pChange": _to_f(pch) if pch is not None else (
+            round((ltp / close - 1) * 100, 2) if (ltp and close) else None),
+        "open": _to_f(row.get("open")), "dayHigh": _to_f(row.get("high")),
+        "dayLow": _to_f(row.get("low")), "prevClose": close,
+        "vwap": _to_f(row.get("avgPrice")),
+        "volume": row.get("tradeVolume"), "value": None, "deliveryPct": None,
+        "yearHigh": _to_f(row.get("52WeekHigh")), "yearLow": _to_f(row.get("52WeekLow")),
+        "priceBand": None,
+        "lastUpdateTime": row.get("exchFeedTime") or row.get("exchTradeTime"),
+        "depth": _rest_depth(row.get("depth") or {}),
+        "source": "angel",
+    }
+
+
+def _map_ltp(symbol, d):
+    """Angel ltpData row → get_quote() shape (LTP+OHLC only; no depth/volume)."""
+    ltp, close = _to_f(d.get("ltp")), _to_f(d.get("close"))
+    empty = [{"price": None, "qty": None}] * 5
+    return {
+        "symbol": symbol, "companyName": None, "ltp": ltp,
+        "change": round(ltp - close, 2) if (ltp is not None and close is not None) else None,
+        "pChange": round((ltp / close - 1) * 100, 2) if (ltp and close) else None,
+        "open": _to_f(d.get("open")), "dayHigh": _to_f(d.get("high")),
+        "dayLow": _to_f(d.get("low")), "prevClose": close,
+        "vwap": None, "volume": None, "value": None, "deliveryPct": None,
+        "yearHigh": None, "yearLow": None, "priceBand": None, "lastUpdateTime": None,
+        "depth": {"bids": list(empty), "asks": list(empty)}, "source": "angel",
+    }
+
+
+def rest_quote(symbol):
+    """Per-stock quote (shaped like nse_quote.get_quote) from Angel's REST — FULL
+    market data (with 5-level depth) when the SDK supports it, else ltpData. Returns
+    None unless logged in and the symbol resolves; None on any error so app.py falls
+    back to NSE. Broker REST isn't behind NSE's Akamai, so this dodges the block."""
+    smart = _smart
+    if smart is None:
+        return None
+    sym = (symbol or "").upper().strip()
+    tok = resolve(sym)
+    if not tok:
+        return None
+    trad = _sec2sym.get(tok) or sym
+    try:
+        if hasattr(smart, "getMarketData"):
+            resp = smart.getMarketData("FULL", {"NSE": [tok]})
+            fetched = (((resp or {}).get("data") or {}).get("fetched") or [])
+            if fetched:
+                return _map_market_data(sym, fetched[0])
+        resp = smart.ltpData("NSE", trad + "-EQ", tok)
+        d = (resp or {}).get("data") or {}
+        if d.get("ltp") is not None:
+            return _map_ltp(sym, d)
+    except Exception:
+        return None
+    return None
+
+
+def rest_chart(symbol, days=5):
+    """Intraday 5-min candles from Angel's getCandleData, shaped like
+    nse_quote.get_chart() (points:[{t: epoch_ms, price}]). Works off-hours
+    (historical). None on any miss → app.py falls back to NSE."""
+    smart = _smart
+    if smart is None:
+        return None
+    sym = (symbol or "").upper().strip()
+    tok = resolve(sym)
+    if not tok:
+        return None
+    try:
+        now = datetime.now(IST)
+        params = {
+            "exchange": "NSE", "symboltoken": tok, "interval": "FIVE_MINUTE",
+            "fromdate": (now - timedelta(days=max(1, days))).strftime("%Y-%m-%d %H:%M"),
+            "todate": now.strftime("%Y-%m-%d %H:%M"),
+        }
+        rows = (smart.getCandleData(params) or {}).get("data") or []
+    except Exception:
+        return None
+    points = []
+    for r in rows:
+        if len(r) >= 5:
+            t, c = _iso_to_ms(r[0]), _to_f(r[4])
+            if t is not None and c is not None:
+                points.append({"t": t, "price": c})
+    if not points:
+        return None
+    return {"symbol": sym, "name": None, "prevClose": None,
+            "points": points, "source": "angel"}
+
+
+def _iso_to_ms(s):
+    """Angel candle timestamp ('2026-07-20T09:15:00+05:30') → epoch ms, or None."""
+    try:
+        return int(datetime.fromisoformat(str(s)).timestamp() * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Connection lifecycle
 # ---------------------------------------------------------------------------
 def _quiet_logs():

@@ -275,12 +275,37 @@ def api_deepdive(symbol):
     return jsonify(nse.get_stock_deepdive(symbol))
 
 
+def _broker_connected():
+    """True when the selected live feed (Angel/Dhan) has a live session — so we can
+    serve the stock-detail modal from the broker's REST instead of hitting NSE."""
+    try:
+        return bool(live_feed.public_status().get("connected"))
+    except Exception:
+        return False
+
+
+def _broker_quote(symbol):
+    """Per-stock quote from the broker (Angel REST), or None. Only when connected;
+    swallows every error so the caller cleanly falls back to NSE."""
+    if not _broker_connected():
+        return None
+    try:
+        fn = getattr(live_feed, "rest_quote", None)
+        return fn(symbol) if fn else None
+    except Exception:
+        return None
+
+
 @app.route("/api/quote/<symbol>")
 def api_quote(symbol):
-    """Live per-stock quote + 5-level depth. During a WAF cooldown (or if the live call
-    fails), fall back to the resilient EOD bhavcopy close so the stock modal still works
-    — clearly marked `stale` so the UI can badge it."""
+    """Live per-stock quote + 5-level depth. Prefers the broker (Angel) REST when the
+    live feed is connected — no NSE hit — then NSE's NextApi, and finally the resilient
+    EOD bhavcopy close during a WAF cooldown (clearly marked `stale`) so the modal always
+    works."""
     import nse_client as nse
+    q = _broker_quote(symbol)      # broker-first: dodges NSE's Akamai entirely
+    if q is not None and q.get("ltp") is not None:
+        return jsonify(q)
     if not nse.blocked_for():
         try:
             return jsonify(nse_quote.get_quote(symbol))
@@ -592,6 +617,16 @@ def api_eod_option_summary(symbol):
 
 @app.route("/api/chart/<symbol>")
 def api_chart(symbol):
+    """Intraday chart points. Prefers the broker (Angel) candles when connected — no
+    NSE hit — else NSE's NextApi chart feed."""
+    if _broker_connected():
+        try:
+            fn = getattr(live_feed, "rest_chart", None)
+            c = fn(symbol) if fn else None
+            if c and c.get("points"):
+                return jsonify(c)
+        except Exception:
+            pass                     # fall back to NSE
     return jsonify(nse_quote.get_chart(symbol))
 
 
