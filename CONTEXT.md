@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 791 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 796 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -177,7 +177,9 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   `/api/health.nse` = **`pacer_stats()`**: `blockedForSec`, `blockCount` (repeat blocks →
   the banner adds a "backing off longer" note), `cooldownSec`, `reqLastMin` (pacer window),
   `concurrency`/`minGap`/`softRpm`/`impersonate` (curl_cffi profile in effect, or null)/
-  `impersonateMode` (the configured policy: auto/<profile>/off/null).
+  `impersonateMode` (the configured policy: auto/<profile>/off/null)/`endpoints` (per-endpoint
+  request budget: hits per endpoint path over the last min/hour, ranked — shows which calls eat
+  the most quota so trims are data-driven; `_record_endpoint` tags every hit in the pacer).
   **Header hardening:** `HEADERS` now sends modern-Chrome
   client hints (`sec-ch-ua*`, `Sec-Fetch-*`, `Accept-Encoding` — brotli only if decodable)
   matching the UA major, and the two cookie warm-ups send navigation-shaped `_NAV_HEADERS`
@@ -336,7 +338,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **791 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **796 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -345,7 +347,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   parsers),   `test_nse_client.py` (global request pacer: min-gap/soft-RPM/concurrency
   + escalating WAF cooldown + browser headers + `pacer_stats` + optional curl_cffi
   impersonation: env toggle/fallback/build-session transport pick + auto-failover
-  arm/revert on the block ladder), `test_quote.py`
+  arm/revert on the block ladder + per-endpoint request budget), `test_quote.py`
   + `test_quote_more.py`, `test_paper.py`,
   `test_strategies.py`, `test_bhavcopy.py` (EOD UDiFF + sec_bhavdata_full delivery
   parsers + fetch walk-back + price/lot fallback + delivery-merge wiring),
@@ -492,6 +494,18 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Per-endpoint NSE request budget (data-driven trimming) (suite 791 → 796)
+- **Why:** the pacer knows the *total* rate but not WHERE it goes. To target the next volume
+  trim with evidence instead of guessing, tag each hit by endpoint and keep a 1h sliding log.
+- **What (`nse_client.py`):** `_record_endpoint(url)` (called from both `_PacedSession.send`
+  and `_PacedCffiSession.request`) logs `(ts, key)` into `_ep_calls`; `_endpoint_key` buckets
+  by **path** (query dropped, non-www host prefixed) so the map stays ~15-20 stable endpoints
+  (per-symbol quote/chart collapse into one bucket per TYPE; gainers+losers merge).
+  `endpoint_budget()` returns per-endpoint `lastMin`/`lastHour` counts ranked by hourly volume,
+  surfaced under `/api/health.nse.endpoints`. Own lock, so it never contends with pacer timing.
+- **Tests +5** (`test_nse_client.py`, 25 → 30) + health-route assert: key bucketing, min/hour
+  counts, >1h pruning, `send()` records, stats shape. Suite **791 → 796**, green, lint clean.
 
 ### 2026-07-20 — Header 🛡 Chrome-TLS badge (transport visible) (suite 791, UI only)
 - **Why:** auto-failover flips the transport to a real Chrome handshake on repeat blocks, but

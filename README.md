@@ -811,7 +811,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
 | `GET /api/iv/rank/<sym>` | IV rank/percentile from logged ATM-IV history |
 | `GET /api/alerts/status` · `POST /api/alerts/test` | Off-screen alert status (no secrets) · send a test Telegram/webhook message |
-| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture + `nse` pacer/WAF stats: `blockedForSec`, `blockCount`, `reqLastMin`, `concurrency`, `impersonate`, `impersonateMode`) |
+| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture + `nse` pacer/WAF stats: `blockedForSec`, `blockCount`, `reqLastMin`, `concurrency`, `impersonate`, `impersonateMode`, `endpoints` per-endpoint request budget) |
 
 ---
 
@@ -847,7 +847,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 791 unit tests, 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
+├── test_*.py               # 796 unit tests, 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
@@ -919,7 +919,9 @@ all at a single choke point: **at most 4 connections in flight**, request starts
 worker fan-outs (the cold snapshot-logger / context-build cycle) — the exact per-IP burst
 Akamai's rate detector flags — into a steady, browser-like stream. Requests also now carry
 **modern-Chrome headers** (client hints + `Sec-Fetch-*`) so they look less scripted.
-`/api/health.nse` exposes the pacer state (`blockCount`, `reqLastMin`, `concurrency`),
+`/api/health.nse` exposes the pacer state (`blockCount`, `reqLastMin`, `concurrency`)
+plus a **per-endpoint request budget** (`endpoints`: hits per endpoint over the last
+min/hour, ranked) so the next volume trim is data-driven rather than a guess —
 and a small **header chip** shows the live NSE request rate vs the soft ceiling
 (green/amber/red) so you can see headroom before a block. A second **🛡 Chrome TLS
 badge** lights up beside it whenever the impersonated transport is actually in effect

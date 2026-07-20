@@ -146,6 +146,8 @@ def test_health_reports_nse_block():
             assert "reqLastMin" in j["nse"]
             # Impersonation fields the header TLS badge reads (present even without the dep).
             assert "impersonate" in j["nse"] and "impersonateMode" in j["nse"]
+            # Per-endpoint request budget (ranked list) for data-driven trimming.
+            assert isinstance(j["nse"]["endpoints"], list)
             assert "autoEod" in j and "enabled" in j["autoEod"]
             # The dashboard's adaptive refresh reads logger.marketHours to throttle the
             # movers poll off-hours — lock that contract here.

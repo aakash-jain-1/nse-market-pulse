@@ -61,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 791 unit tests across 35 suites (see below)
+├── test_*.py          # 796 unit tests across 35 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -130,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 791 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 796 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -552,6 +552,12 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Per-endpoint NSE request budget** — the pacer knew the total rate but not WHERE it went.
+  `_record_endpoint()` (from both paced transports) tags every hit by endpoint path into a 1h
+  sliding log; `endpoint_budget()` returns per-endpoint last-min/hour counts ranked by volume
+  under `/api/health.nse.endpoints`, so the next trim targets the heaviest callers with data.
+  Bucketed by path (query dropped) → ~15-20 stable endpoints. Tests **+5** (25 → 30) + health
+  assert; suite **791 → 796**.
 - **Header 🛡 Chrome-TLS badge (UI)** — auto-failover flips the transport invisibly; now a violet
   `#nseTls` badge appears next to the NSE-rate chip only when `nse.impersonate` is in effect
   (tooltip: auto vs always-on, from `nse.impersonateMode`), and the WAF-block banner notes when

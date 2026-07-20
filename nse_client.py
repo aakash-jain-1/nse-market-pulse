@@ -17,6 +17,7 @@ import random
 import threading
 import time
 from datetime import datetime
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -279,12 +280,70 @@ def _pace():
         _req_calls.append(now)
 
 
+# --- Per-endpoint request budget ------------------------------------------
+# The pacer knows the TOTAL rate but not WHERE it goes. To target the next volume
+# trim with evidence (instead of guessing), tag every hit by its endpoint path and
+# keep a 1-hour sliding log. Bucketing by PATH (query stripped) keeps the map to the
+# ~15-20 stable NSE endpoints — high-cardinality params (per-symbol quote/chart) all
+# collapse into one bucket per endpoint TYPE, which is exactly the view we want.
+_EP_WINDOW = 3600                  # seconds of history to retain
+_ep_lock = threading.Lock()
+_ep_calls = collections.deque()    # (epoch_secs, endpoint_key) over the last hour
+
+
+def _endpoint_key(url):
+    """Normalize a request URL to a stable per-endpoint bucket: the path, with the
+    host prefixed only when it isn't the main site (so charting.nseindia.com and the
+    static archives on nsearchives are distinguishable). Query is dropped on purpose."""
+    if not url:
+        return "?"
+    try:
+        p = urlparse(url)
+    except Exception:
+        return "?"
+    path = p.path or "/"
+    if p.netloc and p.netloc != "www.nseindia.com":
+        return p.netloc + path
+    return path
+
+
+def _record_endpoint(url):
+    """Log one NSE hit against its endpoint bucket and prune the >1h tail. Cheap;
+    guarded by its own lock so it never contends with the pacer's timing lock."""
+    now = time.time()
+    key = _endpoint_key(url)
+    with _ep_lock:
+        _ep_calls.append((now, key))
+        cut = now - _EP_WINDOW
+        while _ep_calls and _ep_calls[0][0] < cut:
+            _ep_calls.popleft()
+
+
+def endpoint_budget(top=12):
+    """Per-endpoint NSE request counts over the last minute + hour, ranked by hourly
+    volume (top N). Shows which endpoints eat the most Akamai quota so trims are
+    data-driven. Read on demand (single O(n) pass) from /api/health."""
+    now = time.time()
+    minute, hour = {}, {}
+    with _ep_lock:
+        while _ep_calls and now - _ep_calls[0][0] > _EP_WINDOW:
+            _ep_calls.popleft()
+        for ts, key in _ep_calls:
+            hour[key] = hour.get(key, 0) + 1
+            if now - ts <= 60:
+                minute[key] = minute.get(key, 0) + 1
+    ranked = sorted(hour.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
+    return [{"endpoint": k, "lastMin": minute.get(k, 0), "lastHour": c}
+            for k, c in ranked]
+
+
 class _PacedSession(requests.Session):
     """A requests.Session that paces every outgoing hit through the global gate.
     Overriding send() catches all verbs + redirect hops. Callers (nse_quote,
     bhavcopy, _fetch) need no changes — they just use the shared session."""
     def send(self, request, **kwargs):
         _pace()                                  # rate-limit the START of the hit
+        _record_endpoint(getattr(request, "url", None))   # tag for the budget map
         with _NSE_GATE:                          # cap simultaneous in-flight connections
             return super().send(request, **kwargs)
 
@@ -297,6 +356,7 @@ if _cffi is not None:
         hit (fine). Exposes the same .get(url, timeout=…) the callers already use."""
         def request(self, method, url, *args, **kwargs):
             _pace()
+            _record_endpoint(url)                # tag for the budget map
             with _NSE_GATE:
                 return super().request(method, url, *args, **kwargs)
 else:                                             # pragma: no cover - env dependent
@@ -321,6 +381,7 @@ def pacer_stats():
         "softRpm": _NSE_SOFT_RPM,
         "impersonate": _impersonate_profile(),   # profile in effect NOW (None until armed)
         "impersonateMode": _impersonate_mode(),  # policy: auto/<profile>/off/None (Phase 2)
+        "endpoints": endpoint_budget(),          # per-endpoint hits (last min/hour), ranked
     }
 
 

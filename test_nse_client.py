@@ -75,6 +75,22 @@ def _fresh_block(clock):
          nse._last_block_ts, nse._prev_cooldown) = saved
 
 
+@contextlib.contextmanager
+def _fresh_ep(clock=None):
+    """Isolate the per-endpoint request-budget log (optionally on a fake clock)."""
+    saved_calls = list(nse._ep_calls)
+    saved_time = nse.time
+    if clock is not None:
+        nse.time = clock
+    nse._ep_calls.clear()
+    try:
+        yield clock
+    finally:
+        nse.time = saved_time
+        nse._ep_calls.clear()
+        nse._ep_calls.extend(saved_calls)
+
+
 # --- pacer: min-gap + soft-RPM --------------------------------------------
 
 def test_pace_enforces_min_gap_between_starts():
@@ -491,6 +507,73 @@ def test_paced_cffi_session_wraps_real_dep_when_present():
         return
     assert issubclass(nse._PacedCffiSession, nse._cffi.Session)
     assert "request" in nse._PacedCffiSession.__dict__     # request() is overridden
+
+
+# --- per-endpoint request budget ------------------------------------------
+
+def test_endpoint_key_buckets_by_path():
+    k = nse._endpoint_key
+    # query dropped → gainers + losers collapse into one endpoint bucket
+    assert k(nse.BASE + "/api/live-analysis-variations?index=gainers") == \
+        "/api/live-analysis-variations"
+    assert k(nse.BASE + "/api/live-analysis-variations?index=loosers") == \
+        "/api/live-analysis-variations"
+    # non-main host is prefixed so charting is distinguishable from www
+    assert k("https://charting.nseindia.com/Charts/ChartData?index=TCSEQN") == \
+        "charting.nseindia.com/Charts/ChartData"
+    assert k(None) == "?" and k("") == "?"
+
+
+def test_endpoint_budget_counts_last_min_and_hour():
+    clk = _Clock(t=10000.0)
+    with _fresh_ep(clk):
+        nse._record_endpoint(nse.BASE + "/api/x")
+        nse._record_endpoint(nse.BASE + "/api/x")
+        nse._record_endpoint(nse.BASE + "/api/y")
+        clk.t += 1800                                  # 30 min later (in-hour, out-of-minute)
+        nse._record_endpoint(nse.BASE + "/api/x")
+        b = {e["endpoint"]: e for e in nse.endpoint_budget()}
+        assert b["/api/x"]["lastHour"] == 3 and b["/api/x"]["lastMin"] == 1
+        assert b["/api/y"]["lastHour"] == 1 and b["/api/y"]["lastMin"] == 0
+        # ranked by hourly volume: the heavier endpoint comes first
+        assert nse.endpoint_budget()[0]["endpoint"] == "/api/x"
+
+
+def test_endpoint_budget_prunes_beyond_hour():
+    clk = _Clock(t=10000.0)
+    with _fresh_ep(clk):
+        nse._record_endpoint(nse.BASE + "/api/old")
+        clk.t += 3700                                  # >1h later → old drops out
+        nse._record_endpoint(nse.BASE + "/api/new")
+        b = {e["endpoint"]: e for e in nse.endpoint_budget()}
+        assert "/api/old" not in b and b["/api/new"]["lastHour"] == 1
+
+
+def test_paced_session_records_endpoint():
+    """send() tags the budget so /api/health can show per-endpoint volume."""
+    def fake_send(self, request, **kw):
+        r = requests.models.Response()
+        r.status_code = 200
+        r._content = b"{}"
+        r.url = request.url
+        return r
+
+    saved_send, saved_pace = requests.Session.send, nse._pace
+    requests.Session.send = fake_send
+    nse._pace = lambda: None
+    try:
+        with _fresh_ep():
+            req = requests.Request("GET", nse.BASE + "/api/marketStatus").prepare()
+            nse._PacedSession().send(req)
+            b = {e["endpoint"]: e for e in nse.endpoint_budget()}
+            assert b["/api/marketStatus"]["lastMin"] == 1
+    finally:
+        requests.Session.send, nse._pace = saved_send, saved_pace
+
+
+def test_pacer_stats_includes_endpoint_budget():
+    st = nse.pacer_stats()
+    assert isinstance(st["endpoints"], list)           # stable shape for /api/health
 
 
 def _main():
