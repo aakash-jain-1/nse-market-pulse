@@ -530,7 +530,7 @@ def rest_chart(symbol, days=5):
     points = []
     for r in rows:
         if len(r) >= 5:
-            t, c = _iso_to_ms(r[0]), _to_f(r[4])
+            t, c = _baked_iso_to_ms(r[0]), _to_f(r[4])
             if t is not None and c is not None:
                 points.append({"t": t, "price": c})
     if not points:
@@ -539,12 +539,65 @@ def rest_chart(symbol, days=5):
             "points": points, "source": "angel"}
 
 
-def _iso_to_ms(s):
-    """Angel candle timestamp ('2026-07-20T09:15:00+05:30') → epoch ms, or None."""
+# Angel getCandleData interval keywords, keyed by minutes-per-candle.
+_ANGEL_IV = {1: "ONE_MINUTE", 3: "THREE_MINUTE", 5: "FIVE_MINUTE", 10: "TEN_MINUTE",
+             15: "FIFTEEN_MINUTE", 30: "THIRTY_MINUTE", 60: "ONE_HOUR"}
+
+
+def rest_ohlc(symbol, interval=1, chart_type="I", days=None):
+    """OHLCV candles from Angel's getCandleData, shaped like nse_quote.get_ohlc
+    (points:[{t: baked-ms, o,h,l,c,v}]) — so the Live-tab chart seed and the detail
+    modal's candles come from the broker instead of NSE. Daily when chart_type='D'.
+    Returns None on any miss so app.py falls back to NSE. Works off-hours (historical)."""
+    smart = _smart
+    if smart is None:
+        return None
+    sym = (symbol or "").upper().strip()
+    tok = resolve(sym)
+    if not tok:
+        return None
+    daily = (chart_type == "D")
     try:
-        return int(datetime.fromisoformat(str(s)).timestamp() * 1000)
+        iv = int(interval or 1)
+    except (TypeError, ValueError):
+        iv = 1
+    ang_iv = "ONE_DAY" if daily else _ANGEL_IV.get(iv, "ONE_MINUTE")
+    lookback = days or (120 if daily else 5)
+    try:
+        now = datetime.now(IST)
+        params = {
+            "exchange": "NSE", "symboltoken": tok, "interval": ang_iv,
+            "fromdate": (now - timedelta(days=max(1, lookback))).strftime("%Y-%m-%d %H:%M"),
+            "todate": now.strftime("%Y-%m-%d %H:%M"),
+        }
+        rows = (smart.getCandleData(params) or {}).get("data") or []
+    except Exception:
+        return None
+    points = []
+    for r in rows:
+        if len(r) >= 6:
+            t = _baked_iso_to_ms(r[0])
+            if t is not None:
+                points.append({"t": t, "o": _to_f(r[1]), "h": _to_f(r[2]),
+                               "l": _to_f(r[3]), "c": _to_f(r[4]), "v": _to_f(r[5])})
+    if len(points) < 2:
+        return None
+    return {"symbol": sym, "token": tok, "interval": interval,
+            "chartType": chart_type, "points": points, "source": "angel"}
+
+
+def _baked_iso_to_ms(s):
+    """Angel candle ISO ('2026-07-20T09:15:00+05:30') → epoch ms with the IST
+    wall-clock baked in as if UTC — matching get_ohlc's `t` and the live forming bar
+    (_baked_ms), so seeded history and live bars line up on the chart. None on error."""
+    try:
+        dt = datetime.fromisoformat(str(s))
     except (TypeError, ValueError):
         return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(IST)             # normalize to IST wall-clock
+    dt = dt.replace(tzinfo=None)            # then treat that wall-clock as UTC
+    return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
 # ---------------------------------------------------------------------------

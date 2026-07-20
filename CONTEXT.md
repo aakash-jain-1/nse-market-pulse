@@ -90,7 +90,7 @@ sectors.py           Curated NSE symbol→sector map (17 sectors, ~303 names) �
 sector_scan.py       Sector relative-strength (rotation) board over db.eod_bars — cross-sectional RS vs market median, ranks sectors + surfaces leaders/laggards; strength_map()/context() = the reusable sector pillar the EOD Scan + Conviction boards fold in
 conviction_calibration.py  Does confirmation-stacking pay? Scores realized TARGET/STOP outcomes of saved conviction ideas — win rate by pillar count / rating / direction, per-pillar lift, option-⚠️ impact, honest verdict (pure math + one db.ideas_all() read); pillar_weights() feeds that edge back into board scoring (adaptive)
 rollover.py          Futures rollover tracker off the FO bhavcopy — near-vs-next month rollover% / roll-cost (contango·backwardation) / basis / net-OI state, cross-sectionally ranked; board() + rank_map() (the market-wide {sym:metrics} the Conviction board folds in as a pillar); reuses eod_options' cached FO text (off-hours)
-angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default); also rest_quote/rest_chart (on-demand quote+chart for the detail modal → no NSE hit)
+angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default); also rest_quote/rest_chart/rest_ohlc (on-demand quote+chart+candles for the detail modal AND the Live-tab seed → no NSE hit)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
 notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger; EOD digest carries a calibration-sourced track-record footer (does stacking pay?)
 paper.py             Paper-trading engine (equity + long/short options + long/short futures, margin-based; JSON-persisted)
@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 750 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 753 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -287,7 +287,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **750 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **753 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -439,6 +439,24 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Live-tab chart seed + /api/ohlc served from the broker too (suite 750 → 753)
+- **Why:** finishing the broker-first migration. The detail modal already went broker-first
+  (previous entry), but the **Live tab** still seeded its candlestick chart from NSE
+  (`/api/live/seed`) and the 12s NSE poll fallback used `/api/ohlc`. So opening the Live
+  tab still hit NSE even with Angel connected.
+- **What:** `angel_feed.rest_ohlc(symbol, interval, chart_type, days)` — OHLCV candles via
+  SmartConnect `getCandleData`, mapped to the exact `nse_quote.get_ohlc` shape
+  (`points:[{t,o,h,l,c,v}]`), interval keyworded (1→ONE_MINUTE … D→ONE_DAY). `app.py`
+  `/api/live/seed` and `/api/ohlc` are now **broker-first when connected → NSE**, but an
+  explicit `from/to` window (the backtester's exact holding period) always stays on NSE.
+- **Timestamp fix:** candle `t` is now **IST-wall-clock baked as UTC** (`_baked_iso_to_ms`,
+  renamed from `_iso_to_ms`), matching `get_ohlc`'s `t` and the live forming bar's
+  `_baked_ms` — so seeded history and live ticks land on the same axis (the old
+  true-UTC convert would have shifted the seed −5:30h once Angel went live). `rest_chart`
+  now uses the baked converter too. `dhan_feed` gets a `rest_ohlc` no-op stub.
+- **Tests +3** (candle→ohlc map incl. daily, baked-iso, `/api/ohlc` broker-first but
+  window→NSE, `/api/live/seed` broker-first then fallback). Suite **750 → 753**.
 
 ### 2026-07-20 — Stock-detail modal served from the broker (Angel), not NSE (suite 740 → 750)
 - **Why (the "aren't we using Angel?" question):** the app is a deliberate hybrid —

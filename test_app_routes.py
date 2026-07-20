@@ -247,6 +247,49 @@ def test_chart_prefers_broker_then_falls_back():
         assert _json("/api/chart/tcs")[1]["source"] == "nse"
 
 
+def test_ohlc_prefers_broker_but_window_stays_on_nse():
+    import types
+    import nse_quote as q
+    pts = [{"t": 1, "o": 1, "h": 2, "l": 1, "c": 2, "v": 9},
+           {"t": 2, "o": 2, "h": 3, "l": 2, "c": 3, "v": 8}]
+    fake = types.SimpleNamespace(
+        public_status=lambda: {"connected": True},
+        rest_ohlc=lambda s, interval=1, chart_type="I", days=None: {
+            "symbol": s.upper(), "points": pts, "source": "angel"})
+    # plain (window-less) request → broker serves it, NSE untouched
+    with _patches((webapp, "live_feed", fake),
+                  (q, "get_ohlc", lambda *a, **k: (_ for _ in ()).throw(
+                      AssertionError("must not hit NSE for the window-less chart")))):
+        assert _json("/api/ohlc/tcs?interval=5")[1]["source"] == "angel"
+    # an explicit from/to window (backtester) must bypass the broker and use NSE
+    with _patches((webapp, "live_feed", fake),
+                  (q, "get_ohlc", lambda *a, **k: {"points": [], "source": "nse"})):
+        assert _json("/api/ohlc/tcs?from=100&to=200")[1]["source"] == "nse"
+
+
+def test_live_seed_prefers_broker_then_falls_back():
+    import types
+    import nse_quote as q
+    pts = [{"t": 1, "o": 1, "h": 2, "l": 1, "c": 2, "v": 9},
+           {"t": 2, "o": 2, "h": 3, "l": 2, "c": 3, "v": 8}]
+    fake = types.SimpleNamespace(
+        public_status=lambda: {"connected": True},
+        rest_ohlc=lambda s, interval=1, chart_type="I", days=None: {
+            "symbol": s.upper(), "points": pts, "source": "angel",
+            "chartType": chart_type})
+    with _patches((webapp, "live_feed", fake),
+                  (q, "get_ohlc", lambda *a, **k: (_ for _ in ()).throw(
+                      AssertionError("must not seed from NSE when the broker has candles")))):
+        assert _json("/api/live/seed/tcs?interval=5")[1]["source"] == "angel"
+        assert _json("/api/live/seed/tcs?interval=D")[1]["chartType"] == "D"
+    # broker connected but no candles → NSE seeds it
+    empty = types.SimpleNamespace(public_status=lambda: {"connected": True},
+                                  rest_ohlc=lambda *a, **k: None)
+    with _patches((webapp, "live_feed", empty),
+                  (q, "get_ohlc", lambda *a, **k: {"points": pts, "source": "nse"})):
+        assert _json("/api/live/seed/tcs")[1]["source"] == "nse"
+
+
 # ---------------------------------------------------------------------------
 # ideas journal (imported inside the handler)
 # ---------------------------------------------------------------------------

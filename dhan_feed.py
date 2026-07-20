@@ -372,6 +372,10 @@ def rest_chart(symbol, days=5):
     return None
 
 
+def rest_ohlc(symbol, interval=1, chart_type="I", days=None):
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Connection lifecycle
 # ---------------------------------------------------------------------------

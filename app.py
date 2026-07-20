@@ -630,6 +630,19 @@ def api_chart(symbol):
     return jsonify(nse_quote.get_chart(symbol))
 
 
+def _broker_ohlc(symbol, interval, chart_type, days):
+    """OHLCV candles from the broker (Angel) when connected, else None. Only for the
+    window-less (frontend chart) case; explicit from/to windows stay on NSE."""
+    if not _broker_connected():
+        return None
+    try:
+        fn = getattr(live_feed, "rest_ohlc", None)
+        c = fn(symbol, interval=interval, chart_type=chart_type, days=days) if fn else None
+        return c if (c and c.get("points")) else None
+    except Exception:
+        return None
+
+
 @app.route("/api/ohlc/<symbol>")
 def api_ohlc(symbol):
     interval = int(request.args.get("interval", 1))
@@ -637,9 +650,15 @@ def api_ohlc(symbol):
     days = request.args.get("days")
     frm = request.args.get("from")
     to = request.args.get("to")
+    days_i = int(days) if days else None
+    # Broker-first for the plain (window-less) chart request — no NSE hit. An explicit
+    # from/to window (e.g. the backtester's exact holding period) always uses NSE.
+    if frm is None and to is None:
+        c = _broker_ohlc(symbol, interval, chart_type, days_i)
+        if c is not None:
+            return jsonify(c)
     return jsonify(nse_quote.get_ohlc(
-        symbol, interval=interval, chart_type=chart_type,
-        days=int(days) if days else None,
+        symbol, interval=interval, chart_type=chart_type, days=days_i,
         from_ts=int(frm) if frm else None,
         to_ts=int(to) if to else None))
 
@@ -664,12 +683,19 @@ def api_live_watch():
 
 @app.route("/api/live/seed/<symbol>")
 def api_live_seed(symbol):
-    """Historical candles to seed the live chart (reuses NSE's OHLCV feed)."""
+    """Historical candles to seed the live chart. Broker-first (Angel candles) when
+    connected — no NSE hit — else NSE's OHLCV feed."""
     interval = request.args.get("interval", "1")
-    if interval == "D":
-        return jsonify(nse_quote.get_ohlc(
-            symbol, chart_type="D", days=int(request.args.get("days", 120))))
-    return jsonify(nse_quote.get_ohlc(symbol, interval=int(interval)))
+    daily = interval == "D"
+    days = int(request.args.get("days", 120)) if daily else None
+    iv = 1 if daily else int(interval)
+    ct = "D" if daily else "I"
+    c = _broker_ohlc(symbol, iv, ct, days)
+    if c is not None:
+        return jsonify(c)
+    if daily:
+        return jsonify(nse_quote.get_ohlc(symbol, chart_type="D", days=days))
+    return jsonify(nse_quote.get_ohlc(symbol, interval=iv))
 
 
 @app.route("/api/live/snapshot")

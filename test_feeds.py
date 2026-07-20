@@ -17,11 +17,17 @@ import os
 import shutil
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import angel_feed
 import db
 import dhan_feed
+
+
+def _baked(y, mo, d, h, mi):
+    """IST wall-clock baked as UTC → epoch ms (matches angel_feed._baked_ms /
+    get_ohlc `t`), for asserting candle timestamps."""
+    return int(datetime(y, mo, d, h, mi).replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 ANGEL_KEYS = ["ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_MPIN", "ANGEL_TOTP_SECRET"]
 DHAN_KEYS = ["DHAN_CLIENT_ID", "DHAN_ACCESS_TOKEN"]
@@ -260,7 +266,9 @@ class _FakeSmart:
                       "sell": [{"price": 1450.6, "quantity": 80, "orders": 4}]}}]}}
 
     def getCandleData(self, params):
-        assert params["exchange"] == "NSE" and params["interval"] == "FIVE_MINUTE"
+        assert params["exchange"] == "NSE"
+        assert params["interval"] in {"ONE_MINUTE", "FIVE_MINUTE", "FIFTEEN_MINUTE",
+                                      "ONE_DAY"}
         return {"data": [["2026-07-20T09:15:00+05:30", 1440, 1445, 1439, 1443, 10000],
                          ["2026-07-20T09:20:00+05:30", 1443, 1448, 1442, 1447, 12000]]}
 
@@ -307,8 +315,18 @@ def test_angel_rest_chart_maps_candles_to_points():
         c = angel_feed.rest_chart("reliance")
     assert c["symbol"] == "RELIANCE" and c["source"] == "angel"
     assert len(c["points"]) == 2 and c["points"][0]["price"] == 1443
-    expect = int(datetime.fromisoformat("2026-07-20T09:15:00+05:30").timestamp() * 1000)
-    assert c["points"][0]["t"] == expect
+    # timestamps are IST-baked-as-UTC so seeded history lines up with live bars
+    assert c["points"][0]["t"] == _baked(2026, 7, 20, 9, 15)
+
+
+def test_angel_rest_ohlc_maps_candles():
+    with _angel_rest(_FakeSmart()):
+        o = angel_feed.rest_ohlc("reliance", interval=5)
+        d = angel_feed.rest_ohlc("RELIANCE", chart_type="D", days=120)
+    assert o["symbol"] == "RELIANCE" and o["source"] == "angel" and o["chartType"] == "I"
+    assert o["points"][0] == {"t": _baked(2026, 7, 20, 9, 15), "o": 1440.0,
+                              "h": 1445.0, "l": 1439.0, "c": 1443.0, "v": 10000.0}
+    assert d["chartType"] == "D" and len(d["points"]) == 2
 
 
 def test_angel_rest_guards_return_none():
@@ -316,9 +334,11 @@ def test_angel_rest_guards_return_none():
     with _feed_state(angel_feed), _patch(angel_feed, "_smart", None):
         assert angel_feed.rest_quote("RELIANCE") is None
         assert angel_feed.rest_chart("RELIANCE") is None
+        assert angel_feed.rest_ohlc("RELIANCE") is None
     # unknown symbol → None; a raising client → None (caller falls back to NSE)
     with _angel_rest(_FakeSmart()):
         assert angel_feed.rest_quote("NOSUCH") is None
+        assert angel_feed.rest_ohlc("NOSUCH") is None
 
     class _Boom:
         def getMarketData(self, *a):
@@ -330,12 +350,15 @@ def test_angel_rest_guards_return_none():
     with _angel_rest(_Boom()):
         assert angel_feed.rest_quote("RELIANCE") is None
         assert angel_feed.rest_chart("RELIANCE") is None
+        assert angel_feed.rest_ohlc("RELIANCE") is None
 
 
-def test_angel_iso_to_ms():
-    assert angel_feed._iso_to_ms("bad") is None and angel_feed._iso_to_ms(None) is None
-    assert angel_feed._iso_to_ms("2026-07-20T09:15:00+05:30") == int(
-        datetime.fromisoformat("2026-07-20T09:15:00+05:30").timestamp() * 1000)
+def test_angel_baked_iso_to_ms():
+    assert angel_feed._baked_iso_to_ms("bad") is None
+    assert angel_feed._baked_iso_to_ms(None) is None
+    # IST wall-clock is baked in as UTC (not shifted -5:30) so candles align with live
+    assert angel_feed._baked_iso_to_ms("2026-07-20T09:15:00+05:30") == _baked(
+        2026, 7, 20, 9, 15)
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +420,7 @@ def test_dhan_rest_stubs_return_none():
     # Dhan's data API isn't wired (paid plan) → safe no-ops so app.py falls back to NSE
     assert dhan_feed.rest_quote("RELIANCE") is None
     assert dhan_feed.rest_chart("RELIANCE") is None
+    assert dhan_feed.rest_ohlc("RELIANCE") is None
 
 
 def _main():
