@@ -52,6 +52,7 @@ _VOL_HOT = 1.5            # today's volume vs its trailing average
 _OI_BUILD = 8.0           # near-month OI change% that counts as a meaningful build
 _MIN_WINDOW = 10          # need this much history before trusting a "breakout"
 _SECTOR_W = 14            # weight of the "leading/lagging sector" confirmation pillar
+_ROLL_W = 12              # weight of the "futures rollover confirms the view" pillar
 
 # Option-chain fuse (max-pain / PCR / OI walls from the EOD FO bhavcopy).
 _OPT_W = 12               # weight of the "option chain confirms the direction" pillar
@@ -145,7 +146,25 @@ def _sector_tag(sector, kind):
     return tag
 
 
-def _pillars_long(f, oi, deal_side, sector=None):
+def _roll_pillar(roll, want_bullish):
+    """The futures-rollover confirmation, or None. `roll` is a symbol's entry from
+    `rollover.rank_map()`. It confirms a side only when the name is CARRYING (rollover%
+    in the top fifth of the F&O universe today — positions being carried into next month,
+    not closed) AND the net near+next OI direction matches the trade side. Rollover is
+    cross-sectional, so this is meaningful even away from expiry (sharper in expiry week).
+    (label, weight) or None. Pure."""
+    if not roll or not roll.get("carrying") or roll.get("bullish") is None:
+        return None
+    if bool(roll["bullish"]) is not want_bullish:
+        return None
+    rp, rr = roll.get("rolloverPct"), roll.get("rolloverRank")
+    side = "longs" if want_bullish else "shorts"
+    rank_txt = f", rank {rr:.0f}" if rr is not None else ""
+    return (f"🔄 high rollover {rp:.0f}% — {side} carrying into next month{rank_txt}",
+            _ROLL_W)
+
+
+def _pillars_long(f, oi, deal_side, sector=None, roll=None):
     """Independent bullish confirmations for a name. Returns [(label, weight), …].
     Each entry is one 'pillar'; the board ranks by how many fired, then by weight."""
     out = []
@@ -174,10 +193,13 @@ def _pillars_long(f, oi, deal_side, sector=None):
         out.append(("🐋 bulk/block BUY (institutional print)", 16))
     if sector and sector.get("leading"):
         out.append((f"🧭 {_sector_tag(sector, 'leading')}", _SECTOR_W))
+    rp = _roll_pillar(roll, want_bullish=True)
+    if rp:
+        out.append(rp)
     return out
 
 
-def _pillars_short(f, oi, deal_side, sector=None):
+def _pillars_short(f, oi, deal_side, sector=None, roll=None):
     """Independent bearish confirmations for a name. Mirror of `_pillars_long`."""
     out = []
     wd = f.get("windowDays") or 0
@@ -201,6 +223,9 @@ def _pillars_short(f, oi, deal_side, sector=None):
         out.append(("🐋 bulk/block SELL (institutional print)", 16))
     if sector and sector.get("lagging"):
         out.append((f"🧭 {_sector_tag(sector, 'lagging')}", _SECTOR_W))
+    rp = _roll_pillar(roll, want_bullish=False)
+    if rp:
+        out.append(rp)
     return out
 
 
@@ -315,12 +340,14 @@ def _apply_weights(pillars, weights):
     return out
 
 
-def _pick(f, bars, oi, deal_side, deal_list, sector=None, opt=None, weights=None):
+def _pick(f, bars, oi, deal_side, deal_list, sector=None, opt=None, roll=None,
+          weights=None):
     """Build the best (LONG or SHORT) conviction pick for one name, or None.
     Chooses the side with more confirming pillars (higher score breaks ties).
-    `weights` (optional {pillar_key: mult}) applies adaptive scoring — see board()."""
-    longs = _apply_weights(_pillars_long(f, oi, deal_side, sector), weights)
-    shorts = _apply_weights(_pillars_short(f, oi, deal_side, sector), weights)
+    `roll` (optional, a symbol's `rollover.rank_map()` entry) adds a futures-rollover
+    pillar; `weights` (optional {pillar_key: mult}) applies adaptive scoring — see board()."""
+    longs = _apply_weights(_pillars_long(f, oi, deal_side, sector, roll), weights)
+    shorts = _apply_weights(_pillars_short(f, oi, deal_side, sector, roll), weights)
     if not longs and not shorts:
         return None
     lscore, sscore = sum(w for _, w in longs), sum(w for _, w in shorts)
@@ -380,13 +407,14 @@ def _pick(f, bars, oi, deal_side, deal_list, sector=None, opt=None, weights=None
 # ---------------------------------------------------------------------------
 def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
           with_deals=True, fno_only=False, lookback=_es.LOOKBACK,
-          with_options=True, adaptive=False):
+          with_options=True, with_rollover=True, adaptive=False):
     """Rank the whole ingested EOD universe by STACKED conviction.
 
-    A name makes the board only when at least `min_pillars` INDEPENDENT signals
-    agree (breakout / delivery / volume / trend / OI buildup / bulk-deal). Rows are
-    sorted by confirmations first, then the blended conviction score. Needs no
-    network beyond one tiny cached deals CSV (when `with_deals`).
+    A name makes the board only when at least `min_pillars` INDEPENDENT signals agree
+    (breakout / delivery / volume / trend / OI buildup / bulk-deal / leading sector /
+    option chain / futures rollover). Rows are sorted by confirmations first, then the
+    blended conviction score. Needs no network beyond one tiny cached deals CSV (when
+    `with_deals`); the option + rollover fuses reuse one cached FO-bhavcopy parse.
 
     `adaptive` feeds the confirmation-calibration back into scoring: each pillar's
     weight is nudged by its measured realized edge (win-rate lift), so pillars that
@@ -432,6 +460,17 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
             log.warning("board: option-chain fuse failed", exc_info=True)
             omap = {}
 
+    # Rollover map (near→next futures OI shift from the same FO bhavcopy): a name
+    # CARRYING its positions into next month, on the trade's side, is an extra pillar.
+    rmap = {}
+    if with_rollover:
+        try:
+            import rollover
+            _, rmap = rollover.rank_map()
+        except Exception:
+            log.warning("board: rollover fuse failed", exc_info=True)
+            rmap = {}
+
     # Adaptive scoring weights from the confirmation calibration (best-effort): each
     # pillar's realized win-rate lift → a clamped, sample-shrunk scoring multiplier.
     weights = None
@@ -467,7 +506,8 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         oi = _oi_state(oi_all.get(sym), price_up)
         dlist = deal_map.get(sym) or []
         sctx = _ss.context(smap, sym) if (_ss and smap) else None
-        pick = _pick(f, bars, oi, _deal_side(dlist), dlist, sctx, omap.get(sym), weights)
+        pick = _pick(f, bars, oi, _deal_side(dlist), dlist, sctx, omap.get(sym),
+                     rmap.get(sym), weights)
         if not pick or pick["confirmations"] < min_pillars:
             continue
         picks.append(pick)
@@ -485,11 +525,13 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         "scanned": scanned,
         "withDeals": bool(deal_map),
         "withOptions": bool(omap),
+        "withRollover": bool(rmap),
         "adaptive": bool(adaptive),
         "adaptiveWeights": (weights if adaptive else None),
         "filters": {"minPrice": min_price, "minValueCr": min_value_cr,
                     "minPillars": min_pillars, "fnoOnly": bool(fno_only),
                     "withDeals": bool(with_deals), "withOptions": bool(with_options),
+                    "withRollover": bool(with_rollover),
                     "adaptive": bool(adaptive), "limit": limit},
         "coverage": _es.status(),
         "note": None if grouped else (

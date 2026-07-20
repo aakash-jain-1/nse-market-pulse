@@ -45,6 +45,7 @@ _PILLARS = [
     ("deal",     lambda r: "bulk/block" in r),
     ("sector",   lambda r: "sector" in r),
     ("option",   lambda r: "option chain" in r),
+    ("rollover", lambda r: "rollover" in r),
 ]
 PILLAR_KEYS = [k for k, _ in _PILLARS]
 

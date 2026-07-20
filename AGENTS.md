@@ -44,12 +44,13 @@ NSE/
 ├── bhavcopy.py        # EOD UDiFF bhavcopy ingest (static archive) + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill(days)
 ├── deals.py           # Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status
 ├── eod_scanner.py     # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure
-├── eod_conviction.py  # EOD conviction board — fuses breakout+delivery+deals+OI buildup, ranks by #signals agreeing; save→ideas / digest→notify
+├── eod_conviction.py  # EOD conviction board — fuses breakout+delivery+deals+OI+sector RS+option chain+futures rollover, ranks by #signals agreeing; save→ideas / digest→notify
 ├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape; oi_map() = market-wide analytics in one parse (the Conviction option fuse)
 ├── eod_scheduler.py   # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
 ├── sectors.py         # Curated NSE symbol→sector map (17 sectors, ~303 names) — static data + sector_of()/all_sectors()
 ├── sector_scan.py     # Sector relative-strength board over db.eod_bars — cross-sectional RS vs market, ranks sectors + leaders/laggards; strength_map/context = the reusable sector pillar the EOD Scan + Conviction boards fold in
 ├── conviction_calibration.py # Does confirmation-stacking pay? Scores realized TARGET/STOP of saved conviction ideas — win rate by pillar count / per-pillar lift / option-⚠️ impact + verdict; pillar_weights() feeds that edge back into board scoring (adaptive)
+├── rollover.py        # Futures rollover tracker off the FO bhavcopy — near-vs-next month rollover% / roll cost (contango·backwardation) / basis / net-OI state, cross-sectionally ranked; board() + rank_map() (the market-wide {sym:metrics} the Conviction board folds in as a pillar); reuses eod_options' cached FO text (off-hours)
 ├── angel_feed.py      # Live feed adapter — Angel One SmartAPI WebSocket (FREE) → tick store
 ├── dhan_feed.py       # Live feed adapter — Dhan WebSocket (paid data plan); same interface
 ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
@@ -60,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 709 unit tests across 33 suites (see below)
+├── test_*.py          # 730 unit tests across 34 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -69,6 +70,7 @@ NSE/
 │   ├── test_eod_scanner.py                          # full-market swing scanner: features/tags/score/views/scan/status + delivery view + deals xref
 │   ├── test_eod_conviction.py                       # conviction board: OI-state quadrants / pillars / 2R plan / stacked ranking / save-skip
 │   ├── test_conviction_calibration.py               # calibration: pillar_of / bucket stats / per-pillar lift / verdict / adaptive pillar_weights (gate/clamp/shrink) / report() on temp DB
+│   ├── test_rollover.py                             # futures rollover: days/oi-state/metrics/percentile/median + board() rank/filter/sort/far-expiry-note/empty (stubbed FO text)
 │   ├── test_eod_options.py                          # resilient EOD option chain: parse/assemble/chain/summary/analytics
 │   ├── test_eod_scheduler.py                        # auto post-close refresh: pure should_run gating / job orchestration / tick recording / routes
 │   ├── test_sectors.py                              # sector map integrity: reverse index / canonicalisation / coverage / first-wins
@@ -128,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 709 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/db/app+routes/feeds/…)
+python -m pytest -q      # 730 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -381,13 +383,16 @@ with no creds the app is unchanged.
   flag scanner rows a big player just traded (🐋 badge + score bonus).
 - **🏆 Conviction board (`eod_conviction.py`)** — the synthesis: fuses the independent
   EOD signals (breakout of the N-day high, delivery% accumulation, bulk/block-deal
-  footprint, F&O OI buildup, volume, trend) into ONE ranked "tomorrow's watchlist" via
-  **confirmation stacking** — ranked by how many independent signals AGREE, then the
-  blended score, so a 4-way-confirmed name beats a lone strong signal. Each pick gets
-  a volatility-scaled 2R plan. **Save** persists the board to the Ideas history (dated
+  footprint, F&O OI buildup, volume, trend, leading/lagging sector, option chain and
+  **futures rollover** — positions carried into next month) into ONE ranked "tomorrow's
+  watchlist" via **confirmation stacking** — ranked by how many independent signals AGREE,
+  then the blended score, so a 4-way-confirmed name beats a lone strong signal. Each pick
+  gets a volatility-scaled 2R plan. **Save** persists the board to the Ideas history (dated
   to the EOD session, never clobbers a live idea); **Send digest** pushes the top picks
   off-screen via `notify.send_digest()`. 🏆 Conviction tab; `/api/eod/conviction[/save|
-  /digest]`. Off-hours.
+  /digest]` (`?rollover=0`/`?options=0`/`?deals=0` disable a fuse; `?adaptive=1` weights
+  pillars by realized edge). The option + rollover fuses share ONE cached FO-bhavcopy
+  parse. Off-hours.
 - **📊 Conviction calibration + ⚖️ adaptive weighting (`conviction_calibration.py`)** —
   the honest scorecard for the board above, then the feedback loop: reads back the saved
   conviction ideas, scores their candle-accurate `TARGET`/`STOP` outcomes, and reports
@@ -529,7 +534,9 @@ with no creds the app is unchanged.
 - ✅ *(done — see below)* EOD conviction board (`eod_conviction.py`) — fuses breakout +
   delivery + deals + OI buildup into one confirmation-stacked "tomorrow's watchlist";
   save→Ideas history + off-screen digest. ✅ scheduled/auto EOD backfill + auto-digest
-  after close (`eod_scheduler.py`, see Done recently). Still open: a futures rollover tracker.
+  after close (`eod_scheduler.py`, see Done recently).
+- ✅ *(done — see below)* futures rollover tracker (`rollover.py` + 🔄 Rollover tab) —
+  near→next month rollover% / roll cost / basis / OI-state, cross-sectionally ranked.
 - ✅ *(done — see below)* portfolio-level backtest (`portfolio_backtest.py`) — replays the
   daily-backtest trades through a real book (finite capital, concurrent-position cap,
   risk/equal sizing, **conviction-ranked** same-day picks, **daily mark-to-market**) →
@@ -541,6 +548,35 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🔄 Rollover → Conviction pillar** — made the rollover signal ACTIONABLE inside the
+  board (it was a standalone tab). `rollover.rank_map()` returns the market-wide
+  `{SYMBOL: metrics + cross-sectional rolloverRank/carrying/shedding}`, ranked over the
+  WHOLE futures universe (no price/value filter, so any pick can look up its standing),
+  cached 15-min on the same FO text the option fuse uses (one parse for both).
+  `eod_conviction._roll_pillar()` fires ONLY when a name is CARRYING (rollover% in the top
+  fifth today) AND its net near+next OI direction matches the trade side — a breakout on a
+  name whose positions are being carried into next month outranks one on shrinking OI.
+  Threaded through `_pick` → `board(with_rollover=True)`; echoes `withRollover`;
+  `?rollover=0` disables it. Adaptive weighting recognizes it (new `rollover` key in
+  `conviction_calibration._PILLARS`), the board legend gains 🔄 and the Calibration modal a
+  "🔄 Rollover carry" row. Confirmation COUNT discipline preserved — it's just one more
+  independent pillar. Tests **+7** (rank_map; `_roll_pillar` gating; pillar/`_pick`/board
+  fuse; `with_rollover=False` skips the fetch; calibration label→key); suite **723 → 730**;
+  verified e2e through the route.
+- **🔄 Futures rollover tracker (`rollover.py`)** — a genuinely new F&O signal. Near expiry
+  traders roll positions from the near to the next month; HOW MUCH rolls (conviction to carry)
+  and at WHAT spread (contango/backwardation) is a real read the FO bhavcopy already carries.
+  `bhavcopy.parse_fo_futures_all()` keeps ALL STF/IDF expiries per symbol (`parse_fo` keeps
+  only the nearest). `rollover.board()` computes per name **rollover%** (nextOI/(near+next) —
+  rising into expiry = positions CARRIED), **roll cost** (next−near spread) + annualized,
+  near-month **basis** to spot, and the net-(near+next)-OI **state** (long/short buildup vs
+  covering/unwinding), then ranks the F&O universe with a CROSS-SECTIONAL `rolloverRank`
+  (percentile vs the market median today — meaningful with no rollover history) and
+  `sort` ∈ rollover/rollcost/basis/dte. Reuses `eod_options._fo_text()` so the FO file is
+  fetched/parsed ONCE for both the option and rollover views; works off-hours / when live is
+  blocked. `/api/eod/rollover` + a **🔄 Rollover** tab (rollover% + vs-median bar, roll cost,
+  annualized, basis, OI-state chip, 🟢 carrying / 🔴 shedding). Tests **+14** (`test_rollover.py`
+  12 + parse test + route arg); suite **709 → 723**; lint clean.
 - **⚖️ Adaptive pillar weighting (calibration → scoring)** — the calibration report *measured*
   each pillar's edge but was read-only; this feeds it back so the board learns from its own
   realized results. `conviction_calibration.pillar_weights()` maps each pillar's win-rate lift
@@ -699,6 +735,18 @@ with no creds the app is unchanged.
   coverage/thin-history hint. Trade-off at the time: Delivery% went quiet (bhavcopy
   omits it) — **since fixed** by the delivery-merge entry above. Tests **+7**
   (suite **523 → 530**).
+- **🔄 Futures rollover (`rollover.py`)** — near-vs-next month futures from the EOD FO
+  bhavcopy. Near expiry, traders roll positions from the near to the next month; how much
+  rolls (conviction to carry a view) + at what spread (contango/backwardation) is a real
+  read the bhavcopy already carries (near/next/far OI + close + settle + spot per contract).
+  `bhavcopy.parse_fo_futures_all()` (pure) keeps ALL expiries per symbol; `rollover.board()`
+  computes **rollover%** = nextOI/(near+next), **roll cost** = (next−near)/near + annualized,
+  near **basis** to spot, and a net-(near+next)-OI **state** (buildup/covering/unwinding),
+  then adds a CROSS-SECTIONAL `rolloverRank` (percentile vs the market median today, so it's
+  meaningful *without* a rollover history) and 🟢 carrying / 🔴 shedding flags. `sort` ∈
+  rollover/rollcost/basis/dte; a note flags when the near expiry is >12 days out (rollover is
+  sharpest in the expiry week). Reuses `eod_options._fo_text()` (one cached FO fetch for both
+  the option + rollover views); off-hours / block-resilient. `/api/eod/rollover` + 🔄 Rollover tab.
 - **⛓ EOD option chain (`eod_options.py`)** — the live chain rides NSE's anti-bot
   NextApi (403s intermittently, empty/stale off-hours). The FO bhavcopy carries every
   contract's EOD OI/close/volume in a plain static ZIP, so this rebuilds the chain +

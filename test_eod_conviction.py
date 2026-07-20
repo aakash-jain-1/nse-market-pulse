@@ -28,26 +28,48 @@ import eod_conviction as ec
 # ---------------------------------------------------------------------------
 @contextlib.contextmanager
 def _no_options():
-    """Stub the option-chain fuse so board() tests stay offline/deterministic."""
+    """Stub BOTH FO-bhavcopy fuses (option chain + rollover) so board() tests stay
+    offline/deterministic — both would otherwise fetch the FO file over the network."""
     import eod_options
-    orig = eod_options.oi_map
+    import rollover
+    o1, o2 = eod_options.oi_map, rollover.rank_map
     eod_options.oi_map = lambda force=False: ("2026-07-15", {})
+    rollover.rank_map = lambda force=False: ("2026-07-15", {})
     try:
         yield
     finally:
-        eod_options.oi_map = orig
+        eod_options.oi_map = o1
+        rollover.rank_map = o2
 
 
 @contextlib.contextmanager
 def _options(omap):
-    """Stub the option-chain fuse to a fixed {SYMBOL: analytics} map."""
+    """Stub the option-chain fuse to a fixed {SYMBOL: analytics} map (rollover off)."""
     import eod_options
-    orig = eod_options.oi_map
+    import rollover
+    o1, o2 = eod_options.oi_map, rollover.rank_map
     eod_options.oi_map = lambda force=False: ("2026-07-15", omap)
+    rollover.rank_map = lambda force=False: ("2026-07-15", {})
     try:
         yield
     finally:
-        eod_options.oi_map = orig
+        eod_options.oi_map = o1
+        rollover.rank_map = o2
+
+
+@contextlib.contextmanager
+def _rollover(rmap):
+    """Stub the rollover fuse to a fixed {SYMBOL: metrics} map (option fuse off)."""
+    import eod_options
+    import rollover
+    o1, o2 = eod_options.oi_map, rollover.rank_map
+    eod_options.oi_map = lambda force=False: ("2026-07-15", {})
+    rollover.rank_map = lambda force=False: ("2026-07-15", rmap)
+    try:
+        yield
+    finally:
+        eod_options.oi_map = o1
+        rollover.rank_map = o2
 
 
 @contextlib.contextmanager
@@ -198,6 +220,51 @@ def test_pillars_short_sector_lagging_adds_pillar():
     # a leading-sector context must NOT confirm a short
     assert ec._pillars_short(_feat(trend="down"), None, None, _sec(leading=True)) == \
         ec._pillars_short(_feat(trend="down"), None, None)
+
+
+# ---------------------------------------------------------------------------
+# rollover pillar (a name CARRYING positions into next month, on the trade side)
+# ---------------------------------------------------------------------------
+def _roll(**kw):
+    base = {"rolloverPct": 82.0, "rolloverRank": 95.0, "carrying": True,
+            "shedding": False, "bullish": True}
+    base.update(kw)
+    return base
+
+
+def test_roll_pillar_gates_on_carry_and_direction():
+    import conviction_calibration as cc
+    lbl, w = ec._roll_pillar(_roll(bullish=True), want_bullish=True)
+    assert "rollover" in lbl and "longs carrying" in lbl and w == ec._ROLL_W
+    assert cc.pillar_of(lbl) == "rollover"                 # board ↔ calibration agree
+    s = ec._roll_pillar(_roll(bullish=False), want_bullish=False)
+    assert s and "shorts carrying" in s[0]
+    # direction mismatch / not carrying / no OI direction / None → no pillar
+    assert ec._roll_pillar(_roll(bullish=False), want_bullish=True) is None
+    assert ec._roll_pillar(_roll(carrying=False), want_bullish=True) is None
+    assert ec._roll_pillar(_roll(bullish=None), want_bullish=True) is None
+    assert ec._roll_pillar(None, want_bullish=True) is None
+
+
+def test_pillars_long_rollover_adds_pillar():
+    base = ec._pillars_long(_feat(trend="up"), None, None)
+    withroll = ec._pillars_long(_feat(trend="up"), None, None, None, _roll())
+    assert len(withroll) == len(base) + 1
+    lbl, w = withroll[-1]
+    assert lbl.startswith("🔄") and "carrying" in lbl and w == ec._ROLL_W
+    # a shedding (or wrong-direction) name adds nothing
+    assert ec._pillars_long(_feat(trend="up"), None, None, None, _roll(carrying=False)) == base
+    assert ec._pillars_long(_feat(trend="up"), None, None, None, _roll(bullish=False)) == base
+
+
+def test_pick_rollover_adds_pillar_on_matching_side():
+    f = _feat(pctFromHigh=0.5, trend="up", delivPct=70.0)
+    bars = [_bar(d, 100.0) for d in _dates(14)]
+    base = ec._pick(dict(f), bars, None, None, [])
+    conf = ec._pick(dict(f), bars, None, None, [], None, None, _roll())   # roll arg
+    assert conf["confirmations"] == base["confirmations"] + 1
+    assert conf["conviction"] > base["conviction"]
+    assert any("rollover" in r.lower() for r in conf["reasons"])
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +542,40 @@ def test_board_fuses_option_chain():
     tcs = next((p for p in b["longs"] if p["symbol"] == "TCS"), None)
     assert tcs and tcs["options"] and tcs["options"]["confirms"]
     assert any("option chain" in r for r in tcs["reasons"])
+
+
+def test_board_fuses_rollover():
+    # TCS is carrying its longs into next month → an extra rollover pillar.
+    rmap = {"TCS": {"rolloverPct": 85.0, "rolloverRank": 96.0, "carrying": True,
+                    "shedding": False, "bullish": True}}
+    with _temp_db() as db, _rollover(rmap):
+        _seed_sectors(db)
+        b = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2)
+    assert b["withRollover"] is True and b["filters"]["withRollover"] is True
+    tcs = next((p for p in b["longs"] if p["symbol"] == "TCS"), None)
+    assert tcs and any("rollover" in r.lower() for r in tcs["reasons"])
+
+
+def test_board_rollover_off_skips_fetch():
+    # with_rollover=False must NOT call rank_map (which would hit the network).
+    import eod_options
+    import rollover
+    o1, o2 = eod_options.oi_map, rollover.rank_map
+    eod_options.oi_map = lambda force=False: ("2026-07-15", {})
+
+    def boom(force=False):
+        raise AssertionError("rank_map must not be called when with_rollover=False")
+
+    rollover.rank_map = boom
+    try:
+        with _temp_db() as db:
+            _seed_sectors(db)
+            b = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2,
+                         with_rollover=False)
+        assert b["withRollover"] is False and b["filters"]["withRollover"] is False
+    finally:
+        eod_options.oi_map = o1
+        rollover.rank_map = o2
 
 
 def test_board_empty_db_has_note():

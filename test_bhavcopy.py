@@ -322,6 +322,33 @@ def test_parse_fo_options_all_groups_by_symbol():
     assert allp["ACME"]["byExpiry"]["2026-07-28"]["rows"][100.0]["ce"]["oi"] == 120900.0
 
 
+def _stf(sym, expiry, cls, oi, chg="0", spot="100", tp="STF"):
+    return {"TradDt": "2026-07-16", "FinInstrmTp": tp, "TckrSymb": sym,
+            "XpryDt": expiry, "ClsPric": cls, "PrvsClsgPric": "100",
+            "SttlmPric": cls, "OpnIntrst": oi, "ChngInOpnIntrst": chg,
+            "TtlTradgVol": "5000", "TtlTrfVal": "5e8", "UndrlygPric": spot,
+            "NewBrdLotQty": "100"}
+
+
+def test_parse_fo_futures_all_groups_all_expiries():
+    rows = [
+        _stf("ACME", "2026-07-30", "105", "200000", chg="-50000"),
+        _stf("ACME", "2026-08-27", "106", "800000", chg="120000"),   # next month
+        _stf("ACME", "2026-09-24", "107", "50000"),                  # far month
+        _stf("NIFTY", "2026-07-30", "24000", "300000", tp="IDF"),    # index future
+        _opt("ACME", "2026-07-30", "105", ot="CE"),                  # option row → ignored
+    ]
+    allf = b.parse_fo_futures_all(_csv(rows))
+    assert set(allf) == {"ACME", "NIFTY"}
+    assert allf["ACME"]["kind"] == "stock" and allf["NIFTY"]["kind"] == "index"
+    # ALL expiries kept (parse_fo would drop all but the nearest), nearest first
+    assert allf["ACME"]["expiries"] == ["2026-07-30", "2026-08-27", "2026-09-24"]
+    near = allf["ACME"]["byExpiry"]["2026-07-30"]
+    assert near["oi"] == 200000.0 and near["changeOi"] == -50000.0 and near["close"] == 105.0
+    assert allf["ACME"]["lot"] == 100
+    assert allf["NIFTY"]["expiries"] == ["2026-07-30"]
+
+
 def test_fetch_fo_text_walks_back_and_missing():
     good = _zip(_csv([_opt("ACME", "2026-07-28", "100", ot="CE")]))
     with _patch(b, "_download", lambda url: good if "20260715" in url else None):

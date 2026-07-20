@@ -336,6 +336,51 @@ def parse_fo_options_all(text):
     return out
 
 
+def parse_fo_futures_all(text):
+    """All FUTURE rows (STF stock / IDF index) grouped by symbol across EVERY expiry
+    (near→far) — for the rollover tracker. `parse_fo` keeps only the nearest expiry;
+    this keeps them all so we can compare near vs next month. Returns
+        {SYMBOL: {symbol, kind, lot, date, expiries:[ISO,...] (nearest first),
+                  byExpiry:{ISO:{expiry, close, prevClose, settle, oi, changeOi,
+                                 volume, value, underlying, pChange}}}}.
+    XpryDt is ISO (YYYY-MM-DD), so sorting the keys is chronological (nearest first);
+    expired contracts aren't in the file, so expiries[0] is the current/near month."""
+    out = {}
+    for row in csv.DictReader(io.StringIO(text)):
+        tp = (row.get("FinInstrmTp") or "").strip().upper()
+        if tp not in ("STF", "IDF"):
+            continue
+        sym = (row.get("TckrSymb") or "").strip().upper()
+        exp = (row.get("XpryDt") or "").strip()
+        if not sym or not exp:
+            continue
+        close = _num(row.get("ClsPric"))
+        prev = _num(row.get("PrvsClsgPric"))
+        lot = _num(row.get("NewBrdLotQty"))
+        d = out.setdefault(sym, {"symbol": sym,
+                                 "kind": "index" if tp == "IDF" else "stock",
+                                 "lot": None, "date": None, "byExpiry": {}})
+        if d["date"] is None:
+            d["date"] = (row.get("TradDt") or "").strip() or None
+        if d["lot"] is None and lot:
+            d["lot"] = int(lot)
+        d["byExpiry"][exp] = {
+            "expiry": exp,
+            "close": close,
+            "prevClose": prev,
+            "settle": _num(row.get("SttlmPric")),
+            "oi": _num(row.get("OpnIntrst")),
+            "changeOi": _num(row.get("ChngInOpnIntrst")),
+            "volume": _num(row.get("TtlTradgVol")),
+            "value": _num(row.get("TtlTrfVal")),
+            "underlying": _num(row.get("UndrlygPric")),
+            "pChange": _pct(close, prev),
+        }
+    for sym, d in out.items():
+        d["expiries"] = sorted(d["byExpiry"])
+    return out
+
+
 def parse_sec_delivery(text, series=EQUITY_SERIES):
     """Parse an NSE `sec_bhavdata_full` (security-wise delivery position) CSV into
     {SYMBOL: {delivQty, delivPct}} — the delivery data the UDiFF CM bhavcopy omits.

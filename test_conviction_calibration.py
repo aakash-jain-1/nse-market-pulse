@@ -127,6 +127,8 @@ def test_pillar_of_maps_live_and_saved_labels():
     assert cc.pillar_of("🐋 bulk/block BUY (institutional print)") == "deal"
     assert cc.pillar_of("🧭 IT is a leading sector (#1/12, RS +5)") == "sector"
     assert cc.pillar_of("🎯 option chain: room to call OI wall ₹130") == "option"
+    assert cc.pillar_of("🔄 high rollover 82% — longs carrying into next month, rank 95") == "rollover"
+    assert cc.pillar_of("🔄 high rollover 78% — shorts carrying into next month, rank 90") == "rollover"
     assert cc.pillar_of("⚠️ target runs into call OI wall ₹110") is None
     assert cc.pillar_of("random noise") is None
 

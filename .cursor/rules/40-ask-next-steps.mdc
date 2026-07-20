@@ -1,0 +1,32 @@
+---
+description: Never end the session when a task is done — propose next steps as questions in the same chat
+alwaysApply: true
+---
+
+# Keep the session open — ask next steps as questions
+
+When a task/turn is finished, **do NOT treat the session as closed or wind down.**
+Assume there's more to do and keep the conversation going in the **same chat**.
+
+## What to do every time you finish
+
+1. Give a brief summary of what was just shipped (and, per repo convention, note
+   that nothing is committed — you only push when explicitly asked).
+2. **Propose the next steps as multiple-choice questions using the `AskQuestion`
+   tool** — never bury the options in prose bullets/letters in the final message.
+3. Put your recommendation **first** with `(Recommended)` in the label, and offer a
+   few concrete, distinct alternatives (each a real, self-contained next feature/fix).
+4. Then stop and wait for the user's pick — don't auto-proceed to a big new feature
+   on a bare "continue" without offering the choice first.
+
+## Why
+
+The owner drives this project as a long, continuous build ("what next?" after each
+feature). Presenting next steps as structured questions in the same session keeps
+that loop fast and lets them steer with one click instead of re-typing intent.
+
+## Don't
+
+- Don't say "let me know if you need anything else" and stop — always offer choices.
+- Don't open a new/parallel chat or spawn subagents (see `10-no-subagents`).
+- Don't skip the question step just because the task felt small.

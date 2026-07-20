@@ -659,6 +659,21 @@
         <button id="secApply">Apply</button>
         <span id="secStatus" style="color:var(--muted);font-size:11px"></span>
       </div>
+      <div id="rollBar" class="scan-filters" style="display:none">
+        <label title="Rank by: Rollover% (most carried), Roll cost (richest carry spread), Basis (premium to spot), or Days-to-expiry (nearest first).">Sort by
+          <select id="rollSort">
+            <option value="rollover" selected>Rollover %</option>
+            <option value="rollcost">Roll cost</option>
+            <option value="basis">Basis</option>
+            <option value="dte">Days to expiry</option>
+          </select>
+        </label>
+        <label>Min price<input type="number" id="rollMinPrice" min="0" step="10" style="width:70px" value="20"></label>
+        <label>Min value (Cr)<input type="number" id="rollMinVal" min="0" step="0.5" style="width:70px" value="0.5"></label>
+        <label>Show<input type="number" id="rollLimit" min="10" max="200" step="10" style="width:64px" value="50"></label>
+        <button id="rollApply">Apply</button>
+        <span id="rollStatus" style="color:var(--muted);font-size:11px"></span>
+      </div>
       <div id="futMomentum" class="fut-mom" style="display:none"></div>
       <div id="tableWrap"><div class="loading">Loading…</div></div>
     </div>
@@ -892,9 +907,11 @@
       { key: "eod",        label: "🌐 EOD Scan", title: "Full-Market EOD / Swing Scanner",
         desc: "Scans the WHOLE cash market (~2400 names, not just the live hot lists) from NSE's End-of-Day bhavcopy history for swing setups — breakouts/breakdowns of the recent high/low, gaps, unusual volume, trend vs 20/50-day MAs and NR7 squeezes. Works off-hours & weekends. Click ‘Backfill history’ once to load recent daily bars. Educational — NOT advice." },
       { key: "conviction", label: "🏆 Conviction", title: "EOD Conviction Board — tomorrow's watchlist",
-        desc: "FUSES the independent end-of-day signals — breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint, F&O OI buildup, leading/lagging sector and the option chain (max-pain / PCR / OI walls) — into one ranked watchlist. Names are ranked by how many signals AGREE (confirmation stacking), so a setup confirmed 4 ways beats a single strong signal; a chain conflict (target into an OI wall, or pinned against max-pain) shows a ⚠️ and shaves conviction. 📊 Calibration scores past boards' realized outcomes; ⚖️ Adaptive then feeds each pillar's measured edge back into scoring. Save it to the Ideas history or push a digest to your phone. Works off-hours. Educational — NOT advice." },
+        desc: "FUSES the independent end-of-day signals — breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint, F&O OI buildup, leading/lagging sector, the option chain (max-pain / PCR / OI walls) and futures rollover (positions carried into next month) — into one ranked watchlist. Names are ranked by how many signals AGREE (confirmation stacking), so a setup confirmed 4 ways beats a single strong signal; a chain conflict (target into an OI wall, or pinned against max-pain) shows a ⚠️ and shaves conviction. 📊 Calibration scores past boards' realized outcomes; ⚖️ Adaptive then feeds each pillar's measured edge back into scoring. Save it to the Ideas history or push a digest to your phone. Works off-hours. Educational — NOT advice." },
       { key: "sectors",    label: "🧭 Sectors", title: "Sector Relative-Strength — where's the money rotating?",
         desc: "Ranks the ~16 sectors by RELATIVE STRENGTH (each sector's median momentum vs the whole market) so you can see which sectors money is rotating INTO and OUT of, then surfaces the leading names inside the strongest sectors — the actionable watchlist. Cross-sectional RS from the EOD bhavcopy history; works off-hours. The more days you backfill, the better it works. Educational — NOT advice." },
+      { key: "rollover",   label: "🔄 Rollover", title: "Futures Rollover — who's carrying their view into next month?",
+        desc: "Near-vs-next month futures from the EOD F&O bhavcopy: ROLLOVER% (how much open interest has moved to next month — rising = positions being CARRIED, not closed), ROLL COST (next−near spread: + = contango / cost to carry a long, − = backwardation), the near-month BASIS to spot, and the net-OI direction (long/short buildup vs covering/unwinding). Each name is ranked against the market median today. Sharpest in the expiry week (last Thu). Off-hours; NOT advice." },
       { key: "demand",     label: "★ Demand Score", title: "Demand Score Board",
         desc: "Composite ranking — stocks appearing across gainers, money-flow & volume spikes rank highest." },
       { key: "volgainers", label: "Volume Gainers", title: "Volume Gainers (unusual activity)",
@@ -983,6 +1000,12 @@
     const fmtNum = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");
     const fmtPrice = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
     const fmtCr = (n) => n == null ? "—" : "₹" + (n/1e7).toLocaleString("en-IN",{maximumFractionDigits:1}) + " Cr";
+    const _MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const fmtExpiry = (iso) => {   // '2026-07-30' → '30-Jul-2026'
+      if (!iso) return "—";
+      const p = String(iso).slice(0, 10).split("-");
+      return p.length === 3 ? `${p[2]}-${_MON[+p[1] - 1] || p[1]}-${p[0]}` : iso;
+    };
     // Escape anything interpolated into innerHTML that could be user- or
     // feed-controlled (symbols, free text) to close DOM-injection sinks
     // (AUDIT.md M8). Use for text AND for values placed inside "..." attributes.
@@ -1106,6 +1129,8 @@
         current === "conviction" ? "flex" : "none";
       document.getElementById("secBar").style.display =
         current === "sectors" ? "flex" : "none";
+      document.getElementById("rollBar").style.display =
+        current === "rollover" ? "flex" : "none";
       document.getElementById("futMode").style.display =
         current === "futures" ? "flex" : "none";
       document.getElementById("recoBar").style.display =
@@ -1244,7 +1269,8 @@
     function adaptiveNote(w) {
       if (!w) return "";
       const labels = { breakout: "breakout", trend: "trend", delivery: "delivery",
-        volume: "volume", oi: "F&O OI", deal: "deal", sector: "sector", option: "option" };
+        volume: "volume", oi: "F&O OI", deal: "deal", sector: "sector", option: "option",
+        rollover: "rollover" };
       const parts = Object.keys(w).filter(k => Math.abs((w[k] || 1) - 1) > 0.001)
         .sort((a, b) => w[b] - w[a])
         .map(k => `${labels[k] || k} ×${w[k].toFixed(2)}`);
@@ -1254,7 +1280,7 @@
     }
     function renderConviction(data) {
       const longs = data.longs || [], shorts = data.shorts || [];
-      const cov = `<div class="chart-note" style="margin:0 0 8px">🏆 <b>Stacked-conviction board</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names scanned · ${longs.length} long / ${shorts.length} short setups where <b>≥${data.filters ? data.filters.minPillars : 3} independent signals agree</b>. ${data.withDeals ? "Bulk/block deals cross-referenced. " : ""}${data.withOptions ? "Option chain (max-pain/PCR/OI walls) fused. " : ""}🧭 = leading/lagging sector · 🎯 = option-chain view · ⚠️ = a chain conflict (near max-pain / into an OI wall). Prices are the last EOD <b>close</b> (not live).</div>`
+      const cov = `<div class="chart-note" style="margin:0 0 8px">🏆 <b>Stacked-conviction board</b> · <b>${data.date || "—"}</b> · ${fmtNum(data.universe || 0)} names scanned · ${longs.length} long / ${shorts.length} short setups where <b>≥${data.filters ? data.filters.minPillars : 3} independent signals agree</b>. ${data.withDeals ? "Bulk/block deals cross-referenced. " : ""}${data.withOptions ? "Option chain (max-pain/PCR/OI walls) fused. " : ""}${data.withRollover ? "Futures rollover fused. " : ""}🧭 = leading/lagging sector · 🎯 = option-chain view · 🔄 = high rollover (positions carried) · ⚠️ = a chain conflict (near max-pain / into an OI wall). Prices are the last EOD <b>close</b> (not live).</div>`
         + (data.adaptive ? adaptiveNote(data.adaptiveWeights) : "");
       if (!longs.length && !shorts.length) {
         const hint = data.note || "No names cleared the confirmation bar — lower ‘Min signals’, loosen the price/value filters, or backfill more history (breakouts need ~20+ sessions).";
@@ -1290,7 +1316,7 @@
         .map(b => calibRow(b.direction, b)).join("");
       const pillLabels = { breakout: "🚀 Breakout", trend: "📈 Trend (DMA)", delivery: "🚚 Delivery%",
         volume: "🔊 Volume", oi: "🔗 F&O OI buildup", deal: "🐋 Bulk/block deal",
-        sector: "🧭 Leading sector", option: "🎯 Option chain" };
+        sector: "🧭 Leading sector", option: "🎯 Option chain", rollover: "🔄 Rollover carry" };
       const wCell = w => {
         if (w == null) return "—";
         const c = w > 1.001 ? "var(--green)" : w < 0.999 ? "var(--red)" : "var(--muted)";
@@ -1417,6 +1443,71 @@
         ${leadTbl("🔴 Laggards — weakest sector", laggards, "Names in the weakest sector — avoid, or short candidates.")}
       </div>`;
       return cov + secTable + boards;
+    }
+
+    // --- Futures rollover ---
+    function rolloverQuery() {
+      const p = new URLSearchParams();
+      const g = id => document.getElementById(id);
+      p.set("sort", g("rollSort").value || "rollover");
+      if (g("rollMinPrice").value !== "") p.set("minPrice", g("rollMinPrice").value);
+      if (g("rollMinVal").value !== "") p.set("minValueCr", g("rollMinVal").value);
+      if (g("rollLimit").value !== "") p.set("limit", g("rollLimit").value);
+      return "?" + p.toString();
+    }
+
+    function renderRollover(data) {
+      const rows = data.rows || [];
+      const med = data.medianRollover;
+      const dte = data.daysToExpiry;
+      const cov = `<div class="chart-note" style="margin:0 0 8px">🔄 <b>Futures rollover</b> · <b>${data.date || "—"}</b> · near <b>${data.nearExpiry ? fmtExpiry(data.nearExpiry) : "—"}</b>${dte != null ? ` (${dte}d away)` : ""} · ${fmtNum(data.count || 0)}/${fmtNum(data.universe || 0)} F&O names${med != null ? ` · market median rollover <b>${med}%</b>` : ""}. Rollover% = next-month OI ÷ (near+next) — higher = more positions CARRIED forward. Roll cost = next−near spread (+ contango / − backwardation). 🟢/🔴 = carrying/shedding vs the market. Last EOD close.</div>`;
+      if (data.note && !rows.length) return cov + `<div class="empty">${escapeHtml(data.note)}</div>`;
+      if (!rows.length) return cov + `<div class="empty">No qualifying futures — loosen the price/value filters or backfill the latest FO bhavcopy.</div>`;
+      const oiChip = (r) => {
+        if (!r.oiState) return "";
+        const c = r.bullish ? "var(--green)" : "var(--red)";
+        return `<span style="color:${c};font-size:11px">${escapeHtml(r.oiState)}</span>`;
+      };
+      const signed = (v, s) => v == null ? "—"
+        : `<span class="${v >= 0 ? "pos" : "neg"}">${v >= 0 ? "+" : ""}${v}${s || ""}</span>`;
+      const body = rows.map(r => {
+        const badge = r.carrying ? '<span class="scan-tag star">🟢 carrying</span>'
+          : r.shedding ? '<span class="scan-tag">🔴 shedding</span>' : "";
+        return `<tr data-sym="${r.symbol}">
+          <td class="sym"><b>${escapeHtml(r.symbol)}</b>${r.kind === "index" ? ' <span style="color:var(--muted);font-size:10px">IDX</span>' : ""}</td>
+          <td>${fmtPrice(r.nearPrice)}</td>
+          ${eodPct(r.pChange)}
+          <td style="text-align:right;font-weight:700">${r.rolloverPct != null ? r.rolloverPct + "%" : "—"}</td>
+          <td style="width:120px">${rollBar(r.rolloverPct, med)}</td>
+          <td style="text-align:right">${signed(r.rollCostPct, "%")}</td>
+          <td style="text-align:right;color:var(--muted)">${r.annualizedRollPct != null ? (r.annualizedRollPct >= 0 ? "+" : "") + r.annualizedRollPct + "%" : "—"}</td>
+          <td style="text-align:right">${signed(r.basisPct, "%")}</td>
+          <td>${oiChip(r)}</td>
+          <td>${badge}</td>
+        </tr>`;
+      }).join("");
+      return cov + `<div style="overflow-x:auto"><table class="tbl" style="min-width:820px">
+        <thead><tr><th>Stock</th><th>Near ₹</th><th>%Chg</th>
+        <th style="text-align:right" title="Next-month OI ÷ (near+next) OI. Higher = more open interest carried into next month.">Rollover</th>
+        <th title="Grey line = market median rollover; bar = this name vs it">vs median</th>
+        <th style="text-align:right" title="(next − near) price as %. + = contango (cost to carry a long); − = backwardation.">Roll cost</th>
+        <th style="text-align:right" title="Roll cost annualized over the days between the two expiries">Annualized</th>
+        <th style="text-align:right" title="(near future − spot) / spot — the near-month basis">Basis</th>
+        <th title="Net (near+next) OI change paired with today's price move">OI state</th>
+        <th></th></tr></thead><tbody>${body}</tbody></table></div>`
+        + (data.note ? `<div class="chart-note" style="margin-top:8px">${escapeHtml(data.note)}</div>` : "");
+    }
+
+    // Bar centred on the market-median rollover: green right (above median), red left.
+    function rollBar(pct, med) {
+      if (pct == null) return "";
+      const m = med == null ? 50 : med;
+      const frac = Math.max(-1, Math.min(1, (pct - m) / 50));   // ±50pp spans full width
+      const w = Math.abs(frac) * 50;
+      const col = pct >= m ? "var(--green)" : "var(--red)";
+      const side = pct >= m ? `left:50%;width:${w}%` : `right:50%;width:${w}%`;
+      return `<span class="rs-track"><i style="position:absolute;${side};background:${col}"></i>
+        <span class="rs-zero"></span></span>`;
     }
 
     async function convAction(kind) {
@@ -4298,6 +4389,24 @@
           dot.style.background = "var(--green)";
           return;
         }
+        if (current === "rollover") {
+          const data = await fetch("/api/eod/rollover" + rolloverQuery()).then(r => r.json());
+          if (data.error) throw new Error(data.error);
+          window._lastRows = data.rows || [];
+          wrap.innerHTML = renderRollover(data);
+          annotateInfo(wrap);
+          wrap.querySelectorAll("tr[data-sym]").forEach(tr =>
+            tr.onclick = () => openDetail(tr.getAttribute("data-sym")));
+          document.getElementById("futMomentum").style.display = "none";
+          const rs = document.getElementById("rollStatus");
+          if (rs) rs.textContent = data.count != null
+            ? `${fmtNum(data.count)} names · median ${data.medianRollover != null ? data.medianRollover + "%" : "—"}`
+            : "";
+          document.getElementById("updated").textContent =
+            "Updated " + new Date().toLocaleTimeString("en-IN");
+          dot.style.background = "var(--green)";
+          return;
+        }
         let url = "/api/" + current + (current === "scanner" ? scannerQuery() : "");
         if (current === "recos")
           url = "/api/recommendations" + (document.getElementById("recoFno").checked ? "?fno=1" : "");
@@ -5039,6 +5148,8 @@
     document.getElementById("secApply").onclick = load;
     document.getElementById("secNames").onchange = load;
     document.getElementById("secLead").onchange = load;
+    document.getElementById("rollApply").onclick = load;
+    document.getElementById("rollSort").onchange = load;
     document.getElementById("recoFno").onchange = load;
     document.getElementById("simTake").onclick = async () => {
       const btn = document.getElementById("simTake");

@@ -438,6 +438,7 @@ def api_eod_conviction():
         fno_only=request.args.get("fno") == "1",
         with_deals=request.args.get("deals") != "0",     # on by default
         with_options=request.args.get("options") != "0",  # on by default
+        with_rollover=request.args.get("rollover") != "0",  # on by default
         adaptive=request.args.get("adaptive") == "1",     # off by default
     ))
 
@@ -462,6 +463,7 @@ def api_eod_conviction_save():
         fno_only=(body.get("fno") or request.args.get("fno")) == "1",
         with_deals=(body.get("deals", request.args.get("deals")) != "0"),
         with_options=(body.get("options", request.args.get("options")) != "0"),
+        with_rollover=(body.get("rollover", request.args.get("rollover")) != "0"),
         adaptive=(body.get("adaptive", request.args.get("adaptive")) == "1"))
     return jsonify(eod_conviction.save(b))
 
@@ -486,6 +488,28 @@ def api_eod_conviction_calibration():
     except ValueError:
         days = None
     return jsonify(conviction_calibration.report(days=days))
+
+
+@app.route("/api/eod/rollover")
+def api_eod_rollover():
+    """Futures rollover tracker from the EOD FO bhavcopy: near-vs-next month rollover%
+    + roll cost (spread) + basis + OI-state, cross-sectionally ranked. Off-hours.
+    ?minPrice=&minValueCr=&limit=&sort=rollover|rollcost|basis|dte."""
+    import rollover
+
+    def fnum(name, default):
+        v = request.args.get(name)
+        try:
+            return float(v) if v not in (None, "") else default
+        except ValueError:
+            return default
+
+    return jsonify(rollover.board(
+        min_price=fnum("minPrice", 20.0),
+        min_value_cr=fnum("minValueCr", 0.5),
+        limit=int(fnum("limit", 50)),
+        sort=request.args.get("sort", "rollover"),
+    ))
 
 
 @app.route("/api/eod/scheduler")
