@@ -43,7 +43,7 @@ NSE/
 ├── nse_quote.py       # Per-stock quote/chart/depth (NextApi) + OHLCV candles (charting)
 ├── bhavcopy.py        # EOD UDiFF bhavcopy ingest (static archive) + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill(days)
 ├── deals.py           # Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status
-├── eod_scanner.py     # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure
+├── eod_scanner.py     # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal + sector-RS + futures-rollover xref) — off-hours, pure
 ├── eod_conviction.py  # EOD conviction board — fuses breakout+delivery+deals+OI+sector RS+option chain+futures rollover, ranks by #signals agreeing; save→ideas / digest→notify
 ├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape; oi_map() = market-wide analytics in one parse (the Conviction option fuse)
 ├── eod_scheduler.py   # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
@@ -61,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 735 unit tests across 34 suites (see below)
+├── test_*.py          # 740 unit tests across 34 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -130,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 735 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 740 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -548,6 +548,12 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🔄 Rollover in the EOD Scan tab** — the rollover signal was only actionable on the
+  Conviction board; now the market-wide scanner carries it too. `eod_scanner._rollover_map()`
+  (reuses `rollover.rank_map()`'s cached FO text) + `_attach_rollover()` tag F&O rows that
+  are CARRYING positions into next month with a **🔄 carrying N%** badge; `_score()` adds +6
+  on the bull side. `scan(with_rollover=…)`, `/api/eod/scan?rollover=0`, UI checkbox default
+  **on** (cash-only names untouched). Tests **+5**; suite **735 → 740**.
 - **📊 Digest trust footer** — the off-screen EOD digest (`notify.send_digest`) listed picks
   but gave no reason to trust them; this appends the realized track record from the
   conviction calibration. `notify._fmt_trackrecord()` (pure) → `📊 Track record (30d, N

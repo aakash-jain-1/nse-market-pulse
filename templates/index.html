@@ -613,6 +613,7 @@
         <label>Show<input type="number" id="eLimit" min="10" max="300" step="10" style="width:64px" value="50"></label>
         <label class="chk"><input type="checkbox" id="eFno"> F&amp;O only</label>
         <label class="chk" title="Cross-reference the latest NSE bulk/block deals (institutional footprint) and flag rows a big player traded today with a 🐋 badge."><input type="checkbox" id="eDeals"> 🐋 deals</label>
+        <label class="chk" title="Cross-reference the EOD futures rollover: flag F&amp;O names CARRYING their positions into next month (top-fifth rollover) with a 🔄 badge, and give the bull side a small score boost. Only F&amp;O names are affected."><input type="checkbox" id="eRoll" checked> 🔄 rollover</label>
         <button id="eApply">Apply</button>
         <span style="width:1px;height:20px;background:var(--border)"></span>
         <label title="Load the last N sessions' bhavcopies into the local history cache — needed for moving averages, N-day highs and average-volume signals. Runs in the background (~1-2s per day).">Backfill<input type="number" id="eDays" min="1" max="120" step="5" style="width:56px" value="30"> days</label>
@@ -905,7 +906,7 @@
       { key: "scanner",    label: "🔎 Scanner", title: "In-Demand Scanner",
         desc: "One ranked board combining volume spikes, money flow, momentum & OI buildup. Use the filters to hunt for exactly the setup you want." },
       { key: "eod",        label: "🌐 EOD Scan", title: "Full-Market EOD / Swing Scanner",
-        desc: "Scans the WHOLE cash market (~2400 names, not just the live hot lists) from NSE's End-of-Day bhavcopy history for swing setups — breakouts/breakdowns of the recent high/low, gaps, unusual volume, trend vs 20/50-day MAs and NR7 squeezes. Works off-hours & weekends. Click ‘Backfill history’ once to load recent daily bars. Educational — NOT advice." },
+        desc: "Scans the WHOLE cash market (~2400 names, not just the live hot lists) from NSE's End-of-Day bhavcopy history for swing setups — breakouts/breakdowns of the recent high/low, gaps, unusual volume, trend vs 20/50-day MAs and NR7 squeezes. Cross-references bulk/block deals (🐋) and futures rollover (🔄 carrying — F&O names holding positions into next month). Works off-hours & weekends. Click ‘Backfill history’ once to load recent daily bars. Educational — NOT advice." },
       { key: "conviction", label: "🏆 Conviction", title: "EOD Conviction Board — tomorrow's watchlist",
         desc: "FUSES the independent end-of-day signals — breakout of the N-day high, delivery% accumulation, bulk/block-deal footprint, F&O OI buildup, leading/lagging sector, the option chain (max-pain / PCR / OI walls) and futures rollover (positions carried into next month) — into one ranked watchlist. Names are ranked by how many signals AGREE (confirmation stacking), so a setup confirmed 4 ways beats a single strong signal; a chain conflict (target into an OI wall, or pinned against max-pain) shows a ⚠️ and shaves conviction. 📊 Calibration scores past boards' realized outcomes; ⚖️ Adaptive then feeds each pillar's measured edge back into scoring. Save it to the Ideas history or push a digest to your phone. Works off-hours. Educational — NOT advice." },
       { key: "sectors",    label: "🧭 Sectors", title: "Sector Relative-Strength — where's the money rotating?",
@@ -1169,6 +1170,7 @@
       if (lim !== "") p.set("limit", lim);
       if (document.getElementById("eFno").checked) p.set("fno", "1");
       if (document.getElementById("eDeals").checked) p.set("deals", "1");
+      if (!document.getElementById("eRoll").checked) p.set("rollover", "0");  // on by default
       return "?" + p.toString();
     }
 
@@ -1206,11 +1208,13 @@
       const wd = rows[0].windowDays || "N";
       const dealsNote = data.withDeals
         ? ` <span style="color:var(--accent)">🐋 bulk/block deals cross-referenced</span> —` : "";
-      const cov2 = cov.replace("(not live).</div>", `(not live).${dealsNote}</div>`);
-      const head = `<tr><th>Stock</th><th>Close</th><th>% Chg</th><th>Gap</th><th title="Today's volume vs its trailing 20-day average">Vol ×Avg</th><th title="Delivery % — shares actually delivered vs traded. High = real (non-intraday) buying = accumulation conviction. '+Npp' = jump vs its own average.">Deliv%</th><th title="% from the recent ${wd}-day high (≥0 = at/above → breakout)">vs Hi</th><th title="% from the recent ${wd}-day low (≤0 = at/below)">vs Lo</th><th>Setups</th><th title="Bullish setup strength: breakout + volume + trend + gap + squeeze + delivery + bulk-deal">Score</th></tr>`;
+      const rollNote = data.withRollover
+        ? ` <span style="color:var(--accent)">🔄 futures rollover cross-referenced</span> —` : "";
+      const cov2 = cov.replace("(not live).</div>", `(not live).${dealsNote}${rollNote}</div>`);
+      const head = `<tr><th>Stock</th><th>Close</th><th>% Chg</th><th>Gap</th><th title="Today's volume vs its trailing 20-day average">Vol ×Avg</th><th title="Delivery % — shares actually delivered vs traded. High = real (non-intraday) buying = accumulation conviction. '+Npp' = jump vs its own average.">Deliv%</th><th title="% from the recent ${wd}-day high (≥0 = at/above → breakout)">vs Hi</th><th title="% from the recent ${wd}-day low (≤0 = at/below)">vs Lo</th><th>Setups</th><th title="Bullish setup strength: breakout + volume + trend + gap + squeeze + delivery + bulk-deal + sector RS + futures rollover">Score</th></tr>`;
       const body = rows.map((r, i) => {
         const tags = (r.tags || []).map(t =>
-          `<span class="scan-tag${t.indexOf("⭐") >= 0 ? " star" : ""}${t.indexOf("🐋") >= 0 ? " star" : ""}">${escapeHtml(t)}</span>`).join("");
+          `<span class="scan-tag${t.indexOf("⭐") >= 0 ? " star" : ""}${t.indexOf("🐋") >= 0 ? " star" : ""}${t.indexOf("🔄") >= 0 ? " star" : ""}">${escapeHtml(t)}</span>`).join("");
         return `<tr data-sym="${r.symbol}">
           ${rowStart(i, r.symbol)}
           <td>${fmtPrice(r.close)}</td>
@@ -5132,6 +5136,7 @@
     document.getElementById("eDir").onchange = load;
     document.getElementById("eFno").onchange = load;
     document.getElementById("eDeals").onchange = load;
+    document.getElementById("eRoll").onchange = load;
     document.getElementById("eBackfill").onclick = eodBackfill;
     document.getElementById("cvApply").onclick = load;
     document.getElementById("cvPillars").onchange = load;

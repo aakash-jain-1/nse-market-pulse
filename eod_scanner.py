@@ -206,6 +206,9 @@ def _tags(f):
     if f.get("sectorLeading") and f.get("sector"):
         rk = f.get("sectorRank")
         tags.append(f"🧭 {f['sector']} #{rk}" if rk else f"🧭 {f['sector']} lead")
+    if f.get("carrying"):                        # F&O positions carried into next month
+        rp = f.get("rolloverPct")
+        tags.append(f"🔄 carrying {rp:.0f}%" if rp is not None else "🔄 carrying")
     return tags
 
 
@@ -240,6 +243,8 @@ def _score(f):
             s += 8                               # riding a leading sector
         elif ss <= _SECTOR_LAG:
             s -= 6                               # fighting a lagging sector
+    if f.get("carrying") and f.get("rollBullish"):
+        s += 6                                   # F&O positions carried into next month, bull side
     return round(s, 1)
 
 
@@ -338,15 +343,49 @@ def _attach_sector(f, smap, sym):
     f["sectorLagging"] = ctx["lagging"]
 
 
+def _rollover_map(enabled):
+    """{SYMBOL: rollover metrics + carrying/shedding} from the EOD FO bhavcopy, or {}
+    when disabled/unavailable. Reuses the cached FO text shared with the option chain /
+    rollover tab / conviction board, so it's usually free. Only F&O names appear. Lazy
+    import (rollover reaches back through eod_options)."""
+    if not enabled:
+        return {}
+    try:
+        import rollover
+        _, rmap = rollover.rank_map()
+        return rmap or {}
+    except Exception:
+        log.warning("scan: rollover cross-reference failed", exc_info=True)
+        return {}
+
+
+def _attach_rollover(f, rmap, sym):
+    """Tag a row with its futures-rollover context (is it CARRYING positions into next
+    month?), which `_score`/`_tags` fold in as an extra F&O confirmation. Only F&O names
+    are in `rmap`; cash-only names are left untouched."""
+    r = rmap.get(sym) if rmap else None
+    if not r:
+        return
+    f["rolloverPct"] = r.get("rolloverPct")
+    f["rolloverRank"] = r.get("rolloverRank")
+    f["carrying"] = bool(r.get("carrying"))
+    f["shedding"] = bool(r.get("shedding"))
+    f["rollBullish"] = r.get("bullish")       # net near+next OI direction (True/False/None)
+    f["rollOiState"] = r.get("oiState")
+    f["daysToExpiry"] = r.get("daysToExpiry")
+
+
 def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
-         fno_only=False, lookback=LOOKBACK, with_deals=False):
+         fno_only=False, lookback=LOOKBACK, with_deals=False, with_rollover=False):
     """Rank the whole ingested EOD universe by `view`.
 
     Filters: close ≥ `min_price`, turnover ≥ `min_value_cr` crore, and (optional)
     F&O names only. `with_deals` cross-references the latest bulk/block deals so
-    rows a big player traded get a 🐋 badge (+ score bonus). Returns {view, date,
-    rows, universe, scanned, matched, coverage, note}. Needs no network for the
-    bars (from db.eod_bars); deals add one tiny cached CSV fetch when enabled."""
+    rows a big player traded get a 🐋 badge (+ score bonus). `with_rollover` folds in
+    the EOD futures rollover so an F&O name CARRYING its positions into next month gets
+    a 🔄 badge (+ score bonus on the bull side). Returns {view, date, rows, universe,
+    scanned, matched, coverage, note}. Needs no network for the bars (from db.eod_bars);
+    deals/rollover add one tiny cached fetch each when enabled."""
     import db
     view = view if view in _VIEW_SPEC else "setups"
     try:
@@ -359,6 +398,7 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
     grouped = db.eod_bars_all(since=_since(latest, lookback))
     deal_map = _deal_map(with_deals)
     smap = _sector_strength(grouped, min_price, min_value_cr)
+    rmap = _rollover_map(with_rollover)
 
     fno = None
     if fno_only:
@@ -388,6 +428,7 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
         if deal_map.get(sym):
             f["deals"] = deal_map[sym]
         _attach_sector(f, smap, sym)
+        _attach_rollover(f, rmap, sym)
         f["score"] = _score(f)
         f["tags"] = _tags(f)
         rows.append(f)
@@ -404,9 +445,10 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
         "matched": len(rows),
         "coverage": status(),
         "withDeals": bool(deal_map),
+        "withRollover": bool(rmap),
         "filters": {"minPrice": min_price, "minValueCr": min_value_cr,
                     "fnoOnly": bool(fno_only), "lookback": lookback,
-                    "withDeals": bool(with_deals)},
+                    "withDeals": bool(with_deals), "withRollover": bool(with_rollover)},
         "note": None if grouped else (
             "No EOD history yet — click ‘Backfill history’ to load recent "
             "bhavcopies (whole-market daily bars)."),

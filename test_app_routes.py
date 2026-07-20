@@ -414,20 +414,24 @@ def test_eod_scan_arg_parsing():
     seen = {}
 
     def fake(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
-             fno_only=False, with_deals=False):
+             fno_only=False, with_deals=False, with_rollover=True):
         seen.update(view=view, limit=limit, min_price=min_price,
-                    min_value_cr=min_value_cr, fno_only=fno_only, with_deals=with_deals)
+                    min_value_cr=min_value_cr, fno_only=fno_only, with_deals=with_deals,
+                    with_rollover=with_rollover)
         return {"view": view, "rows": []}
 
     with _patch(eod_scanner, "scan", fake):
-        st, j = _json("/api/eod/scan?view=breakout&limit=25&minPrice=50&minValueCr=5&fno=1&deals=1")
+        st, j = _json("/api/eod/scan?view=breakout&limit=25&minPrice=50&minValueCr=5"
+                      "&fno=1&deals=1&rollover=0")
         assert st == 200 and j["view"] == "breakout"
         assert seen == {"view": "breakout", "limit": 25, "min_price": 50.0,
-                        "min_value_cr": 5.0, "fno_only": True, "with_deals": True}
+                        "min_value_cr": 5.0, "fno_only": True, "with_deals": True,
+                        "with_rollover": False}
         _json("/api/eod/scan")                        # defaults
         assert seen["view"] == "setups" and seen["limit"] == 50
         assert seen["min_price"] == 20.0 and seen["min_value_cr"] == 1.0
         assert seen["fno_only"] is False and seen["with_deals"] is False
+        assert seen["with_rollover"] is True          # rollover on by default
 
 
 def test_eod_sectors_arg_parsing():

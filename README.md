@@ -824,7 +824,7 @@ nse-market-pulse/
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
 ├── bhavcopy.py             # EOD UDiFF bhavcopy ingest + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill
 ├── deals.py                # Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status
-├── eod_scanner.py          # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours
+├── eod_scanner.py          # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal + sector-RS + futures-rollover xref) — off-hours
 ├── eod_conviction.py       # EOD conviction board — fuses breakout+delivery+deals+OI+sector RS+option chain+futures rollover, ranks by #signals agreeing; save→ideas / digest→notify
 ├── eod_options.py          # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape; oi_map() = market-wide analytics in one parse (the Conviction option fuse)
 ├── eod_scheduler.py        # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
@@ -847,7 +847,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 735 unit tests, 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
+├── test_*.py               # 740 unit tests, 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

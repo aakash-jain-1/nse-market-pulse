@@ -446,6 +446,75 @@ def test_scan_annotates_leading_sector():
     assert any(t.startswith("🧭 IT") for t in tcs["tags"])
 
 
+# ---------------------------------------------------------------------------
+# futures-rollover pillar (score bonus + 🔄 carrying tag)
+# ---------------------------------------------------------------------------
+def test_score_folds_in_rollover():
+    base = es._score({"pctFromHigh": 0.0})                       # breakout, no rollover
+    carry = es._score({"pctFromHigh": 0.0, "carrying": True, "rollBullish": True})
+    bear = es._score({"pctFromHigh": 0.0, "carrying": True, "rollBullish": False})
+    assert carry == round(base + 6, 1)                          # carried, bull side → bonus
+    assert bear == base                                         # bearish OI → no bull bonus
+
+
+def test_tags_carrying_badge():
+    hot = es._tags({"pctFromHigh": 0.0, "windowDays": 20,
+                    "carrying": True, "rolloverPct": 82.0})
+    assert any("🔄 carrying 82%" in t for t in hot)
+    plain = es._tags({"pctFromHigh": 0.0, "windowDays": 20, "carrying": False})
+    assert not any("carrying" in t for t in plain)
+
+
+def test_attach_rollover_only_touches_fno_names():
+    rmap = {"ACME": {"rolloverPct": 70.0, "rolloverRank": 90.0, "carrying": True,
+                     "shedding": False, "bullish": False, "oiState": "short buildup",
+                     "daysToExpiry": 5}}
+    f = {"symbol": "ACME"}
+    es._attach_rollover(f, rmap, "ACME")
+    assert f["carrying"] is True and f["rollBullish"] is False and f["rolloverPct"] == 70.0
+    g = {"symbol": "CASH"}
+    es._attach_rollover(g, rmap, "CASH")            # cash-only name not in the F&O map
+    assert "carrying" not in g
+    es._attach_rollover(g, {}, "CASH")              # empty map → no-op
+    assert "carrying" not in g
+
+
+def test_scan_with_rollover_annotates_and_boosts():
+    import rollover
+    with _temp_db() as db:
+        _seed_universe(db)
+        orig = rollover.rank_map
+        rollover.rank_map = lambda force=False: ("2026-07-15", {
+            "BREAK": {"rolloverPct": 84.0, "rolloverRank": 96.0, "carrying": True,
+                      "shedding": False, "bullish": True, "oiState": "long buildup",
+                      "daysToExpiry": 3}})
+        try:
+            r = es.scan(view="setups", min_price=20, with_rollover=True)
+        finally:
+            rollover.rank_map = orig
+    assert r["withRollover"] is True and r["filters"]["withRollover"] is True
+    brk = next(x for x in r["rows"] if x["symbol"] == "BREAK")
+    assert brk.get("carrying") is True and brk.get("rollBullish") is True
+    assert any("carrying" in t for t in brk["tags"])
+    down = next(x for x in r["rows"] if x["symbol"] == "DOWN")   # not in the map
+    assert "carrying" not in down
+
+
+def test_scan_with_rollover_off_by_default():
+    import rollover
+    called = []
+    with _temp_db() as db:
+        _seed_universe(db)
+        orig = rollover.rank_map
+        rollover.rank_map = lambda force=False: (called.append(1) or ("2026-07-15", {}))
+        try:
+            r = es.scan(view="setups", min_price=20)
+        finally:
+            rollover.rank_map = orig
+    assert r["withRollover"] is False and r["filters"]["withRollover"] is False
+    assert called == []                                          # not fetched when disabled
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

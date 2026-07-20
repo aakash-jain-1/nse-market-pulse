@@ -359,7 +359,7 @@ def api_eod_refresh():
 @app.route("/api/eod/scan")
 def api_eod_scan():
     """Full-market EOD/swing scanner over the ingested bhavcopy history (works
-    off-hours). ?view=&limit=&minPrice=&minValueCr=&fno=1."""
+    off-hours). ?view=&limit=&minPrice=&minValueCr=&fno=1&deals=1&rollover=0."""
     import eod_scanner
 
     def fnum(name, default):
@@ -376,6 +376,7 @@ def api_eod_scan():
         min_value_cr=fnum("minValueCr", 1.0),
         fno_only=request.args.get("fno") == "1",
         with_deals=request.args.get("deals") == "1",
+        with_rollover=request.args.get("rollover") != "0",  # on by default (F&O names)
     ))
 
 

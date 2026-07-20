@@ -82,7 +82,7 @@ nse_client.py        NSE session mgmt + hot-list fetch/normalize (CORE) + _fetch
 nse_quote.py         Per-stock quote/chart/DEPTH (NextApi) + OHLCV (charting) + get_book_stats
 bhavcopy.py          EOD UDiFF bhavcopy ingest (static archive) + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill(days)
 deals.py             Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status, off-hours
-eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal xref) — off-hours, pure math
+eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal + sector-RS + futures-rollover xref) — off-hours, pure math
 eod_conviction.py    EOD conviction board — fuses breakout+delivery+deals+OI buildup+sector RS+option chain+futures rollover, ranks by #signals that agree; save→ideas / digest→notify
 eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours; oi_map() = market-wide analytics in one parse (the Conviction option fuse)
 eod_scheduler.py     Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest), persists last-run in eod_meta
@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 735 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 740 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -287,7 +287,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **735 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **740 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -439,6 +439,19 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Rollover surfaced in the EOD Scan tab (suite 735 → 740)
+- **Why:** rollover was only actionable on the Conviction board. This puts the same
+  "carrying into next month" read on the market-wide scanner so it shows up everywhere.
+- **What:** `eod_scanner._rollover_map()` (reuses `rollover.rank_map()` — the cached FO
+  text, so usually free) + `_attach_rollover()` tags each F&O row with `carrying / shedding
+  / rolloverPct / rollBullish / rollOiState`. `_tags()` adds a **🔄 carrying N%** badge;
+  `_score()` gives **+6** when a name is carrying AND net-bullish (aligned with the bullish
+  setup score; no penalty otherwise). `scan(with_rollover=…)`; the `/api/eod/scan` route +
+  a UI checkbox default it **on** (only F&O names are affected; cash-only names untouched).
+- **Tests +5** (score bonus gated on direction; 🔄 tag; attach only touches F&O names;
+  board annotates + boosts; off-by-default doesn't fetch). Flask-client smoke: `?rollover=0`
+  strips the flag. Suite **735 → 740**.
 
 ### 2026-07-20 — Digest trust footer (calibration → off-screen alerts, suite 730 → 735)
 - **Why:** the EOD Telegram/webhook digest listed picks but gave no reason to trust them.
