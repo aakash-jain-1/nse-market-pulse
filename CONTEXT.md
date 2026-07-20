@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 772 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 776 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -250,11 +250,16 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   `cash` + `fno` books). Risk-based sizing (₹2,000 risk/trade), ≤3 business-day
   hold, expectancy in R. Coarse exits go through `intrabar.resolve_point()`
   (stop-first tie-break).
-- **Snapshot logger (`snapshot_logger.py`)**: daemon loop every **60s during
-  market hours** (Mon–Fri 09:15–15:30 IST). Each cycle: demand+volgainers
-  snapshot → SQLite; ATM IV every 5 min; `sim.build_ctx/update/take/daily_rollup`;
-  context archive every 5 min; **`notify.tick(ctx)`**. Isolated sub-tasks +
-  heartbeat + watchdog + session-rebuild self-healing; `health()`.
+- **Snapshot logger (`snapshot_logger.py`)**: daemon loop every **90s during
+  market hours** (Mon–Fri 09:15–15:30 IST; env `NSE_LOG_INTERVAL`, floor 30s — raised
+  from 60 to trim the dominant per-minute NSE fan-out). Each cycle: demand+volgainers
+  snapshot → SQLite; ATM IV every 5 min (`NSE_LOG_IV_INTERVAL`);
+  `sim.build_ctx/update/take/daily_rollup`; context archive every 5 min
+  (`NSE_LOG_CONTEXT_INTERVAL`); **`notify.tick(ctx)`**. Isolated sub-tasks + heartbeat +
+  watchdog (`STALE_AFTER` scales with `INTERVAL`) + session-rebuild self-healing;
+  `health()`. The heavy per-cycle cost is `build_context`'s per-symbol quote+candle
+  fan-out, bounded to **`NSE_CTX_CANDIDATES=30`** liquid names (`strategies._CTX_CAND`,
+  floor 10; was 45).
 
 ## Key API endpoints (non-exhaustive)
 
@@ -310,7 +315,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **772 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **776 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -464,6 +469,25 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Trim NSE load at the source: slower logger cadence + smaller fan-out (suite 772 → 776)
+- **Why:** complements the pacer — fewer *total* hits during market hours, not just smoother
+  bursts. The dominant server-side NSE consumer is the snapshot logger's 60s loop, whose
+  `sim.build_ctx()` → `strategies.build_context()` fans out per-symbol quotes + 5-min candles
+  over 8-worker pools every cycle.
+- **What (both env-tunable, with floors, so no code edit needed to dial):**
+  - `snapshot_logger.INTERVAL` **60 → 90s** (`NSE_LOG_INTERVAL`, floor 30) — ~33% fewer cycles
+    of everything; `IV_INTERVAL`/`CONTEXT_INTERVAL` also env-configurable; `STALE_AFTER` now
+    `max(180, INTERVAL*2)` so a raised cadence isn't mis-flagged unhealthy. `_env_int()` helper
+    parses overrides safely (garbage/blank → default, clamped to floor).
+  - `strategies.build_context` candidate fan-out **45 → 30** (`NSE_CTX_CANDIDATES`,
+    `_CTX_CAND`, floor 10); source slices derive from the cap (`n1,n2,n3 = cap, cap//2, cap//3`).
+  - Net: ~33% fewer cycles × ~33% fewer per-cycle per-symbol calls ≈ **~55% less** per-symbol
+    market-hours NSE volume. Trade-off: 90s snapshot granularity + 30 (vs 45) intraday
+    candidates for the quote/candle strategies — both dial-able.
+- **Tests +4:** `build_context` caps the fan-out at `_CTX_CAND` (and honors a patched cap);
+  `_env_int` parsing/floor/garbage; trimmed default cadence + `STALE_AFTER` relationship. Suite
+  **772 → 776**, full suite green, lint clean.
 
 ### 2026-07-20 — Global NSE request pacer + escalating cooldown + browser headers (suite 760 → 772)
 - **Why:** user kept hitting the **NSE Akamai** block. The 10-min cooldown, 15s `_fetch`

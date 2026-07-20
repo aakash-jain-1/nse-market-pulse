@@ -20,12 +20,22 @@ Design
   conviction / rating / reasons ...), so the sim treats them uniformly.
 """
 
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
 import nse_client as nse
 
 _IST = timezone(timedelta(hours=5, minutes=30))
+
+# Per-symbol fan-out budget for build_context (quotes + 5-min candles are fetched
+# for this many liquid candidates each cycle — the biggest NSE consumer in the 90s
+# logger loop). Trimmed 45 -> 30 to cut market-hours load; env-tunable so it can be
+# dialed without a code edit. Floor 10 keeps enough breadth for the movers.
+try:
+    _CTX_CAND = max(10, int(os.getenv("NSE_CTX_CANDIDATES", "").strip() or 30))
+except (TypeError, ValueError):
+    _CTX_CAND = 30
 
 # Session-scoped daily-bar cache for the squeeze / prior-day-level strategies.
 # Prior sessions are immutable intraday, so a symbol's recent bars are fetched at
@@ -156,13 +166,14 @@ def build_context(fno_only=False):
     # delivery). Fetched ONCE here for a bounded, liquid candidate set and shared
     # via ctx["quotes"] so those three strategies don't each hit NSE per name.
     cand, seen = [], set()
-    for src, n in ((ctx["scanner"], 30), (ctx["gainers"], 15), (ctx["losers"], 10)):
+    n1, n2, n3 = _CTX_CAND, max(5, _CTX_CAND // 2), max(5, _CTX_CAND // 3)
+    for src, n in ((ctx["scanner"], n1), (ctx["gainers"], n2), (ctx["losers"], n3)):
         for r in src[:n]:
             s = r.get("symbol")
             if s and s not in seen:
                 seen.add(s)
                 cand.append(s)
-    cand = cand[:45]
+    cand = cand[:_CTX_CAND]
 
     quotes = {}
     try:

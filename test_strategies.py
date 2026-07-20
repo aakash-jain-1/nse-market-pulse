@@ -715,6 +715,57 @@ def test_generate_dispatch():
     assert S.generate("does-not-exist", {}) == []
 
 
+# ---------------------------------------------------------------------------
+# build_context per-symbol fan-out budget (NSE source-trim)
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _build_context_stubs():
+    """Stub every NSE dependency of build_context offline; the scanner returns far
+    more names than the cap so we can prove the per-symbol quote/candle fan-out is
+    bounded. Yields the list of symbols get_quote was actually called for."""
+    import nse_quote
+    big = [{"symbol": f"S{i}", "ltp": 100, "pChange": 1} for i in range(200)]
+    calls = []
+
+    def _rec(s):
+        calls.append(s)
+        return {"symbol": s, "ltp": 100}
+
+    stubs = [
+        (S.nse, "get_scanner", lambda **k: list(big)),
+        (S.nse, "get_variations", lambda kind, n=40: list(big)),
+        (S.nse, "get_volume_gainers", lambda n=40: []),
+        (S.nse, "get_oi_spurts", lambda n=60: []),
+        (S.nse, "get_futures", lambda n=60: []),
+        (S.nse, "get_most_active", lambda kind, n=30: []),
+        (S.nse, "get_index_snapshot", lambda: {}),
+        (S, "_load_daily", lambda cand: {}),
+        (S, "_load_chains", lambda ctx: {}),
+        (nse_quote, "get_option_chain", lambda s: {"pcr": 1.0}),
+        (nse_quote, "get_quote", _rec),
+        (nse_quote, "get_ohlc", lambda s, **k: {"points": [], "error": None}),
+    ]
+    with contextlib.ExitStack() as es:
+        for obj, name, val in stubs:
+            es.enter_context(_patch(obj, name, val))
+        yield calls
+
+
+def test_build_context_caps_candidate_fanout():
+    with _build_context_stubs() as calls:
+        ctx = S.build_context()
+    # Scanner alone offers 200 names, but the per-symbol fan-out is bounded.
+    assert len(set(calls)) == S._CTX_CAND
+    assert len(ctx["quotes"]) == S._CTX_CAND
+
+
+def test_build_context_candidate_cap_is_tunable():
+    with _patch(S, "_CTX_CAND", 12), _build_context_stubs() as calls:
+        ctx = S.build_context()
+    assert len(set(calls)) == 12
+    assert len(ctx["quotes"]) == 12
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

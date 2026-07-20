@@ -239,6 +239,25 @@ def test_note_error_sets_state():
         assert sl._last_error == "boom" and sl._last_error_at is not None
 
 
+def test_env_int_parsing_and_floor():
+    assert sl._env_int("NSE_TEST_MISSING_XYZ", 90, 30) == 90          # missing → default
+    with _patch(os, "environ", dict(os.environ, NSE_TEST_INT="45")):
+        assert sl._env_int("NSE_TEST_INT", 90, 30) == 45             # valid override
+    with _patch(os, "environ", dict(os.environ, NSE_TEST_INT="5")):
+        assert sl._env_int("NSE_TEST_INT", 90, 30) == 30             # below floor → clamped
+    with _patch(os, "environ", dict(os.environ, NSE_TEST_INT="abc")):
+        assert sl._env_int("NSE_TEST_INT", 90, 30) == 90            # garbage → default
+    with _patch(os, "environ", dict(os.environ, NSE_TEST_INT="   ")):
+        assert sl._env_int("NSE_TEST_INT", 90, 30) == 90            # blank → default
+
+
+def test_default_cadences_are_trimmed():
+    # The source-trim: snapshot cadence raised 60 → 90, and "stalled" scales with it
+    # so a longer interval isn't mis-flagged unhealthy.
+    assert sl.INTERVAL == 90 and sl.INTERVAL >= 30
+    assert sl.STALE_AFTER >= sl.INTERVAL * 2
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

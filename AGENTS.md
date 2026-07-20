@@ -61,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 772 unit tests across 35 suites (see below)
+├── test_*.py          # 776 unit tests across 35 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -130,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 772 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 776 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -548,6 +548,13 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Trim NSE load at the source** — complements the pacer with fewer *total* market-hours
+  hits. `snapshot_logger.INTERVAL` **60 → 90s** (env `NSE_LOG_INTERVAL`, floor 30; IV/context
+  cadences also env-tunable; `STALE_AFTER = max(180, INTERVAL*2)`), and `build_context`'s
+  per-symbol quote+candle fan-out **45 → 30** candidates (env `NSE_CTX_CANDIDATES`,
+  `strategies._CTX_CAND`, floor 10). ≈55% less per-symbol NSE volume; trade-off is 90s
+  snapshot granularity + 30 (vs 45) intraday candidates, both dial-able. Tests **+4**; suite
+  **772 → 776**.
 - **Global NSE request pacer + escalating cooldown + browser headers** — user kept hitting
   the **NSE Akamai** block. An audit showed every NSE hit funnels through the one warmed
   `requests.Session`, and nothing smoothed the **bursts** from the 6-8 worker fan-outs (cold

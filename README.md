@@ -847,7 +847,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 772 unit tests, 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
+├── test_*.py               # 776 unit tests, 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
@@ -932,7 +932,11 @@ irreplaceable foreground NSE traffic left is the market-wide discovery lists
 themselves, and only while you're actually watching them during market hours.
 A small **provenance chip** (Angel/Dhan · NSE · EOD) on the stock-detail modal and
 the Live tab shows exactly which feed served each quote/chart, so the broker-first →
-NSE → EOD fallback chain is visible rather than guessed.
+NSE → EOD fallback chain is visible rather than guessed. Finally, the market-hours
+**background load is trimmed at the source and env-tunable**: the snapshot logger runs
+every **90 s** (`NSE_LOG_INTERVAL`) and the strategy context's per-symbol quote/candle
+fan-out is bounded to **30** liquid names (`NSE_CTX_CANDIDATES`) — dial either down to
+cut NSE traffic further, up for more freshness/breadth.
 
 **Auto EOD refresh.** `eod_scheduler.py` runs **one paced, block-aware refresh**
 (bhavcopy backfill → deals → optional conviction digest) shortly after the 15:30

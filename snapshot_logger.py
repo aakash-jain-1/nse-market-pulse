@@ -32,11 +32,25 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
-INTERVAL = 60          # seconds between automatic snapshots
-IV_INTERVAL = 300      # seconds between ATM-IV captures (heavier, so slower)
-CONTEXT_INTERVAL = 300  # seconds between strategy-context captures (for backtest)
+def _env_int(name, default, lo):
+    """Read an int env override with a hard floor (so a fat-fingered value can't
+    hammer NSE). Falls back to `default` on a missing/garbage value."""
+    try:
+        return max(lo, int(os.getenv(name, "").strip() or default))
+    except (TypeError, ValueError):
+        return default
+
+
+# Cadences are env-tunable so the market-hours NSE load can be dialed down without
+# a code edit. Defaults trimmed (INTERVAL 60 -> 90) to cut the dominant per-minute
+# fan-out that the pacer smooths but can't eliminate; floors stop a silly value from
+# turning into a burst. Pair with NSE_CTX_CANDIDATES (strategies.build_context).
+INTERVAL = _env_int("NSE_LOG_INTERVAL", 90, 30)          # seconds between snapshots
+IV_INTERVAL = _env_int("NSE_LOG_IV_INTERVAL", 300, 60)   # ATM-IV captures (heavier)
+CONTEXT_INTERVAL = _env_int("NSE_LOG_CONTEXT_INTERVAL", 300, 60)  # context archive
 WATCHDOG_INTERVAL = 30  # seconds between watchdog liveness checks
-STALE_AFTER = 180      # a live thread that hasn't ticked this long = "stalled"
+# "Stalled" must sit above the tick cadence, else a raised INTERVAL looks unhealthy.
+STALE_AFTER = max(180, INTERVAL * 2)  # no tick for this long (market hours) = stalled
 REBUILD_AFTER = 3      # consecutive failed cycles before forcing a session rebuild
 
 # Always-tracked indices + the most-active F&O stocks (liquid, consistent IV).
