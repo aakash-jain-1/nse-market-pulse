@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 778 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 785 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -132,6 +132,18 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   same shape as `angel_feed._candle_throttle`). Callers need no changes. Turns the burst
   into a steady, browser-like stream; foreground UX barely changes (movers = ~7 endpoints,
   modal/Live are broker-first) since the heavy fan-outs are background.
+- **Optional TLS-fingerprint impersonation (Phase 2, `curl_cffi`)**: the pacer + fuller
+  headers smooth the *rate* and dress up the *headers*, but plain `requests` still presents
+  a Python TLS/HTTP2 fingerprint (JA3/JA4) Akamai can flag as "not a browser" regardless of
+  pacing. When the **optional** `curl_cffi` dep is installed **and** `NSE_TLS_IMPERSONATE`
+  isn't `off/none/0`, `_build_session()` returns a **`_PacedCffiSession(_cffi.Session)`**
+  (default profile `chrome124`) that presents a **real Chrome handshake** — paced through the
+  **same** `_pace()`/`_NSE_GATE` gate (via `request()` instead of `send()`) so burst-smoothing
+  still applies. It's fully transparent: `curl_cffi` responses expose the same
+  `.get/.json/.status_code/.text/.raise_for_status` the callers use, so `_fetch`/`nse_quote`/
+  `bhavcopy` are unchanged. If the dep is absent or disabled it **silently falls back** to the
+  pure-requests `_PacedSession` — no behavior change without it. `pacer_stats().impersonate`
+  reports the active profile (or `null`). Enable with `pip install curl_cffi`.
 - **Akamai/WAF block backoff (`nse_client.blocked_for`/`note_block`/`is_blocked_response`)**:
   NSE fronts everything with Akamai, which returns **HTTP 403 "Access Denied"
   (edgesuite.net, "Reference #…")** to EVERY request once our IP looks bot-like.
@@ -157,7 +169,8 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   block. All live scanner lists already serve their stale `_fetch` cache during a block.
   `/api/health.nse` = **`pacer_stats()`**: `blockedForSec`, `blockCount` (repeat blocks →
   the banner adds a "backing off longer" note), `cooldownSec`, `reqLastMin` (pacer window),
-  `concurrency`/`minGap`/`softRpm`. **Header hardening:** `HEADERS` now sends modern-Chrome
+  `concurrency`/`minGap`/`softRpm`/`impersonate` (curl_cffi profile or null).
+  **Header hardening:** `HEADERS` now sends modern-Chrome
   client hints (`sec-ch-ua*`, `Sec-Fetch-*`, `Accept-Encoding` — brotli only if decodable)
   matching the UA major, and the two cookie warm-ups send navigation-shaped `_NAV_HEADERS`
   so the handshake looks like a real browser landing rather than a bare script.
@@ -315,14 +328,15 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **778 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **785 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
   math), `test_ideas.py` + `test_ideas_journal.py`, `test_fetch_cache.py`,
   `test_client.py` + `test_client_fetchers.py` (normalizers + raw-payload
-  parsers), `test_nse_client.py` (global request pacer: min-gap/soft-RPM/concurrency
-  + escalating WAF cooldown + browser headers + `pacer_stats`), `test_quote.py`
+  parsers),   `test_nse_client.py` (global request pacer: min-gap/soft-RPM/concurrency
+  + escalating WAF cooldown + browser headers + `pacer_stats` + optional curl_cffi
+  impersonation: env toggle/fallback/build-session transport pick), `test_quote.py`
   + `test_quote_more.py`, `test_paper.py`,
   `test_strategies.py`, `test_bhavcopy.py` (EOD UDiFF + sec_bhavdata_full delivery
   parsers + fetch walk-back + price/lot fallback + delivery-merge wiring),
@@ -469,6 +483,26 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Phase 2: optional curl_cffi TLS-fingerprint impersonation (suite 778 → 785)
+- **Why:** even with the pacer smoothing bursts and fuller Chrome headers, plain `requests`
+  still hands Akamai a **Python TLS/HTTP2 fingerprint** (JA3/JA4) it can flag as non-browser
+  regardless of rate — the one layer pacing + headers can't disguise. This is the deferred
+  "Phase 2" the pacer plan called for, to use only if blocks persist.
+- **What (`nse_client.py`):** an **optional** `curl_cffi` import (`_cffi`, `None` when absent).
+  `_impersonate_profile()` returns the browser profile from `NSE_TLS_IMPERSONATE`
+  (default `chrome124`; `off/none/0/false/no/""` disable it, `None` when the dep is missing).
+  A new **`_PacedCffiSession(_cffi.Session)`** paces via `request()` through the SAME
+  `_pace()`/`_NSE_GATE` gate. `_build_session()` prefers it when a profile is active
+  (warming Referer + the two cookie GETs, letting curl keep its own header set/order),
+  else falls back to the pure-requests `_PacedSession` — **fully transparent**: curl_cffi
+  responses expose the same `.get/.json/.status_code/.text/.raise_for_status`, so `_fetch`,
+  `nse_quote`, `bhavcopy` are untouched. `pacer_stats().impersonate` surfaces the active
+  profile (or `null`) under `/api/health.nse`. Enable with `pip install curl_cffi`.
+- **Tests +7** (`test_nse_client.py`): fallback when the dep is absent, env toggle
+  (default/custom/off), `pacer_stats.impersonate`, `_build_session` picks the cffi transport
+  when enabled and the requests one when disabled, plus a structural check of the real
+  override when the dep is installed. Suite **778 → 785**, full suite green, lint clean.
 
 ### 2026-07-20 — Graceful shutdown: silence Ctrl+C daemon/server-thread noise (suite 776 → 778)
 - **Why:** on Ctrl+C two benign tracebacks printed. (1) A daemon intrabar resolver

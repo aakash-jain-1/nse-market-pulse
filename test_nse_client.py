@@ -17,6 +17,7 @@ Run: python test_nse_client.py   (also works under pytest)
 """
 
 import contextlib
+import os
 import threading
 import time as _time
 import types
@@ -266,8 +267,10 @@ def test_build_session_is_paced_with_two_warmups():
 
     saved_send = requests.Session.send
     saved_pace = nse._pace
+    saved_imp = nse._impersonate_profile
     requests.Session.send = fake_send
     nse._pace = lambda: None
+    nse._impersonate_profile = lambda: None    # force the pure-requests transport
     try:
         s = nse._build_session()
         assert isinstance(s, nse._PacedSession)
@@ -278,6 +281,129 @@ def test_build_session_is_paced_with_two_warmups():
     finally:
         requests.Session.send = saved_send
         nse._pace = saved_pace
+        nse._impersonate_profile = saved_imp
+
+
+# --- Phase 2: optional curl_cffi TLS-fingerprint impersonation -------------
+
+class _FakeCffiSession:
+    """Stand-in for curl_cffi.requests.Session: records the impersonate profile and
+    every GET, and returns a duck-typed response — so the cffi branch of
+    _build_session is testable without the real (optional) dependency or network."""
+    def __init__(self, impersonate=None):
+        self.impersonate = impersonate
+        self.headers = {}
+        self.gets = []
+
+    def get(self, url, **kw):
+        self.gets.append(url)
+        return types.SimpleNamespace(status_code=200, text="{}",
+                                     json=lambda: {}, raise_for_status=lambda: None)
+
+
+@contextlib.contextmanager
+def _fake_cffi(profile="chrome124"):
+    """Pretend curl_cffi is installed + enabled: swap in a fake _cffi, point
+    _PacedCffiSession at the fake session class, set the env profile, and no-op the
+    pacer. profile=None leaves NSE_TLS_IMPERSONATE unset (tests the built-in default).
+    Everything is restored afterwards."""
+    saved = (nse._cffi, nse._PacedCffiSession, nse._pace,
+             os.environ.get("NSE_TLS_IMPERSONATE"))
+    nse._cffi = types.SimpleNamespace(Session=_FakeCffiSession)
+    nse._PacedCffiSession = _FakeCffiSession
+    nse._pace = lambda: None
+    if profile is None:
+        os.environ.pop("NSE_TLS_IMPERSONATE", None)
+    else:
+        os.environ["NSE_TLS_IMPERSONATE"] = profile
+    try:
+        yield
+    finally:
+        nse._cffi, nse._PacedCffiSession, nse._pace = saved[0], saved[1], saved[2]
+        if saved[3] is None:
+            os.environ.pop("NSE_TLS_IMPERSONATE", None)
+        else:
+            os.environ["NSE_TLS_IMPERSONATE"] = saved[3]
+
+
+def test_impersonate_profile_none_without_dep():
+    """No curl_cffi installed → impersonation is off no matter what the env says."""
+    saved = (nse._cffi, os.environ.get("NSE_TLS_IMPERSONATE"))
+    nse._cffi = None
+    os.environ["NSE_TLS_IMPERSONATE"] = "chrome124"
+    try:
+        assert nse._impersonate_profile() is None
+    finally:
+        nse._cffi = saved[0]
+        if saved[1] is None:
+            os.environ.pop("NSE_TLS_IMPERSONATE", None)
+        else:
+            os.environ["NSE_TLS_IMPERSONATE"] = saved[1]
+
+
+def test_impersonate_profile_defaults_to_chrome_when_enabled():
+    with _fake_cffi(profile=None):        # dep present, env unset → built-in default
+        assert nse._impersonate_profile() == "chrome124"
+
+
+def test_impersonate_profile_env_toggle():
+    with _fake_cffi(profile="chrome120"):
+        assert nse._impersonate_profile() == "chrome120"
+    for off in ("off", "none", "0", "false", "no", ""):
+        with _fake_cffi(profile=off):
+            assert nse._impersonate_profile() is None, off
+
+
+def test_pacer_stats_exposes_impersonate_field():
+    # Key is always present (None without the dep) so /api/health has a stable shape.
+    assert "impersonate" in nse.pacer_stats()
+    with _fake_cffi(profile="chrome124"):
+        assert nse.pacer_stats()["impersonate"] == "chrome124"
+
+
+def test_build_session_prefers_cffi_when_enabled():
+    """When impersonation is on, _build_session returns the impersonated transport,
+    warmed with Referer + exactly the two cookie GETs — never touching requests."""
+    with _fake_cffi(profile="chrome124"):
+        s = nse._build_session()
+        assert isinstance(s, _FakeCffiSession)
+        assert s.impersonate == "chrome124"
+        assert s.headers.get("Referer")
+        assert s.gets == [nse.BASE, nse.BASE + "/market-data/live-equity-market"]
+
+
+def test_build_session_falls_back_to_requests_when_disabled():
+    """curl_cffi importable but disabled (NSE_TLS_IMPERSONATE=off) → pure-requests
+    paced session, not the cffi one."""
+    hits = []
+
+    def fake_send(self, request, **kw):
+        hits.append(request.url)
+        r = requests.models.Response()
+        r.status_code = 200
+        r._content = b"{}"
+        r.url = request.url
+        return r
+
+    saved_send = requests.Session.send
+    requests.Session.send = fake_send
+    try:
+        with _fake_cffi(profile="off"):
+            s = nse._build_session()
+            assert isinstance(s, nse._PacedSession)
+            assert not isinstance(s, _FakeCffiSession)
+            assert len(hits) == 2                          # still warms cookies
+    finally:
+        requests.Session.send = saved_send
+
+
+def test_paced_cffi_session_wraps_real_dep_when_present():
+    """Structural check of the REAL override — only when curl_cffi is actually
+    installed (auto-passes otherwise, since the class is None without the dep)."""
+    if nse._cffi is None or nse._PacedCffiSession is None:
+        return
+    assert issubclass(nse._PacedCffiSession, nse._cffi.Session)
+    assert "request" in nse._PacedCffiSession.__dict__     # request() is overridden
 
 
 def _main():

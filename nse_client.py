@@ -12,6 +12,7 @@ lazily rebuild them on failure.
 
 import collections
 import logging
+import os
 import random
 import threading
 import time
@@ -20,7 +21,30 @@ from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter
 
+# Optional TLS-fingerprint impersonation (Akamai resilience Phase 2). Plain requests'
+# TLS/HTTP2 fingerprint (JA3/JA4) is trivially flagged as "not a browser"; curl_cffi
+# wraps curl-impersonate to present a REAL Chrome handshake — the one layer the pacer
+# + headers can't disguise. It's an OPTIONAL dependency: if it isn't installed (or
+# NSE_TLS_IMPERSONATE=off) we transparently fall back to the pure-requests paced
+# session, so the app is unchanged without it. Enable with `pip install curl_cffi`.
+try:
+    from curl_cffi import requests as _cffi  # type: ignore[import-not-found]
+except Exception:      # pragma: no cover - depends on the environment
+    _cffi = None
+
 log = logging.getLogger("nse_client")
+
+
+def _impersonate_profile():
+    """The curl_cffi browser profile to impersonate, or None when unavailable/disabled.
+    Read at session-build time so `NSE_TLS_IMPERSONATE` can flip it without a restart
+    in tests. Values like off/0/none disable it (→ pure-requests transport)."""
+    if _cffi is None:
+        return None
+    p = (os.getenv("NSE_TLS_IMPERSONATE", "chrome124") or "").strip()
+    if p.lower() in ("", "0", "off", "none", "false", "no"):
+        return None
+    return p
 
 BASE = "https://www.nseindia.com"
 
@@ -220,6 +244,20 @@ class _PacedSession(requests.Session):
             return super().send(request, **kwargs)
 
 
+if _cffi is not None:
+    class _PacedCffiSession(_cffi.Session):
+        """curl_cffi (curl-impersonate) session, paced through the SAME global gate so
+        the Akamai burst-smoothing applies to the impersonated transport too. curl_cffi
+        follows redirects inside libcurl, so pacing per request() = one pace per logical
+        hit (fine). Exposes the same .get(url, timeout=…) the callers already use."""
+        def request(self, method, url, *args, **kwargs):
+            _pace()
+            with _NSE_GATE:
+                return super().request(method, url, *args, **kwargs)
+else:                                             # pragma: no cover - env dependent
+    _PacedCffiSession = None
+
+
 def pacer_stats():
     """Snapshot of the pacer + WAF-block state for /api/health. Cheap; also prunes
     the sliding window so `reqLastMin` is accurate."""
@@ -236,10 +274,37 @@ def pacer_stats():
         "concurrency": _NSE_MAX_CONCURRENCY,
         "minGap": _NSE_MIN_GAP,
         "softRpm": _NSE_SOFT_RPM,
+        "impersonate": _impersonate_profile(),   # curl_cffi profile or None (Phase 2)
     }
 
 
+def _build_cffi_session(profile):
+    """Warm a curl_cffi session that impersonates a real Chrome (TLS + HTTP/2 + the
+    matching header set/order). curl_cffi manages its own connection pool and provides
+    the browser fingerprint, so we skip HTTPAdapter/mount and the manual client-hint
+    headers (letting impersonation keep them internally consistent) — only Referer +
+    the two cookie warm-ups are added. Paced via _PacedCffiSession."""
+    s = _PacedCffiSession(impersonate=profile)
+    s.headers.update({"Referer": BASE + "/"})
+    s.get(BASE, timeout=15)
+    s.get(BASE + "/market-data/live-equity-market", timeout=15,
+          headers={"Referer": BASE + "/"})
+    log.info("NSE session using curl_cffi TLS impersonation (%s)", profile)
+    return s
+
+
 def _build_session():
+    # Phase 2: prefer the impersonated transport when curl_cffi is installed + enabled;
+    # otherwise the pure-requests paced session (unchanged). Same warmed-cookie contract.
+    # A bad profile name / curl hiccup must NOT leave us session-less — fall through to
+    # the requests transport so the app still works (just without impersonation).
+    prof = _impersonate_profile()
+    if prof and _PacedCffiSession is not None:
+        try:
+            return _build_cffi_session(prof)
+        except Exception:
+            log.warning("curl_cffi session (%s) failed; using requests transport",
+                        prof, exc_info=True)
     s = _PacedSession()
     s.headers.update(HEADERS)
     # Size the connection pool above our fan-out. Several features sweep NSE with

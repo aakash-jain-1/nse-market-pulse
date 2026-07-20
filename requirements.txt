@@ -14,3 +14,13 @@ logzero==1.7.0
 websocket-client==1.9.0
 # Dhan — genuine ticks too, but its Data API is a paid ₹499/mo subscription.
 dhanhq==2.2.0
+
+# --- NSE Akamai resilience (optional; Phase 2) ---
+# curl_cffi impersonates a real Chrome TLS/HTTP2 fingerprint so NSE's Akamai WAF
+# can't flag our handshake as "not a browser". Entirely optional and left
+# commented so the default install stays light: nse_client imports it lazily and
+# transparently falls back to plain `requests` when it's absent. Install it only
+# if blocks persist after the pure-Python pacer — then it's picked up
+# automatically (disable with NSE_TLS_IMPERSONATE=off).
+# curl_cffi==0.15.0
+
