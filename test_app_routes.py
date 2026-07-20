@@ -868,6 +868,8 @@ def test_index_renders():
     assert r.status_code == 200 and r.mimetype == "text/html"
     # Header widgets the pacer/impersonation UX depends on are wired into the template.
     assert b'id="nsePulse"' in r.data and b'id="nseTls"' in r.data
+    # NSE request-budget table lives in the Log/diagnostics modal.
+    assert b'id="nseBudget"' in r.data
 
 
 def test_force_utf8_stdio_is_idempotent_and_safe():

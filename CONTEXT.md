@@ -495,6 +495,15 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-07-20 — Endpoint budget in the UI (Log modal table) (suite 797, UI only)
+- **Why:** the per-endpoint budget was only in `/api/health` JSON. Make "where our NSE quota
+  goes" visible in the dashboard so trimming is self-service.
+- **What (`templates/index.html`):** a **NSE request budget** table (`#nseBudget`) in the
+  Log/diagnostics modal, rendered by `renderNseBudget()` from `/api/health.nse.endpoints` on
+  open — endpoint path + hits `/min` and `/hour`, ranked. `test_index_renders` now asserts the
+  element. No backend change; suite stays **797**. (Live-confirmed: top row is the history
+  fetcher `generateSecurityWiseHistoricalData`, archives under the `nsearchives` host.)
+
 ### 2026-07-20 — Fix: startup banner crashed on non-UTF-8 stdout (suite 796 → 797)
 - **Why:** the "dashboard is live" banner prints `⚠`/`…`/box-drawing glyphs. On a **cp1252**
   stdout (a plain Windows console, or output piped to a file) `print()` raised

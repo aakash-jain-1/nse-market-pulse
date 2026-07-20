@@ -552,6 +552,9 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Endpoint budget in the UI** — a NSE request-budget table (`#nseBudget`) in the Log modal
+  renders `/api/health.nse.endpoints` (endpoint + hits/min & /hour, ranked) so "where our quota
+  goes" is visible in the dashboard, not just JSON. UI only; `test_index_renders` asserts it.
 - **Per-endpoint NSE request budget** — the pacer knew the total rate but not WHERE it went.
   `_record_endpoint()` (from both paced transports) tags every hit by endpoint path into a 1h
   sliding log; `endpoint_budget()` returns per-endpoint last-min/hour counts ranked by volume

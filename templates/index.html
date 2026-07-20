@@ -841,6 +841,14 @@
           in the list to its latest snapshot — a rough test of whether the signal
           was predictive. Needs data captured across time to be meaningful.
         </div>
+        <h4 style="margin:22px 0 10px;color:var(--muted)">NSE request budget — hits per endpoint</h4>
+        <div id="nseBudget"></div>
+        <div class="chart-note" style="margin-top:10px">
+          Where our NSE calls actually go over the last minute / hour (from the pacer's
+          per-endpoint log). Higher = more Akamai quota consumed — the heavy hitters are the
+          first place to trim if blocks recur. Per-symbol quotes/charts collapse into one row
+          per endpoint type; archive downloads show under their <code>nsearchives</code> host.
+        </div>
       </div>
     </div>
   </div>
@@ -4696,7 +4704,32 @@
         `<div class="metric"><div class="k">IV snapshots</div><div class="v">${st.ivSnapshots ?? 0} <span style="color:var(--muted);font-size:10px">(${st.ivSymbols ?? 0} syms)</span></div></div>`,
         errPart,
       ].join("");
+      renderNseBudget();
       await runBacktest();
+    }
+    // Per-endpoint NSE request budget (from /api/health.nse.endpoints) — shows WHERE our
+    // Akamai quota goes so trims are data-driven, not guesswork.
+    async function renderNseBudget() {
+      const el = document.getElementById("nseBudget");
+      if (!el) return;
+      try {
+        const h = await (await fetch("/api/health")).json();
+        const eps = (h.nse && h.nse.endpoints) || [];
+        if (!eps.length) {
+          el.innerHTML = `<div class="empty" style="padding:16px">No NSE calls logged yet.</div>`;
+          return;
+        }
+        const rows = eps.map(e =>
+          `<tr><td style="font-family:monospace;font-size:11px">${escapeHtml(e.endpoint)}</td>`
+          + `<td style="text-align:right">${e.lastMin}</td>`
+          + `<td style="text-align:right">${e.lastHour}</td></tr>`).join("");
+        el.innerHTML = `<table class="depth-tbl"><thead><tr>`
+          + `<th style="text-align:left">Endpoint</th>`
+          + `<th style="text-align:right">/min</th>`
+          + `<th style="text-align:right">/hour</th></tr></thead><tbody>${rows}</tbody></table>`;
+      } catch (e) {
+        el.innerHTML = `<div class="empty" style="padding:16px">Couldn't load the request budget.</div>`;
+      }
     }
     async function runBacktest() {
       const view = document.getElementById("logView").value;
