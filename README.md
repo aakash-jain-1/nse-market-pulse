@@ -908,6 +908,16 @@ this network… showing cached/EOD… auto-resuming in *m:ss*"), and `/api/quote
 transparently **falls back to the EOD bhavcopy close** (`stale:true`,
 `source:"eod-bhavcopy"`) so the stock modal keeps working while NSE is paused.
 
+**Block prevention (fewer needless hits).** Beyond recovery, the app trims NSE load
+proactively. Per-symbol quote/chart/candles are served **from the broker** (Angel)
+when connected — see [Live realtime data](#live-realtime-data-free-broker-feed) — so
+drilling into a stock no longer hits NSE. And the market-movers **auto-refresh is
+adaptive**: it **pauses when the tab is backgrounded** (resumes + refreshes on
+return), **pauses during a WAF cooldown** (waking as it clears), and **slows to ≥5
+min when the market is closed** (the lists are static off-hours). The only
+irreplaceable foreground NSE traffic left is the market-wide discovery lists
+themselves, and only while you're actually watching them during market hours.
+
 **Auto EOD refresh.** `eod_scheduler.py` runs **one paced, block-aware refresh**
 (bhavcopy backfill → deals → optional conviction digest) shortly after the 15:30
 close on trading days, so the EOD scanner / conviction board / backtests are fresh

@@ -548,6 +548,14 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Adaptive auto-refresh (throttle/pause the last foreground NSE hit)** — the 30s movers
+  refresh is the only foreground NSE call left (no broker offers market-wide movers/OI), so
+  instead of a blind `setInterval` it's now a self-scheduling `setTimeout` loop that **pauses
+  when the tab is backgrounded** (Page Visibility; resumes + refreshes on return), **pauses
+  during a WAF block** (wakes as the cooldown clears), and **slows to ≥5 min when the market
+  is closed** (`logger.marketHours` from `/api/health`). Frontend-only (`index.html`); no new
+  test function, but `test_health_reports_nse_block` now locks that `/api/health` exposes
+  `logger.marketHours`. Suite stays **753**; JS `node --check` clean.
 - **Live-tab chart seed + `/api/ohlc` served from the broker too** — finishes the broker-first
   migration. The Live tab still seeded its candles from NSE (`/api/live/seed`) and its 12s poll
   fallback used `/api/ohlc`, so opening the tab hit NSE even with Angel connected. Added

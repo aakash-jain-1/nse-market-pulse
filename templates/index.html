@@ -933,6 +933,7 @@
     let futAll = false;  // Futures tab: false = most-active feed, true = full F&O sweep
     let ocView = "oi";   // Option-chain grid: "oi" or "greeks"
     let timer = null;
+    let _marketOpen = true;  // server-authoritative (from /api/health); gates adaptive refresh
     let soundOn = false;
     // New-idea alerts (fire on ANY tab). Seeded silently on the first non-empty
     // poll so we never dump the existing backlog; only ideas appearing AFTER
@@ -4460,7 +4461,8 @@
         if (current === "futures") renderFutMomentum(data);
         else document.getElementById("futMomentum").style.display = "none";
         document.getElementById("updated").textContent =
-          "Updated " + new Date().toLocaleTimeString("en-IN");
+          "Updated " + new Date().toLocaleTimeString("en-IN") +
+          (!_marketOpen ? " · market closed (slow refresh)" : "");
         dot.style.background = "var(--green)";
       } catch (e) {
         wrap.innerHTML = `<div class="loading err">Failed to load: ${e.message}</div>`;
@@ -4468,15 +4470,50 @@
       }
     }
 
+    // Adaptive auto-refresh. The movers lists are the ONE remaining foreground NSE
+    // hit (no broker offers market-wide movers/OI), so instead of a blind fixed
+    // interval we throttle/pause it — cutting needless NSE (Akamai) load — when:
+    //   • the tab is backgrounded (Page Visibility) → pause; resume + refresh on return
+    //   • NSE is WAF-blocked (cooldown active)       → pause, then wake as it clears
+    //   • the market is closed                       → slow to ≥5 min (lists are static)
+    // A self-scheduling setTimeout (not setInterval) lets each tick re-plan the cadence.
+    const MKT_CLOSED_MIN_SEC = 300;   // off-hours refresh floor
+    function refreshBaseSec() {
+      const sel = document.getElementById("refreshSel");
+      return sel ? parseInt(sel.value, 10) : 0;
+    }
+    function refreshPaused() {
+      return document.hidden || Date.now() < _nseBlockUntil;
+    }
+    function scheduleRefresh() {
+      clearTimeout(timer);
+      timer = null;
+      const base = refreshBaseSec();
+      if (base <= 0) return;                        // user chose "Off"
+      if (document.hidden) return;                  // paused; visibilitychange resumes it
+      let delay;
+      if (Date.now() < _nseBlockUntil) {
+        delay = (_nseBlockUntil - Date.now()) + 1500;   // wake right as the block clears
+      } else if (!_marketOpen) {
+        delay = Math.max(base, MKT_CLOSED_MIN_SEC) * 1000;
+      } else {
+        delay = base * 1000;
+      }
+      timer = setTimeout(refreshTick, delay);
+    }
+    function refreshTick() {
+      timer = null;
+      if (!refreshPaused()) load();                 // skip the NSE hit while paused
+      scheduleRefresh();
+    }
     function setupRefresh() {
       const sel = document.getElementById("refreshSel");
-      const apply = () => {
-        if (timer) clearInterval(timer);
-        const s = parseInt(sel.value, 10);
-        if (s > 0) timer = setInterval(load, s * 1000);
-      };
-      sel.onchange = apply;
-      apply();
+      if (sel) sel.onchange = scheduleRefresh;
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) { clearTimeout(timer); timer = null; }
+        else { if (!refreshPaused()) load(); scheduleRefresh(); }
+      });
+      scheduleRefresh();
     }
 
     function exportCSV() {
@@ -5316,8 +5353,11 @@
         const h = await fetch("/api/health").then(r => r.json());
         const secs = (h.nse && h.nse.blockedForSec) || 0;
         _nseBlockUntil = secs > 0 ? Date.now() + secs * 1000 : 0;
+        if (h.logger && typeof h.logger.marketHours === "boolean")
+          _marketOpen = h.logger.marketHours;
       } catch (e) { /* leave the last known state */ }
       renderBlockBanner();
+      scheduleRefresh();   // re-plan the movers cadence when block / market state changes
     }
     setInterval(pollNseBlock, 45000);      // re-check the cooldown
     setInterval(renderBlockBanner, 1000);  // local 1s countdown tick

@@ -140,6 +140,9 @@ def test_health_reports_nse_block():
             st, j = _json("/api/health")
             assert st == 200 and j["nse"]["blockedForSec"] == 0
             assert "autoEod" in j and "enabled" in j["autoEod"]
+            # The dashboard's adaptive refresh reads logger.marketHours to throttle the
+            # movers poll off-hours — lock that contract here.
+            assert j["logger"]["marketHours"] is False
             nse.note_block("test")
             assert _json("/api/health")[1]["nse"]["blockedForSec"] > 0
         finally:

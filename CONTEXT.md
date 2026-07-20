@@ -440,6 +440,26 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-07-20 — Adaptive auto-refresh: throttle/pause the last foreground NSE hit (frontend; suite 753)
+- **Why:** after the broker-first migration, the 30s movers auto-refresh is the ONE
+  remaining foreground NSE hit (no broker offers market-wide movers/OI — can't move it
+  off NSE), so the win is to stop polling it *needlessly*. It used to fire a blind
+  `setInterval(load, 30s)` regardless of whether anyone was looking or NSE was even up.
+- **What (index.html only):** replaced the fixed interval with a self-scheduling
+  `setTimeout` loop (`scheduleRefresh`/`refreshTick`) that re-plans each cycle:
+  - **tab backgrounded** (Page Visibility) → pause entirely; resume + immediate refresh
+    on return (`visibilitychange`).
+  - **NSE WAF-blocked** (`_nseBlockUntil` from `/api/health`) → pause and wake ~1.5s
+    after the cooldown clears (polling NSE mid-block is pointless — server serves cached).
+  - **market closed** (`_marketOpen` from `/api/health` → `logger.marketHours`) → stretch
+    to ≥5 min (`MKT_CLOSED_MIN_SEC`); lists are static off-hours. Shows
+    "· market closed (slow refresh)" on the Updated line.
+  - `pollNseBlock()` now also reads `logger.marketHours` and re-plans the loop whenever
+    block/market state changes; the "Off" dropdown option still fully stops it.
+- **Tests:** frontend-only, so no new test *function*, but locked the contract the loop
+  depends on — `test_health_reports_nse_block` now asserts `/api/health` exposes
+  `logger.marketHours`. Suite stays **753**. JS `node --check` clean.
+
 ### 2026-07-20 — Live-tab chart seed + /api/ohlc served from the broker too (suite 750 → 753)
 - **Why:** finishing the broker-first migration. The detail modal already went broker-first
   (previous entry), but the **Live tab** still seeded its candlestick chart from NSE
