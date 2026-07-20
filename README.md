@@ -811,7 +811,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
 | `GET /api/iv/rank/<sym>` | IV rank/percentile from logged ATM-IV history |
 | `GET /api/alerts/status` · `POST /api/alerts/test` | Off-screen alert status (no secrets) · send a test Telegram/webhook message |
-| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture + `nse` pacer/WAF stats: `blockedForSec`, `blockCount`, `reqLastMin`, `concurrency`, `impersonate`) |
+| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture + `nse` pacer/WAF stats: `blockedForSec`, `blockCount`, `reqLastMin`, `concurrency`, `impersonate`, `impersonateMode`) |
 
 ---
 
@@ -847,7 +847,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 785 unit tests, 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
+├── test_*.py               # 791 unit tests, 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
@@ -923,13 +923,16 @@ Akamai's rate detector flags — into a steady, browser-like stream. Requests al
 and a small **header chip** shows the live NSE request rate vs the soft ceiling
 (green/amber/red) so you can see headroom before a block.
 
-**Optional: real Chrome TLS fingerprint (`curl_cffi`).** Pacing + headers fix the *rate*
-and the *headers*, but plain `requests` still presents a Python TLS/HTTP2 fingerprint
-(JA3/JA4) Akamai can flag on its own. Install the optional dep — `pip install curl_cffi` —
-and the shared session automatically impersonates a **real Chrome handshake** (paced through
-the same gate); it's off-by-nothing when absent. Toggle/select the profile with
-`NSE_TLS_IMPERSONATE` (default `chrome124`; `off` to disable); `pacer_stats().impersonate`
-shows what's active. This is a last-resort lever — try it only if blocks persist after pacing.
+**Optional: real Chrome TLS fingerprint (`curl_cffi`) with auto-failover.** Pacing + headers
+fix the *rate* and the *headers*, but plain `requests` still presents a Python TLS/HTTP2
+fingerprint (JA3/JA4) Akamai can flag on its own. Install the optional dep —
+`pip install curl_cffi` — and the shared session can impersonate a **real Chrome handshake**
+(paced through the same gate); it's a no-op when the dep is absent. Policy is set by
+`NSE_TLS_IMPERSONATE`: **`auto` (default)** runs the light plain-requests transport normally
+and **only escalates to impersonation after repeat WAF blocks** (then reverts once the block
+ladder goes cold — self-healing, no restart); a literal profile like `chrome124` forces it
+always-on; `off` disables it. `pacer_stats()` shows `impersonate` (what's in effect now) and
+`impersonateMode` (the policy). Verified end-to-end against live NSE.
 
 **Block prevention (fewer needless hits).** Beyond recovery, the app trims NSE load
 proactively. Per-symbol quote/chart/candles are served **from the broker** (Angel)

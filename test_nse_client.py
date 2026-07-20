@@ -341,9 +341,13 @@ def test_impersonate_profile_none_without_dep():
             os.environ["NSE_TLS_IMPERSONATE"] = saved[1]
 
 
-def test_impersonate_profile_defaults_to_chrome_when_enabled():
-    with _fake_cffi(profile=None):        # dep present, env unset → built-in default
-        assert nse._impersonate_profile() == "chrome124"
+def test_impersonate_profile_default_is_auto_off_until_blocks():
+    """Default policy is `auto`: dep present but no blocks yet → stay on plain requests
+    (impersonation only escalates on repeat WAF blocks). _fresh_block guarantees a clean
+    ladder regardless of what ran before."""
+    with _fake_cffi(profile=None), _fresh_block(_Clock()):   # env unset → 'auto', no blocks
+        assert nse._impersonate_mode() == "auto"
+        assert nse._impersonate_profile() is None
 
 
 def test_impersonate_profile_env_toggle():
@@ -359,6 +363,89 @@ def test_pacer_stats_exposes_impersonate_field():
     assert "impersonate" in nse.pacer_stats()
     with _fake_cffi(profile="chrome124"):
         assert nse.pacer_stats()["impersonate"] == "chrome124"
+
+
+def test_pacer_stats_reports_impersonate_mode():
+    assert "impersonateMode" in nse.pacer_stats()          # stable shape
+    with _fake_cffi(profile="auto"), _fresh_block(_Clock()):   # clean ladder → not armed
+        st = nse.pacer_stats()
+        assert st["impersonateMode"] == "auto"
+        assert st["impersonate"] is None                   # policy set, not yet in effect
+    with _fake_cffi(profile="chrome124"):
+        assert nse.pacer_stats()["impersonateMode"] == "chrome124"
+    with _fake_cffi(profile="off"):
+        assert nse.pacer_stats()["impersonateMode"] == "off"
+
+
+# --- Phase 2: auto-failover (impersonate only after repeat WAF blocks) ------
+
+def _arm_blocks(clk, n):
+    """Drive n consecutive FRESH WAF blocks on the fake clock so _block_count climbs to
+    n — advancing just past each escalating cooldown but staying inside the reset gap."""
+    for _ in range(n):
+        if nse._blocked_until > clk.t:
+            clk.t = nse._blocked_until + 1.0     # jump past the active cooldown
+        nse.note_block("t")
+
+
+def test_auto_failover_arms_after_threshold_blocks():
+    clk = _Clock(t=2000.0)
+    with _fake_cffi(profile="auto"), _fresh_block(clk):
+        assert nse._impersonate_profile() is None                 # cold → plain requests
+        _arm_blocks(clk, nse._AUTO_FAILOVER_AT - 1)
+        assert nse._impersonate_profile() is None                 # below threshold
+        _arm_blocks(clk, 1)                                       # crosses the threshold
+        assert nse._block_count >= nse._AUTO_FAILOVER_AT
+        assert nse._impersonate_profile() == nse._AUTO_PROFILE    # now impersonating
+
+
+def test_auto_failover_reverts_after_clean_window():
+    clk = _Clock(t=2000.0)
+    with _fake_cffi(profile="auto"), _fresh_block(clk):
+        _arm_blocks(clk, nse._AUTO_FAILOVER_AT)
+        assert nse._impersonate_profile() == nse._AUTO_PROFILE
+        # advance well past the ladder's reset gap → disarms itself (no manual toggle)
+        clk.t = nse._last_block_ts + nse._prev_cooldown + nse._BLOCK_COOLDOWN + 1
+        assert nse._auto_failover_armed() is False
+        assert nse._impersonate_profile() is None
+
+
+def test_auto_mode_off_never_impersonates_despite_blocks():
+    clk = _Clock(t=2000.0)
+    with _fake_cffi(profile="off"), _fresh_block(clk):
+        _arm_blocks(clk, nse._AUTO_FAILOVER_AT + 1)
+        assert nse._impersonate_profile() is None
+
+
+def test_explicit_profile_impersonates_regardless_of_blocks():
+    clk = _Clock(t=2000.0)
+    with _fake_cffi(profile="chrome124"), _fresh_block(clk):
+        assert nse._impersonate_profile() == "chrome124"          # armed with zero blocks
+
+
+def test_build_session_auto_failover_switches_transport():
+    """auto mode: _build_session serves plain requests until repeat blocks, then the
+    impersonated transport — the whole point of self-healing failover."""
+    hits = []
+
+    def fake_send(self, request, **kw):
+        hits.append(request.url)
+        r = requests.models.Response()
+        r.status_code = 200
+        r._content = b"{}"
+        r.url = request.url
+        return r
+
+    saved_send = requests.Session.send
+    requests.Session.send = fake_send
+    clk = _Clock(t=2000.0)
+    try:
+        with _fake_cffi(profile="auto"), _fresh_block(clk):
+            assert isinstance(nse._build_session(), nse._PacedSession)   # cold → requests
+            _arm_blocks(clk, nse._AUTO_FAILOVER_AT)
+            assert isinstance(nse._build_session(), _FakeCffiSession)    # armed → impersonate
+    finally:
+        requests.Session.send = saved_send
 
 
 def test_build_session_prefers_cffi_when_enabled():

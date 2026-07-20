@@ -61,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 785 unit tests across 35 suites (see below)
+├── test_*.py          # 791 unit tests across 35 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -130,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 785 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 791 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -145,8 +145,10 @@ RCE surface on the LAN) — set `FLASK_DEBUG=1` only for local dev if you want t
 traceback console. Other env knobs: `HOST=127.0.0.1` (loopback-only),
 `FLASK_RELOAD=0` (disable auto-restart), `NSE_TOKEN=<secret>` (require a token on
 every request — open the app once with `?token=<secret>` to set the cookie).
-`NSE_TLS_IMPERSONATE` selects the optional `curl_cffi` Chrome-impersonation profile
-(default `chrome124`; `off` disables it — only used when `curl_cffi` is installed).
+`NSE_TLS_IMPERSONATE` sets the optional `curl_cffi` impersonation policy (default
+**`auto`** = impersonate only after repeat WAF blocks then revert; a literal profile
+like `chrome124` = always; `off` = never — only used when `curl_cffi` is installed).
+`NSE_TLS_AUTO_AT` (default 2) is the block count that arms auto-failover.
 Health/liveness is at `GET /api/health`. See `AUDIT.md` for the full posture.
 
 ### Phone / LAN access
@@ -550,15 +552,22 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Auto-failover to impersonation + live-verified curl_cffi** — turned Phase 2 from a manual
+  env toggle into self-healing. `NSE_TLS_IMPERSONATE` gained an **`auto` mode (now default)**:
+  run the light pure-requests transport normally and only escalate to the curl_cffi Chrome
+  handshake once the WAF ladder crosses `_AUTO_FAILOVER_AT` (env `NSE_TLS_AUTO_AT`, default 2)
+  consecutive blocks (`_auto_failover_armed()`), then revert automatically once the ladder goes
+  cold (`_block_ladder_expired()`) — no restart. `pacer_stats()` adds `impersonateMode` (policy)
+  next to `impersonate` (profile in effect now). First **live-verified** the whole path against
+  NSE with `curl_cffi 0.15.0` installed (real Chrome handshake → 20 live gainers, not blocked).
+  Tests **+6** (`test_nse_client.py`, 19 → 25); suite **785 → 791**.
 - **Phase 2: optional curl_cffi TLS-fingerprint impersonation** — the pacer + headers fix the
   *rate* and *headers*, but plain `requests` still hands Akamai a Python TLS/HTTP2 fingerprint
   (JA3/JA4) it can flag regardless. Added an **optional** `curl_cffi` import to `nse_client`:
-  when installed and `NSE_TLS_IMPERSONATE` isn't `off`, `_build_session()` returns a
-  **`_PacedCffiSession`** (default profile `chrome124`) that presents a real Chrome handshake,
+  `_build_session()` can return a **`_PacedCffiSession`** that presents a real Chrome handshake,
   paced through the **same** `_pace()`/`_NSE_GATE` gate; absent/disabled → transparent fallback
   to the pure-requests `_PacedSession` (curl_cffi responses are drop-in, so `_fetch`/`nse_quote`/
-  `bhavcopy` are untouched). `pacer_stats().impersonate` surfaces the active profile under
-  `/api/health.nse`. Enable with `pip install curl_cffi`. Tests **+7** (`test_nse_client.py`);
+  `bhavcopy` are untouched). Enable with `pip install curl_cffi`. Tests **+7** (`test_nse_client.py`);
   suite **778 → 785**.
 - **Trim NSE load at the source** — complements the pacer with fewer *total* market-hours
   hits. `snapshot_logger.INTERVAL` **60 → 90s** (env `NSE_LOG_INTERVAL`, floor 30; IV/context

@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 785 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 791 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -132,18 +132,25 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   same shape as `angel_feed._candle_throttle`). Callers need no changes. Turns the burst
   into a steady, browser-like stream; foreground UX barely changes (movers = ~7 endpoints,
   modal/Live are broker-first) since the heavy fan-outs are background.
-- **Optional TLS-fingerprint impersonation (Phase 2, `curl_cffi`)**: the pacer + fuller
-  headers smooth the *rate* and dress up the *headers*, but plain `requests` still presents
-  a Python TLS/HTTP2 fingerprint (JA3/JA4) Akamai can flag as "not a browser" regardless of
-  pacing. When the **optional** `curl_cffi` dep is installed **and** `NSE_TLS_IMPERSONATE`
-  isn't `off/none/0`, `_build_session()` returns a **`_PacedCffiSession(_cffi.Session)`**
-  (default profile `chrome124`) that presents a **real Chrome handshake** — paced through the
-  **same** `_pace()`/`_NSE_GATE` gate (via `request()` instead of `send()`) so burst-smoothing
-  still applies. It's fully transparent: `curl_cffi` responses expose the same
-  `.get/.json/.status_code/.text/.raise_for_status` the callers use, so `_fetch`/`nse_quote`/
-  `bhavcopy` are unchanged. If the dep is absent or disabled it **silently falls back** to the
-  pure-requests `_PacedSession` — no behavior change without it. `pacer_stats().impersonate`
-  reports the active profile (or `null`). Enable with `pip install curl_cffi`.
+- **Optional TLS-fingerprint impersonation + auto-failover (Phase 2, `curl_cffi`)**: the
+  pacer + fuller headers smooth the *rate* and dress up the *headers*, but plain `requests`
+  still presents a Python TLS/HTTP2 fingerprint (JA3/JA4) Akamai can flag as "not a browser"
+  regardless of pacing. When the **optional** `curl_cffi` dep is installed, `_build_session()`
+  can return a **`_PacedCffiSession(_cffi.Session)`** that presents a **real Chrome handshake**,
+  paced through the **same** `_pace()`/`_NSE_GATE` gate (via `request()` instead of `send()`)
+  so burst-smoothing still applies. **Policy** is `NSE_TLS_IMPERSONATE`:
+  `off/none/0` = never; a literal profile (`chrome124`) = always; **`auto` (DEFAULT)** =
+  **self-healing failover** — run the light pure-requests transport normally and only escalate
+  to impersonation once the WAF ladder crosses `_AUTO_FAILOVER_AT` (env `NSE_TLS_AUTO_AT`,
+  default **2**) consecutive blocks (`_auto_failover_armed()`), then **revert automatically**
+  once the ladder goes cold (`_block_ladder_expired()`), no restart/manual toggle. Because
+  `_impersonate_profile()` is read at each session build and sessions rebuild after the
+  cooldown/TTL, the switch happens on its own. Fully transparent: `curl_cffi` responses expose
+  the same `.get/.json/.status_code/.text/.raise_for_status`, so `_fetch`/`nse_quote`/
+  `bhavcopy` are unchanged; a bad profile / build error falls back to `_PacedSession`. If the
+  dep is absent it's a no-op. `pacer_stats()` exposes **`impersonate`** (profile in effect NOW,
+  `null` until armed) and **`impersonateMode`** (the policy). Enable with `pip install curl_cffi`.
+  **Live-verified** against NSE end-to-end (real Chrome handshake returned live lists).
 - **Akamai/WAF block backoff (`nse_client.blocked_for`/`note_block`/`is_blocked_response`)**:
   NSE fronts everything with Akamai, which returns **HTTP 403 "Access Denied"
   (edgesuite.net, "Reference #…")** to EVERY request once our IP looks bot-like.
@@ -169,7 +176,8 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (git
   block. All live scanner lists already serve their stale `_fetch` cache during a block.
   `/api/health.nse` = **`pacer_stats()`**: `blockedForSec`, `blockCount` (repeat blocks →
   the banner adds a "backing off longer" note), `cooldownSec`, `reqLastMin` (pacer window),
-  `concurrency`/`minGap`/`softRpm`/`impersonate` (curl_cffi profile or null).
+  `concurrency`/`minGap`/`softRpm`/`impersonate` (curl_cffi profile in effect, or null)/
+  `impersonateMode` (the configured policy: auto/<profile>/off/null).
   **Header hardening:** `HEADERS` now sends modern-Chrome
   client hints (`sec-ch-ua*`, `Sec-Fetch-*`, `Accept-Encoding` — brotli only if decodable)
   matching the UA major, and the two cookie warm-ups send navigation-shaped `_NAV_HEADERS`
@@ -328,7 +336,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **785 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **791 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -336,7 +344,8 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   `test_client.py` + `test_client_fetchers.py` (normalizers + raw-payload
   parsers),   `test_nse_client.py` (global request pacer: min-gap/soft-RPM/concurrency
   + escalating WAF cooldown + browser headers + `pacer_stats` + optional curl_cffi
-  impersonation: env toggle/fallback/build-session transport pick), `test_quote.py`
+  impersonation: env toggle/fallback/build-session transport pick + auto-failover
+  arm/revert on the block ladder), `test_quote.py`
   + `test_quote_more.py`, `test_paper.py`,
   `test_strategies.py`, `test_bhavcopy.py` (EOD UDiFF + sec_bhavdata_full delivery
   parsers + fetch walk-back + price/lot fallback + delivery-merge wiring),
@@ -483,6 +492,28 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Auto-failover to impersonation + live-verified curl_cffi (suite 785 → 791)
+- **Why:** Phase 2 landed impersonation but as a manual env toggle (default was always-on
+  `chrome124`). Better: run the *light* pure-requests transport normally and only pay for the
+  curl_cffi handshake **when the WAF actually starts blocking us repeatedly** — self-healing,
+  not a switch to remember.
+- **Live-verify (first):** installed `curl_cffi 0.15.0` and hit NSE end-to-end under a real
+  Chrome handshake — `get_session()` built a `_PacedCffiSession`, warm-ups + one live list
+  returned **20 real gainers** (not blocked), `pacer_stats().impersonate == chrome124`. The
+  structural test now exercises the REAL override, and the full suite stays green with the dep
+  installed.
+- **What (`nse_client.py`):** `NSE_TLS_IMPERSONATE` gains an **`auto` mode, now the default**:
+  `_impersonate_profile()` returns a profile only when `_auto_failover_armed()` — i.e.
+  `_block_count >= _AUTO_FAILOVER_AT` (env `NSE_TLS_AUTO_AT`, default 2) and the ladder isn't
+  cold (`_block_ladder_expired()`, factored out of `note_block`). It disarms itself once the
+  ladder expires, so we drop back to plain requests without a restart. `off`/literal-profile
+  policies are unchanged (never / always). `pacer_stats()` adds **`impersonateMode`** (policy)
+  alongside `impersonate` (profile in effect now). Since the session rebuilds after the
+  cooldown/TTL, the transport switch is automatic.
+- **Tests +6** (`test_nse_client.py`, 19 → 25): failover arms past threshold / reverts after a
+  clean window / stays off when disabled / literal profile ignores blocks / `_build_session`
+  flips transport / `impersonateMode` in stats. Suite **785 → 791**, green, lint clean.
 
 ### 2026-07-20 — Phase 2: optional curl_cffi TLS-fingerprint impersonation (suite 778 → 785)
 - **Why:** even with the pacer smoothing bursts and fuller Chrome headers, plain `requests`

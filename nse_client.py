@@ -36,15 +36,34 @@ log = logging.getLogger("nse_client")
 
 
 def _impersonate_profile():
-    """The curl_cffi browser profile to impersonate, or None when unavailable/disabled.
-    Read at session-build time so `NSE_TLS_IMPERSONATE` can flip it without a restart
-    in tests. Values like off/0/none disable it (→ pure-requests transport)."""
+    """Which curl_cffi Chrome profile the NEXT session build should impersonate, or
+    None for the pure-requests transport. Read live at build time so the policy can
+    change without a restart. Policy from `NSE_TLS_IMPERSONATE`:
+      • off/none/0/false/no/""   → never impersonate
+      • auto (DEFAULT)           → run plain requests normally, and only impersonate
+                                   after auto-failover trips (repeat WAF blocks),
+                                   reverting once the block ladder goes cold
+      • <profile> e.g. chrome124 → always impersonate with that profile
+    Always None when curl_cffi isn't installed (so the app is unchanged without it)."""
     if _cffi is None:
         return None
-    p = (os.getenv("NSE_TLS_IMPERSONATE", "chrome124") or "").strip()
-    if p.lower() in ("", "0", "off", "none", "false", "no"):
+    mode = (os.getenv("NSE_TLS_IMPERSONATE", "auto") or "").strip()
+    low = mode.lower()
+    if low in ("", "0", "off", "none", "false", "no"):
         return None
-    return p
+    if low == "auto":
+        return _AUTO_PROFILE if _auto_failover_armed() else None
+    return mode
+
+
+def _impersonate_mode():
+    """The configured impersonation POLICY for /api/health: 'auto', a literal profile,
+    'off', or None when curl_cffi isn't installed. (vs `impersonate`, which is the
+    profile actually in effect right now — None until auto-failover trips.)"""
+    if _cffi is None:
+        return None
+    m = (os.getenv("NSE_TLS_IMPERSONATE", "auto") or "").strip().lower()
+    return "off" if m in ("", "0", "off", "none", "false", "no") else m
 
 BASE = "https://www.nseindia.com"
 
@@ -126,6 +145,17 @@ _prev_cooldown = 0.0    # length of the previous cooldown (for the reset gap)
 # Response bodies/status that mean "the edge is blocking us" (not a real 404 miss).
 _BLOCK_MARKERS = ("access denied", "edgesuite.net", "reference #", "akamai")
 
+# Auto-failover to TLS impersonation (Phase 2). In the default `auto` mode we run the
+# light pure-requests transport normally and only escalate to curl_cffi's real-Chrome
+# handshake once the WAF has blocked us REPEATEDLY (pacing + headers clearly weren't
+# enough), then fall back to requests once the block ladder goes cold. These gate that
+# switch; it only ever engages when curl_cffi is actually installed.
+_AUTO_PROFILE = "chrome124"        # curl_cffi profile used when auto-failover trips
+try:                               # consecutive fresh blocks before we impersonate
+    _AUTO_FAILOVER_AT = max(1, int(os.getenv("NSE_TLS_AUTO_AT", "2")))
+except ValueError:
+    _AUTO_FAILOVER_AT = 2
+
 
 def blocked_for():
     """Seconds remaining on the WAF-block cooldown (0.0 when clear). Callers should
@@ -142,6 +172,21 @@ def _cooldown_for(count):
     return min(_BLOCK_COOLDOWN * (2 ** (count - 1)), _BLOCK_MAX)
 
 
+def _block_ladder_expired(now=None):
+    """Whether enough clean time has passed since the last block that the escalation
+    ladder is stale — its whole cooldown elapsed + a base-length grace with no new
+    block. Used both to reset the ladder and to disarm auto-failover."""
+    now = now if now is not None else time.time()
+    return (now - _last_block_ts) > (_prev_cooldown + _BLOCK_COOLDOWN)
+
+
+def _auto_failover_armed(now=None):
+    """True when repeat WAF blocks have escalated to/over the auto-failover threshold
+    and the ladder hasn't gone cold — i.e. `auto` mode should impersonate right now.
+    Reverts to False on its own once the ladder expires (no restart / manual toggle)."""
+    return _block_count >= _AUTO_FAILOVER_AT and not _block_ladder_expired(now)
+
+
 def note_block(source="nse"):
     """Record that NSE's edge is blocking us — start/extend the cooldown. Logs once
     per fresh block so logs don't flood. Consecutive fresh blocks escalate the
@@ -153,7 +198,7 @@ def note_block(source="nse"):
         # Reset the escalation ladder only after a clean gap since the last block
         # cleared (its whole cooldown elapsed + a base-length grace). Otherwise the
         # edge is still punishing us, so keep climbing.
-        if now - _last_block_ts > _prev_cooldown + _BLOCK_COOLDOWN:
+        if _block_ladder_expired(now):
             _block_count = 0
         _block_count += 1
         cd = _cooldown_for(_block_count)
@@ -274,7 +319,8 @@ def pacer_stats():
         "concurrency": _NSE_MAX_CONCURRENCY,
         "minGap": _NSE_MIN_GAP,
         "softRpm": _NSE_SOFT_RPM,
-        "impersonate": _impersonate_profile(),   # curl_cffi profile or None (Phase 2)
+        "impersonate": _impersonate_profile(),   # profile in effect NOW (None until armed)
+        "impersonateMode": _impersonate_mode(),  # policy: auto/<profile>/off/None (Phase 2)
     }
 
 
@@ -289,7 +335,8 @@ def _build_cffi_session(profile):
     s.get(BASE, timeout=15)
     s.get(BASE + "/market-data/live-equity-market", timeout=15,
           headers={"Referer": BASE + "/"})
-    log.info("NSE session using curl_cffi TLS impersonation (%s)", profile)
+    log.info("NSE session using curl_cffi TLS impersonation (%s, mode=%s)",
+             profile, _impersonate_mode())
     return s
 
 
