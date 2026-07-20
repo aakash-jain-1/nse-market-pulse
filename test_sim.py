@@ -216,6 +216,19 @@ def test_scorecard_empty():
     assert sc["totalR"] == 0.0
 
 
+def test_request_stop_halts_intrabar_fetch():
+    # Graceful shutdown: with the stop flag set, the minute-candle fetch must bail
+    # (return None) BEFORE opening a ThreadPoolExecutor, so it can't race the
+    # interpreter teardown. Cleared afterwards so other tests still fetch.
+    sim.request_stop()
+    try:
+        open_trades = [{"symbol": "X", "status": "OPEN",
+                        "openedAt": "2026-07-20T09:20:00"}]
+        assert sim._intrabar_fetch(open_trades) is None
+    finally:
+        sim._STOPPING.clear()
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

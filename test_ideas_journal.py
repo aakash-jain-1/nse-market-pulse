@@ -189,6 +189,19 @@ def test_recent_window_and_rating_filter():
         assert "LOWRATE" not in syms2 and "FRESH" in syms2
 
 
+def test_request_stop_gates_intrabar_due():
+    # Graceful shutdown: request_stop() must short-circuit _intrabar_due so no new
+    # resolver thread is spawned into an interpreter that's finalizing.
+    with _patch(ij, "_last_intrabar", 0.0), _patch(ij, "_market_ish", lambda: True):
+        assert ij._intrabar_due() is True          # due when it's time + market-ish
+        ij.request_stop()
+        try:
+            assert ij._intrabar_due() is False     # stop flag short-circuits it
+        finally:
+            ij._STOPPING.clear()                    # don't leak the flag to other tests
+        assert ij._intrabar_due() is True          # cleared → due again
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

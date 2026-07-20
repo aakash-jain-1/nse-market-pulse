@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 776 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 778 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -315,7 +315,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **776 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **778 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -469,6 +469,23 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Graceful shutdown: silence Ctrl+C daemon/server-thread noise (suite 776 → 778)
+- **Why:** on Ctrl+C two benign tracebacks printed. (1) A daemon intrabar resolver
+  (`ideas_journal.resolve_outcomes_intrabar`, `sim._intrabar_fetch`) could enter a
+  `ThreadPoolExecutor` just as the interpreter began finalizing →
+  `RuntimeError: cannot schedule new futures after interpreter shutdown`. (2) On Windows,
+  `select()` on the just-closed dev-server socket raises `OSError(WinError 10038)`. Neither
+  is a real failure (no data loss; idempotent, resumes next launch); daemon threads simply
+  race the teardown.
+- **What:** a `_STOPPING` `threading.Event` + `request_stop()` in `ideas_journal` and `sim` —
+  `_intrabar_due()` / `_intrabar_fetch()` bail before spawning a pool, and the executor block
+  is wrapped in `try/except RuntimeError`. `app.py` (serving process) registers an `atexit`
+  hook that flips both flags + stops the snapshot logger, installs a `threading.excepthook`
+  that drops ONLY those two shutdown exceptions (delegating everything else so real errors
+  still surface), and wraps `app.run` to print a clean "Shutting down…" on KeyboardInterrupt.
+- **Tests +2:** `request_stop()` gates `_intrabar_due` (ideas_journal) and halts
+  `_intrabar_fetch` before the pool (sim). Suite **776 → 778**, full suite green, lint clean.
 
 ### 2026-07-20 — Header NSE-rate chip (pacer headroom visible) (suite 776, UI only)
 - **Why:** the pacer/blocks were only observable via `/api/health` JSON. Surface the live

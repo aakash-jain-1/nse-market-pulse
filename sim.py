@@ -335,6 +335,15 @@ def _refresh_trade(state, t, px=_UNSET):
 _last_intrabar = 0.0
 INTRABAR_INTERVAL = 180   # seconds between minute-candle catch-up sweeps
 
+# Set on app shutdown so the intrabar fetch bails instead of racing the interpreter
+# teardown into a ThreadPoolExecutor. See app.py's shutdown wiring.
+_STOPPING = threading.Event()
+
+
+def request_stop():
+    """Signal background passes to stop spawning/using thread pools (app shutdown)."""
+    _STOPPING.set()
+
 
 def _baked_epoch(ts_str):
     dt = datetime.fromisoformat(str(ts_str).replace(" ", "T"))
@@ -357,7 +366,7 @@ def _intrabar_fetch(open_trades):
     """
     global _last_intrabar
     now = time.time()
-    if now - _last_intrabar < INTRABAR_INTERVAL:
+    if _STOPPING.is_set() or now - _last_intrabar < INTRABAR_INTERVAL:
         return None
     ot = [t for t in open_trades if t["status"] == "OPEN"]
     if not ot:
@@ -385,8 +394,11 @@ def _intrabar_fetch(open_trades):
         except Exception:
             return s, []
 
-    with cf.ThreadPoolExecutor(max_workers=6) as ex:
-        return dict(ex.map(_one, sorted(first)))
+    try:
+        with cf.ThreadPoolExecutor(max_workers=6) as ex:
+            return dict(ex.map(_one, sorted(first)))
+    except RuntimeError:
+        return None   # interpreter shutting down — pool refuses new work; skip sweep
 
 
 def _intrabar_apply(state, open_trades, candles):

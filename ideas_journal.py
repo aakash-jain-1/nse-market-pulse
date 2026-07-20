@@ -47,6 +47,16 @@ _last_intrabar = 0.0
 LEGACY_FILE = os.path.join(os.path.dirname(__file__), "ideas_journal.json")
 
 _lock = threading.RLock()
+
+# Set on app shutdown so the daemon resolver bails instead of racing the interpreter
+# teardown into a ThreadPoolExecutor (which would raise "cannot schedule new futures
+# after interpreter shutdown"). See app.py's shutdown wiring.
+_STOPPING = threading.Event()
+
+
+def request_stop():
+    """Signal background passes to stop spawning/using thread pools (app shutdown)."""
+    _STOPPING.set()
 _migrated = False
 
 
@@ -148,7 +158,9 @@ def _intrabar_due():
     that then loses the authoritative lock-guarded throttle inside the resolver,
     or skips a spawn the next poll picks up 12s later.
     """
-    return (time.time() - _last_intrabar) >= INTRABAR_INTERVAL and _market_ish()
+    return (not _STOPPING.is_set()
+            and (time.time() - _last_intrabar) >= INTRABAR_INTERVAL
+            and _market_ish())
 
 
 def resolve_outcomes_intrabar():
@@ -199,8 +211,13 @@ def resolve_outcomes_intrabar():
         except Exception:
             return s, []
 
-    with cf.ThreadPoolExecutor(max_workers=6) as ex:
-        candles = dict(ex.map(_one, sorted(first)))
+    if _STOPPING.is_set():
+        return
+    try:
+        with cf.ThreadPoolExecutor(max_workers=6) as ex:
+            candles = dict(ex.map(_one, sorted(first)))
+    except RuntimeError:
+        return   # interpreter shutting down — pool refuses new work; resume next run
 
     verdicts = {}   # (symbol,direction) -> (outcome, outcomeAt, outcomePct)
     for r in pending:

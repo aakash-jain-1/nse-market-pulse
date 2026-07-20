@@ -1136,6 +1136,42 @@ if __name__ == "__main__":
         # persisted state, so it never waits for the user to flip the toggle.
         import sim
         sim.set_auto(True)
+
+        # Clean Ctrl+C: quiet the two benign shutdown-time races from daemon/server
+        # threads. (1) A daemon intrabar resolver can enter a ThreadPoolExecutor just
+        # as the interpreter starts finalizing → RuntimeError("cannot schedule new
+        # futures after interpreter shutdown"). (2) On Windows, select() on the
+        # just-closed dev-server socket raises OSError(WinError 10038). Neither is a
+        # real failure. We flip a stop flag at exit so the resolvers bail BEFORE
+        # starting a pool, and drop just those two in the thread excepthook (delegating
+        # everything else so genuine errors still surface).
+        import atexit as _atexit
+        import threading as _threading
+        _prev_excepthook = _threading.excepthook
+
+        def _quiet_shutdown_excepthook(args):
+            e = args.exc_value
+            if isinstance(e, RuntimeError) and "interpreter shutdown" in str(e):
+                return
+            if isinstance(e, OSError) and getattr(e, "winerror", None) == 10038:
+                return
+            _prev_excepthook(args)
+
+        _threading.excepthook = _quiet_shutdown_excepthook
+
+        def _graceful_stop():
+            import ideas_journal as _ij
+            for m in (sim, _ij):
+                try:
+                    m.request_stop()
+                except Exception:
+                    pass
+            try:
+                snaplog.stop()
+            except Exception:
+                pass
+
+        _atexit.register(_graceful_stop)
         snaplog.start()
         # Prune the reproducible time-series once per startup so market.db stays
         # bounded (AUDIT.md M6). Durable ledgers + the EOD cache are kept. Daemon
@@ -1213,5 +1249,8 @@ if __name__ == "__main__":
     # doesn't block the dashboard's auto-refresh polling. The interactive
     # debugger stays OFF unless FLASK_DEBUG=1 (AUDIT.md H1); the reloader is
     # independent so .py edits still auto-restart during development.
-    app.run(host=HOST, port=PORT, threaded=True,
-            debug=DEBUG, use_reloader=RELOAD, use_debugger=DEBUG)
+    try:
+        app.run(host=HOST, port=PORT, threaded=True,
+                debug=DEBUG, use_reloader=RELOAD, use_debugger=DEBUG)
+    except KeyboardInterrupt:
+        print("\nShutting down NSE Market Pulse…")
