@@ -61,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 730 unit tests across 34 suites (see below)
+├── test_*.py          # 735 unit tests across 34 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -81,7 +81,7 @@ NSE/
 │   ├── test_app.py (middleware) / test_app_routes.py (every endpoint via test client)
 │   └── test_db.py / test_logger.py / test_feeds.py / test_notify.py / test_fetch_cache.py
 ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
-├── notify.py          # Off-screen alerts (Telegram/webhook) — rides the snapshot logger, opt-in
+├── notify.py          # Off-screen alerts (Telegram/webhook) — rides the snapshot logger, opt-in; EOD digest carries a calibration-sourced track-record footer (does stacking pay?)
 ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context + alerts) → SQLite
 ├── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
 ├── nse_demand.py      # Standalone CLI scanner (original, still works)
@@ -130,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 730 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 735 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -548,6 +548,13 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **📊 Digest trust footer** — the off-screen EOD digest (`notify.send_digest`) listed picks
+  but gave no reason to trust them; this appends the realized track record from the
+  conviction calibration. `notify._fmt_trackrecord()` (pure) → `📊 Track record (30d, N
+  resolved): 2✓ 44% · 3✓ 58% · 4✓ 71% · overall 57%`. **Gated**: hidden until ≥8 resolved
+  ideas, a tier shown only with ≥3 resolved. `send_digest()` computes it best-effort
+  (`report(days=30)`), appends before the disclaimer, and never lets a calibration hiccup
+  block the digest. Tests **+5**; suite **730 → 735**.
 - **🔄 Rollover → Conviction pillar** — made the rollover signal ACTIONABLE inside the
   board (it was a standalone tab). `rollover.rank_map()` returns the market-wide
   `{SYMBOL: metrics + cross-sectional rolloverRank/carrying/shedding}`, ranked over the

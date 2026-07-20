@@ -92,7 +92,7 @@ conviction_calibration.py  Does confirmation-stacking pay? Scores realized TARGE
 rollover.py          Futures rollover tracker off the FO bhavcopy — near-vs-next month rollover% / roll-cost (contango·backwardation) / basis / net-OI state, cross-sectionally ranked; board() + rank_map() (the market-wide {sym:metrics} the Conviction board folds in as a pillar); reuses eod_options' cached FO text (off-hours)
 angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default)
 dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
-notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger
+notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger; EOD digest carries a calibration-sourced track-record footer (does stacking pay?)
 paper.py             Paper-trading engine (equity + long/short options + long/short futures, margin-based; JSON-persisted)
 strategies.py        Strategy library (17 generators) + market-regime detector
 sim.py               Multi-strategy forward-tester (per-strategy sims + daily rollup)
@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 730 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 735 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -287,7 +287,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **730 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **735 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -439,6 +439,20 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Digest trust footer (calibration → off-screen alerts, suite 730 → 735)
+- **Why:** the EOD Telegram/webhook digest listed picks but gave no reason to trust them.
+  We already score whether confirmation-stacking pays (`conviction_calibration`) — this
+  surfaces that realized track record right in the alert you actually see.
+- **What:** `notify._fmt_trackrecord(rep)` (pure) turns a calibration report into a compact
+  footer — overall win rate + per-confirmation-tier win rate over RESOLVED ideas, e.g.
+  `📊 Track record (30d, 42 resolved): 2✓ 44% · 3✓ 58% · 4✓ 71% · overall 57%`. It's
+  **gated**: hidden entirely until ≥8 resolved ideas, and a tier is listed only with ≥3
+  resolved (so a thin sample can't mislead). `send_digest()` computes it best-effort
+  (`report(days=30)`) and appends it before the disclaimer; a calibration hiccup never
+  blocks the digest.
+- **Tests +5** (footer tiers/gate/overall; thin/empty → ""; digest appends before
+  disclaimer; `send_digest` includes it; survives a calibration error). Suite **730 → 735**.
 
 ### 2026-07-20 — Rollover fused into the Conviction board (pillar, suite 723 → 730)
 - **Why:** the rollover tracker (below) was a standalone tab; this makes it ACTIONABLE

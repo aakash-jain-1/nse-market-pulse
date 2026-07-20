@@ -841,13 +841,13 @@ nse-market-pulse/
 ├── backtest_daily.py        # Daily-bar historical backtest — source=live (curated NSE) or source=eod (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py          # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py   # Portfolio-level backtest — replay bd trades through a real book (finite capital, max concurrent, conviction-ranked, daily mark-to-market) → equity curve + CAGR/DD/Sharpe
-├── notify.py               # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger
+├── notify.py               # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger; EOD digest carries a calibration-sourced track-record footer (does stacking pay?)
 ├── paper.py                # Paper-trading engine (equity + long/short options + long/short futures)
 ├── snapshot_logger.py      # Background logger (snapshots + IV + context + alerts) → SQLite
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 730 unit tests, 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
+├── test_*.py               # 735 unit tests, 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

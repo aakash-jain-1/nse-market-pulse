@@ -119,6 +119,19 @@ def _patch_recs(longs=None, shorts=None, boom=False):
         nse_client.get_recommendations = orig
 
 
+@contextlib.contextmanager
+def _patch_report(rep):
+    """Stub conviction_calibration.report so the digest's track-record footer is
+    deterministic and never touches the real DB."""
+    import conviction_calibration as cc
+    orig = cc.report
+    cc.report = lambda days=None, limit=5000: rep
+    try:
+        yield
+    finally:
+        cc.report = orig
+
+
 def _idea(sym, direction="LONG", conviction=80, rating="High", fresh=True):
     return {"symbol": sym, "direction": direction, "conviction": conviction,
             "rating": rating, "entry": 100.0, "stop": 98.0, "target": 106.0,
@@ -275,6 +288,39 @@ def test_fmt_digest_empty():
     assert "No stacked-conviction setups" in s
 
 
+# ---------------------------------------------------------------------------
+# Track-record footer (does confirmation-stacking pay? — from the calibration)
+# ---------------------------------------------------------------------------
+def _rep(resolved=42, overall=57.0, tiers=None):
+    return {"totals": {"resolved": resolved, "winRate": overall},
+            "byConfirmations": tiers if tiers is not None else [
+                {"bucket": "2", "resolved": 18, "winRate": 44.0},
+                {"bucket": "3", "resolved": 14, "winRate": 58.0},
+                {"bucket": "4", "resolved": 8, "winRate": 71.0},
+                {"bucket": "5+", "resolved": 2, "winRate": 100.0}]}   # too thin → hidden
+
+
+def test_fmt_trackrecord_tiers_gate_and_overall():
+    s = notify._fmt_trackrecord(_rep())
+    assert "Track record" in s and "42 resolved" in s
+    assert "2\u2713 44%" in s and "4\u2713 71%" in s and "overall 57%" in s
+    assert "5+" not in s                    # tier below _TRACK_TIER_MIN resolved is hidden
+
+
+def test_fmt_trackrecord_gated_when_thin_or_empty():
+    assert notify._fmt_trackrecord(_rep(resolved=3)) == ""   # < _TRACK_MIN resolved
+    assert notify._fmt_trackrecord(None) == ""
+    assert notify._fmt_trackrecord({}) == ""
+
+
+def test_fmt_digest_appends_trackrecord_before_disclaimer():
+    board = {"date": "2026-07-20", "longs": [_pick("ACME")], "shorts": []}
+    s = notify._fmt_digest(board, trackrecord=notify._fmt_trackrecord(_rep()))
+    assert "Track record" in s
+    assert s.index("Track record") < s.index("not investment advice")
+    assert "Track record" not in notify._fmt_digest(board, trackrecord="")   # opt-out
+
+
 def test_send_digest_no_channel():
     with _config():
         r = notify.send_digest(board={"date": "d", "longs": [], "shorts": []})
@@ -284,10 +330,39 @@ def test_send_digest_no_channel():
 def test_send_digest_ok_uses_supplied_board():
     board = {"date": "2026-07-16", "longs": [_pick("ACME")], "shorts": []}
     with _config(env={"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "c"}), \
-         _patch_send() as sent:
+         _patch_send() as sent, _patch_report({}):          # no resolved history → no footer
         r = notify.send_digest(board=board)
         assert r["ok"] is True and r["count"] == 1 and r["channels"] == ["telegram"]
         assert len(sent) == 1 and "ACME" in sent[0]
+        assert "Track record" not in sent[0]
+
+
+def test_send_digest_includes_trackrecord_footer():
+    board = {"date": "2026-07-20", "longs": [_pick("ACME")], "shorts": []}
+    with _config(env={"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "c"}), \
+         _patch_send() as sent, _patch_report(_rep(resolved=20, overall=60.0, tiers=[
+             {"bucket": "2", "resolved": 12, "winRate": 45.0},
+             {"bucket": "4", "resolved": 8, "winRate": 75.0}])):
+        r = notify.send_digest(board=board)
+        assert r["ok"] is True and len(sent) == 1
+        assert "Track record" in sent[0] and "4\u2713 75%" in sent[0]
+        assert "overall 60%" in sent[0]
+
+
+def test_send_digest_survives_calibration_error():
+    # a calibration hiccup must NEVER block the digest itself
+    import conviction_calibration as cc
+    board = {"date": "2026-07-20", "longs": [_pick("ACME")], "shorts": []}
+    orig = cc.report
+    cc.report = lambda **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        with _config(env={"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "c"}), \
+             _patch_send() as sent:
+            r = notify.send_digest(board=board)
+            assert r["ok"] is True and "ACME" in sent[0]
+            assert "Track record" not in sent[0]
+    finally:
+        cc.report = orig
 
 
 # ---------------------------------------------------------------------------

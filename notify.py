@@ -43,6 +43,12 @@ _MAX_PER_CYCLE = 6
 _RATING_FLOOR = {"High": 66, "Medium": 40, "All": 0, "Low": 0}
 _HTTP_TIMEOUT = 8
 
+# EOD-digest "track record" footer (does confirmation-stacking pay?) — sourced from
+# the conviction calibration so the picks you actually see carry their own credibility.
+_TRACK_DAYS = 30       # window shown in the footer
+_TRACK_MIN = 8         # need >= this many RESOLVED ideas before showing any track record
+_TRACK_TIER_MIN = 3    # a confirmation tier needs >= this many resolved to be listed
+
 _DEFAULTS = {
     "telegram_bot_token": "",
     "telegram_chat_id": "",
@@ -166,10 +172,33 @@ def _send(cfg, text):
         return ok
 
 
-def _fmt_digest(board, top=8):
+def _fmt_trackrecord(rep, days=_TRACK_DAYS):
+    """Compact 'does confirmation-stacking pay?' footer from
+    conviction_calibration.report(): overall win rate + per-confirmation-tier win rate
+    over RESOLVED ideas, so the digest's picks carry their own realized track record.
+    Returns "" when there isn't enough resolved history yet. Pure/text-only."""
+    if not rep:
+        return ""
+    totals = rep.get("totals") or {}
+    resolved = int(totals.get("resolved") or 0)
+    if resolved < _TRACK_MIN:
+        return ""
+    tiers = []
+    for b in rep.get("byConfirmations") or []:
+        wr = b.get("winRate")
+        if wr is not None and (b.get("resolved") or 0) >= _TRACK_TIER_MIN:
+            tiers.append(f"{_esc(b.get('bucket'))}\u2713 {wr:.0f}%")
+    overall = totals.get("winRate")
+    tail = f"overall {overall:.0f}%" if overall is not None else ""
+    body = " \u00b7 ".join(x for x in (" \u00b7 ".join(tiers), tail) if x) or "\u2014"
+    return f"\U0001f4ca <b>Track record</b> ({days}d, {resolved} resolved): {body}"
+
+
+def _fmt_digest(board, top=8, trackrecord=""):
     """Format an EOD conviction board (from eod_conviction.board()) into a compact
     off-screen digest — the top LONG and SHORT stacked-conviction picks with their
-    confirmation count + the plan. Pure/text-only so it's unit-testable."""
+    confirmation count + the plan, plus an optional realized-track-record footer.
+    Pure/text-only so it's unit-testable."""
     date = _esc(board.get("date") or "—")
     longs = (board.get("longs") or [])[:top]
     shorts = (board.get("shorts") or [])[:top]
@@ -193,6 +222,8 @@ def _fmt_digest(board, top=8):
         parts += [_line(p) for p in shorts]
     if not longs and not shorts:
         parts.append("\nNo stacked-conviction setups today.")
+    if trackrecord:
+        parts.append("\n" + trackrecord)
     parts.append("\n<i>Educational — not investment advice.</i>")
     return "\n".join(parts)
 
@@ -214,7 +245,15 @@ def send_digest(board=None, top=8):
         except Exception:
             log.warning("notify: building conviction board failed", exc_info=True)
             return {"ok": False, "channels": ch, "error": "Could not build the board."}
-    ok = _send(cfg, _fmt_digest(board, top=top))
+    # Best-effort realized track record ("do stacked picks actually win?") — never
+    # let a calibration hiccup block the digest itself.
+    footer = ""
+    try:
+        import conviction_calibration
+        footer = _fmt_trackrecord(conviction_calibration.report(days=_TRACK_DAYS))
+    except Exception:
+        log.warning("notify: track-record footer failed", exc_info=True)
+    ok = _send(cfg, _fmt_digest(board, top=top, trackrecord=footer))
     return {"ok": bool(ok), "channels": ch,
             "count": (len(board.get("longs") or []) + len(board.get("shorts") or [])),
             "error": None if ok else "Send failed — check the token / chat id / network."}
