@@ -287,7 +287,11 @@ def _angel_rest(smart):
         angel_feed._sym2sec.update({"RELIANCE": "2885"})
         angel_feed._sec2sym.update({"2885": "RELIANCE"})
         angel_feed._scrip_at = time.time()          # no network
-        with _patch(angel_feed, "_smart", smart):
+        # Fresh candle cache + rate-limit window so the module-global TTL cache can't
+        # leak candle rows between rest_* tests (they all resolve RELIANCE -> 2885).
+        with _patch(angel_feed, "_smart", smart), \
+                _patch(angel_feed, "_candle_cache", {}), \
+                _patch(angel_feed, "_candle_calls", angel_feed.collections.deque()):
             yield
 
 
@@ -366,14 +370,17 @@ class _RateThenOk:
         return {"data": [["2026-07-20T09:15:00+05:30", 1, 2, 3, 4, 5]]}
 
 
-def _fresh_candle_window():
-    """A patch that resets the sliding-window deque so a test starts clean."""
-    return _patch(angel_feed, "_candle_calls", angel_feed.collections.deque())
+@contextlib.contextmanager
+def _fresh_candle_state():
+    """Reset the sliding-window deque AND the TTL cache so a test starts clean."""
+    with _patch(angel_feed, "_candle_calls", angel_feed.collections.deque()), \
+            _patch(angel_feed, "_candle_cache", {}):
+        yield
 
 
 def test_angel_get_candles_retries_then_succeeds():
     # 2 rate-limit trips, success on the 3rd → rows, no NSE fallback.
-    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_window():
+    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_state():
         f = _RateThenOk(2)
         rows = angel_feed._get_candles(f, {})
     assert rows and f.calls == 3
@@ -381,7 +388,7 @@ def test_angel_get_candles_retries_then_succeeds():
 
 def test_angel_get_candles_gives_up_after_retries():
     # persistent rate-limit → None (caller falls back to NSE) after backoff+1 tries
-    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_window():
+    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_state():
         f = _RateThenOk(99)
         assert angel_feed._get_candles(f, {}) is None
         assert f.calls == len(angel_feed._CANDLE_BACKOFF) + 1
@@ -397,10 +404,39 @@ def test_angel_get_candles_no_retry_on_other_error():
             self.calls += 1
             raise RuntimeError("Invalid token")
 
-    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_window():
+    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_state():
         f = _Boom()
         assert angel_feed._get_candles(f, {}) is None
         assert f.calls == 1
+
+
+def test_angel_get_candles_caches_within_ttl():
+    # Same (token, interval, from-date) within the TTL → one real Angel call, then cache.
+    p = {"symboltoken": "2885", "interval": "FIVE_MINUTE",
+         "fromdate": "2026-07-15 09:15", "todate": "2026-07-20 11:00"}
+    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_state():
+        f = _RateThenOk(0)
+        r1 = angel_feed._get_candles(f, p)
+        r2 = angel_feed._get_candles(f, dict(p, todate="2026-07-20 11:05"))  # todate ignored
+        assert r1 and r2 == r1 and f.calls == 1
+
+
+def test_angel_candle_cache_ttl_expiry():
+    with _patch(angel_feed, "_candle_cache", {}):
+        angel_feed._candle_cache_put("k", [1, 2, 3])
+        assert angel_feed._candle_cache_get("k") == [1, 2, 3]
+        # force-age the entry beyond the TTL → miss
+        angel_feed._candle_cache["k"] = (time.time() - angel_feed._CANDLE_TTL - 1, [1, 2, 3])
+        assert angel_feed._candle_cache_get("k") is None
+
+
+def test_angel_get_candles_does_not_cache_failure():
+    p = {"symboltoken": "X", "interval": "ONE_MINUTE",
+         "fromdate": "2026-07-19 09:15", "todate": "2026-07-20 11:00"}
+    with _patch(angel_feed.time, "sleep", lambda *a: None), _fresh_candle_state():
+        f = _RateThenOk(99)
+        assert angel_feed._get_candles(f, p) is None
+        assert angel_feed._candle_cache == {}   # failures are never cached
 
 
 def test_angel_candle_throttle_waits_on_full_per_minute_window():

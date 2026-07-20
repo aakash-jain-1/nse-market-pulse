@@ -61,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 757 unit tests across 34 suites (see below)
+├── test_*.py          # 760 unit tests across 34 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -130,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 757 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 760 unit tests (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -548,6 +548,13 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Short TTL cache for broker candles** — re-opening the same stock/interval (or the modal's
+  rest_ohlc + rest_chart fallback + the Live seed wanting the same series) was re-hitting
+  Angel's rate-limited getCandleData. Added `angel_feed._candle_cache` (keyed by token,
+  interval, from-DATE; **30s TTL**; 256-entry cap) wired into `_get_candles` with
+  double-checked locking — cache hits serve without the lock; only successes cached; failures
+  retry. Fewer Angel calls, snappier UI, more headroom under 180/min. Tests **+3**; suite
+  **757 → 760**.
 - **Live-verified the Angel REST path + hardened candle rate limits** — logged into Angel
   with real creds (read-only, no orders) and confirmed `rest_quote`/`rest_chart`/`rest_ohlc`
   return real data with correct IST-baked timestamps at 1m/5m/15m/1D. Found the one gap fakes

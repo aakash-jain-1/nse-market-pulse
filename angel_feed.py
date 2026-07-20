@@ -523,6 +523,37 @@ _CANDLE_MIN_GAP = 0.4                     # per-second cap 3/s → ~0.4s apart (
 _CANDLE_PER_MIN = 170                     # per-minute cap 180 (sliding) → keep headroom
 _CANDLE_BACKOFF = (1.0, 2.0, 4.0)        # exponential backoff on a rate-limit response
 
+# Short TTL cache of candle rows. Re-opening the same stock/interval (or the modal's
+# rest_ohlc + rest_chart fallback + the Live seed all wanting the same series) then serves
+# from memory — fewer Angel calls, snappier UI, more headroom under the 180/min cap. Keyed
+# by (token, interval, from-DATE) so different intervals/lookbacks don't collide; todate is
+# excluded (the TTL handles the forming last candle, which the WebSocket refines live anyway).
+_candle_cache = {}                       # key -> (epoch_ts, rows)
+_candle_cache_lock = threading.Lock()
+_CANDLE_TTL = 30.0
+_CANDLE_CACHE_MAX = 256
+
+
+def _candle_key(params):
+    return "%s|%s|%s" % (params.get("symboltoken"), params.get("interval"),
+                         (params.get("fromdate") or "")[:10])
+
+
+def _candle_cache_get(key):
+    with _candle_cache_lock:
+        hit = _candle_cache.get(key)
+        if hit and (time.time() - hit[0]) < _CANDLE_TTL:
+            return hit[1]
+    return None
+
+
+def _candle_cache_put(key, rows):
+    with _candle_cache_lock:
+        if len(_candle_cache) >= _CANDLE_CACHE_MAX:     # bound memory: drop oldest half
+            for k in sorted(_candle_cache, key=lambda k: _candle_cache[k][0])[:_CANDLE_CACHE_MAX // 2]:
+                _candle_cache.pop(k, None)
+        _candle_cache[key] = (time.time(), rows)
+
 
 def _candle_throttle():
     """Block until a getCandleData call fits Angel's 3/s + 180/min sliding limits.
@@ -545,16 +576,26 @@ def _candle_throttle():
 
 
 def _get_candles(smart, params):
-    """Serialized, rate-limit-aware getCandleData → list of candle rows (possibly
-    empty), or None on failure. Honors Angel's documented historical limits (3/s +
-    180/min sliding) and, on an actual rate-limit response, backs off exponentially
-    (1s→2s→4s) so bursts degrade to a small delay instead of an NSE fallback."""
+    """Serialized, rate-limit-aware, TTL-cached getCandleData → list of candle rows
+    (possibly empty), or None on failure. Serves a fresh cache hit without any Angel
+    call; otherwise honors Angel's documented historical limits (3/s + 180/min sliding)
+    and, on an actual rate-limit response, backs off exponentially (1s→2s→4s) so bursts
+    degrade to a small delay instead of an NSE fallback."""
+    key = _candle_key(params)
+    cached = _candle_cache_get(key)                      # fast path: no lock, fully concurrent
+    if cached is not None:
+        return cached
     with _candle_lock:
+        cached = _candle_cache_get(key)                  # re-check: a peer may have just filled it
+        if cached is not None:
+            return cached
         for attempt in range(len(_CANDLE_BACKOFF) + 1):
             _candle_throttle()
             _candle_calls.append(time.time())            # count the attempt (Angel does)
             try:
-                return (smart.getCandleData(params) or {}).get("data") or []
+                rows = (smart.getCandleData(params) or {}).get("data") or []
+                _candle_cache_put(key, rows)             # cache success only (incl. empty)
+                return rows
             except Exception as e:
                 if attempt >= len(_CANDLE_BACKOFF) or "access rate" not in str(e).lower():
                     return None

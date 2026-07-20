@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 757 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 760 across 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -287,7 +287,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **757 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **760 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -439,6 +439,22 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-20 — Short TTL cache for broker candles (suite 757 → 760)
+- **Why:** builds on the rate-limit work. Re-opening the same stock/interval — or the
+  modal's `rest_ohlc` + its `rest_chart` fallback + the Live seed all wanting the same
+  series — was re-hitting Angel's (rate-limited) `getCandleData` each time. A short cache
+  cuts those repeats: fewer Angel calls, snappier UI, more headroom under the 180/min cap.
+- **What (`angel_feed`):** `_candle_cache` (dict) + `_candle_cache_get/put`, wired into
+  `_get_candles`. Keyed by **(token, interval, from-DATE)** — different intervals/lookbacks
+  don't collide; `todate` is excluded so the key is stable within the **30s TTL**
+  (`_CANDLE_TTL`; the forming last candle is refined live by the WebSocket anyway). Bounded
+  at 256 entries (drop-oldest-half). **Double-checked locking:** cache hits serve without the
+  candle lock (fully concurrent); a re-check inside the lock stops two peers double-fetching
+  the same key. Only successes are cached (incl. empty); failures aren't, so they retry.
+- **Tests +3** (cache hit within TTL = one Angel call; TTL expiry → miss; failures never
+  cached). Also reset the cache in the `_angel_rest` fixture so it can't leak between tests.
+  Suite **757 → 760**.
 
 ### 2026-07-20 — Live-verified the Angel REST path + hardened getCandleData rate limits (suite 753 → 757)
 - **Live check (real creds, read-only, no orders):** logged into Angel with the configured

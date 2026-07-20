@@ -847,7 +847,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 757 unit tests, 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
+├── test_*.py               # 760 unit tests, 34 suites (client/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
