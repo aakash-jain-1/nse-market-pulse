@@ -338,7 +338,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **808 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **822 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -494,6 +494,34 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-22 — API request logging + OpenTelemetry (CNCF) instrumentation (suite 808 → 822)
+- **Why:** wanted to see each API request in the terminal — entry/exit time, duration, status — and to
+  follow a standard for metrics rather than a bespoke logger.
+- **What (new `observability.py`, wired via one line in `app.py`):** two layers.
+  1. **Terminal access log (always on, no deps).** One line per request on stdout (and into
+     `logs/app.log`): `HH:MM:SS.mmm -> HH:MM:SS.mmm  METHOD  /path  status  Nms  ip=…  size  trace=…`.
+     The `?token=` secret is redacted. Registered before the security guard so the timer is armed even
+     for blocked (401/403) requests, and a raising view is still logged (as 500) via `teardown_request`.
+  2. **OpenTelemetry (opt-in, the CNCF standard).** Auto-instruments Flask → server spans + the standard
+     `http.server.*` RED metrics; optionally the `requests` lib and our logs. Exports over OTLP/HTTP when
+     `OTEL_EXPORTER_OTLP_ENDPOINT` is set (e.g. Jaeger/Tempo/Grafana), or to the console with
+     `OTEL_CONSOLE=1`. Imports OTel lazily and **no-ops if the packages are missing**, so the app always
+     boots; when active, the trace id shows up in the access line for correlation.
+- **Notes / safety:** `requests` instrumentation is **off by default** (`OTEL_INSTRUMENT_REQUESTS=1` to
+  enable) because it injects W3C `traceparent` headers into every outbound call and NSE's Akamai WAF is
+  header-sensitive — we don't touch NSE calls unless asked. Env: `OTEL_EXPORTER_OTLP_ENDPOINT`,
+  `OTEL_CONSOLE`, `OTEL_SERVICE_NAME`, `OTEL_SDK_DISABLED`, `OTEL_INSTRUMENT_REQUESTS`.
+- **Result (live-verified):** terminal now prints e.g.
+  `11:09:38.080 -> 11:09:38.130  GET  /api/sim/summary?book=fno&token=***  200  49.7ms  ip=127.0.0.1  8.5kB  trace=-`.
+  Tests **+13** (`test_observability.py`: redact/human_size/clock/format, OTel gating idle+disabled,
+  access-log hook status/timing/redaction, 500-via-teardown, idempotent init).
+- **Gotcha fixed — "I don't see the APIs in the terminal."** Werkzeug binds with `SO_REUSEADDR`, so on
+  Windows a second `python app.py` silently *shares* port 5055 instead of failing; requests then get
+  routed nondeterministically to whichever instance, and the fresh terminal stays blank. Added a
+  connect-probe **preflight** (`_port_in_use`) that, on the first (non-reloader) launch, fails fast with
+  a clear "port already in use → stop it, or PORT=5056" message instead of a phantom second instance
+  (+1 test). Suite **808 → 822**.
 
 ### 2026-07-22 — SIM summary made fully non-blocking (first F&O load is instant) (suite 804 → 808)
 - **Why:** after the reprice throttle, repeated SIM polls were instant but the FIRST (cold)

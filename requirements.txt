@@ -25,3 +25,16 @@ dhanhq==2.2.0
 # NSE_TLS_IMPERSONATE=chrome124, or disable with =off).
 # curl_cffi==0.15.0
 
+# --- Observability / OpenTelemetry (optional) ---
+# The per-request TERMINAL access log (observability.py) needs NONE of these — it's
+# pure stdlib. These add the CNCF OpenTelemetry export path (traces + RED metrics +
+# logs over OTLP/HTTP). observability.py imports them LAZILY and no-ops if absent,
+# so the app runs without them. Activate by pointing at a collector, e.g.:
+#   docker run -p4318:4318 -p16686:16686 jaegertracing/all-in-one
+#   set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318   (or OTEL_CONSOLE=1)
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+opentelemetry-instrumentation-flask==0.65b0
+opentelemetry-instrumentation-requests==0.65b0
+opentelemetry-instrumentation-logging==0.65b0
+

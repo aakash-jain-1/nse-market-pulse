@@ -225,6 +225,21 @@ def test_warm_sim_pass_bails_on_waf_block():
     assert calls == []
 
 
+def test_port_in_use_detects_listener():
+    # The preflight that stops a confusing second instance silently sharing the port:
+    # True while a listener is up on the port, False once it's gone.
+    import socket
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    port = srv.getsockname()[1]
+    try:
+        assert webapp._port_in_use(port) is True
+    finally:
+        srv.close()
+    assert webapp._port_in_use(port) is False
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

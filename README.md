@@ -820,6 +820,7 @@ python nse_demand.py losers     # top losers
 ```
 nse-market-pulse/
 ├── app.py                  # Flask server + JSON API (thin routes) — port 5055
+├── observability.py        # Terminal access log (entry→exit/timing) + opt-in OpenTelemetry (OTLP)
 ├── nse_client.py           # NSE session mgmt + hot lists + scanner + ideas (CORE)
 ├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
 ├── bhavcopy.py             # EOD UDiFF bhavcopy ingest + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill
@@ -847,7 +848,7 @@ nse-market-pulse/
 ├── db.py                   # SQLite store (time-series)
 ├── nse_demand.py           # Standalone CLI scanner
 ├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 808 unit tests, 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/…)
+├── test_*.py               # 822 unit tests, 36 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/observability/…)
 ├── templates/
 │   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
 ├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use

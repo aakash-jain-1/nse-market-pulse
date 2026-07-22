@@ -39,6 +39,7 @@ intraday momentum and unusual activity. It pulls data from NSE India's public
 ```
 NSE/
 ├── app.py             # Flask server + JSON API endpoints (runs on port 5055)
+├── observability.py   # Per-request terminal access log (entry→exit/timing, token-redacted) + opt-in OpenTelemetry (OTLP traces/RED metrics/logs); imports OTel lazily, no-ops if absent
 ├── nse_client.py      # NSE session mgmt + data fetching / normalization (CORE)
 ├── nse_quote.py       # Per-stock quote/chart/depth (NextApi) + OHLCV candles (charting)
 ├── bhavcopy.py        # EOD UDiFF bhavcopy ingest (static archive) + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill(days)
@@ -61,7 +62,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 808 unit tests across 35 suites (see below)
+├── test_*.py          # 822 unit tests across 36 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -127,11 +128,27 @@ NSE/
 ## How to run
 
 ```bash
-python app.py            # dashboard at http://127.0.0.1:5055
+python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 808 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 822 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/…)
 ```
+
+The terminal access log (`observability.py`) is always on: one line per request —
+`HH:MM:SS.mmm -> HH:MM:SS.mmm  METHOD  /path  status  Nms  ip=…  size  trace=…` (the
+`?token=` secret is redacted). To also export OpenTelemetry traces/RED-metrics/logs
+(the CNCF standard), point it at a collector — nothing shows in the terminal from OTel
+itself, it goes to the backend:
+
+```bash
+docker run -p4318:4318 -p16686:16686 jaegertracing/all-in-one   # one-time
+set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318           # (OTEL_CONSOLE=1 to dump to stdout)
+python app.py                                                   # traces at http://localhost:16686
+```
+
+OTel env: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_CONSOLE`, `OTEL_SERVICE_NAME`,
+`OTEL_SDK_DISABLED`, `OTEL_INSTRUMENT_REQUESTS` (opt-in: traces outbound `requests`,
+but injects `traceparent` headers into NSE calls — off by default, Akamai is header-sensitive).
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
 `python db_inspect.py` (overview: tables, row counts, spans),

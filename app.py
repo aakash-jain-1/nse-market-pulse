@@ -43,6 +43,7 @@ import angel_feed
 import dhan_feed
 import nse_client as nse
 import nse_quote
+import observability
 import paper
 import snapshot_logger as snaplog
 
@@ -115,6 +116,11 @@ def _setup_logging():
 
 _setup_logging()
 log = logging.getLogger("app")
+
+# Observability: per-request terminal access log (entry->exit + timing) plus opt-in
+# OpenTelemetry traces/metrics/logs. Registered here — before the security guard —
+# so the request timer is armed even for requests the guard short-circuits.
+observability.init(app, log, serving=_IS_SERVING)
 
 
 @app.before_request
@@ -1143,6 +1149,18 @@ def _lan_ip():
         return None
 
 
+def _port_in_use(port):
+    """True if something is already LISTENING on 127.0.0.1:<port>. Werkzeug's dev
+    server binds with SO_REUSEADDR, so on Windows a second `python app.py` silently
+    SHARES the port instead of failing — then requests get routed nondeterministically
+    to whichever instance, and your fresh terminal shows no access log. We probe by
+    connecting (not binding) so we detect a live listener regardless of reuse flags."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
 def _warm_sim_pass():
     """One strategy-of-the-day / walk-forward warm pass, run GENTLY.
 
@@ -1289,6 +1307,17 @@ if __name__ == "__main__":
         if DEBUG:
             print("   ⚠  FLASK_DEBUG=1 — interactive debugger ENABLED (dev only).")
         print("=" * 60 + "\n")
+    # Fail fast if the port is already taken (see _port_in_use). Only in the FIRST
+    # process (not reloader-spawned workers, which briefly overlap the old worker on
+    # restart) so legit auto-reloads aren't tripped. This turns the confusing silent
+    # port-sharing into a clear message instead of a phantom second instance.
+    if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and _port_in_use(PORT):
+        print(f"\n⚠  Port {PORT} is already in use — another NSE Market Pulse instance is\n"
+              f"   likely running. Stop it first, or start this one on another port:\n"
+              f"       PORT=5056 python app.py\n"
+              f"   (open the one that's already up at http://127.0.0.1:{PORT})\n")
+        raise SystemExit(1)
+
     # threaded so a long request (e.g. a full-universe daily backtest, ~2-3 min)
     # doesn't block the dashboard's auto-refresh polling. The interactive
     # debugger stays OFF unless FLASK_DEBUG=1 (AUDIT.md H1); the reloader is
