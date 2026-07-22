@@ -185,6 +185,46 @@ def test_health_ok_when_market_closed_and_idle():
     assert r.get_json()["ok"] is True    # idle outside market hours is healthy
 
 
+# ---------------------------------------------------------------------------
+# _warm_sim_pass — gentle strategy-of-day warm (no boot-time NSE burst)
+# ---------------------------------------------------------------------------
+def test_warm_sim_pass_skips_during_market_hours():
+    # The boot-hang fix: during market hours we must NOT eager-warm the live
+    # daily-bar backtest (it starved the serving app) — the card warms lazily instead.
+    import backtest_daily as btd
+    calls = []
+    with _patch(webapp.snaplog, "is_market_hours", lambda: True), \
+         _patch(webapp.nse, "blocked_for", lambda: 0), \
+         _patch(btd, "cached_regime_leaderboard", lambda: calls.append("lb")), \
+         _patch(btd, "cached_walkforward", lambda: calls.append("wf")):
+        webapp._warm_sim_pass()
+    assert calls == []
+
+
+def test_warm_sim_pass_warms_off_hours():
+    # Off-hours there's no live contention, so both caches are primed for next session.
+    import backtest_daily as btd
+    calls = []
+    with _patch(webapp.snaplog, "is_market_hours", lambda: False), \
+         _patch(webapp.nse, "blocked_for", lambda: 0), \
+         _patch(btd, "cached_regime_leaderboard", lambda: calls.append("lb")), \
+         _patch(btd, "cached_walkforward", lambda: calls.append("wf")):
+        webapp._warm_sim_pass()
+    assert calls == ["lb", "wf"]
+
+
+def test_warm_sim_pass_bails_on_waf_block():
+    # A WAF cooldown means live NSE is paused — the warm pass must add no more load.
+    import backtest_daily as btd
+    calls = []
+    with _patch(webapp.snaplog, "is_market_hours", lambda: False), \
+         _patch(webapp.nse, "blocked_for", lambda: 120), \
+         _patch(btd, "cached_regime_leaderboard", lambda: calls.append("lb")), \
+         _patch(btd, "cached_walkforward", lambda: calls.append("wf")):
+        webapp._warm_sim_pass()
+    assert calls == []
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

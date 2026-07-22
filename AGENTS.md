@@ -61,7 +61,7 @@ NSE/
 ├── backtest_daily.py      # Daily-bar historical backtest, 9 strategies — source="live" (curated NSE) or "eod" (whole bhavcopy universe from SQLite, off-hours)
 ├── walkforward.py         # Walk-forward out-of-sample / overfit validation (pure over trades)
 ├── portfolio_backtest.py  # Portfolio-level backtest: replay bd trades through a real book (finite capital, max concurrent, conviction-ranked sizing) → equity curve + CAGR/DD/Sharpe
-├── test_*.py          # 797 unit tests across 35 suites (see below)
+├── test_*.py          # 808 unit tests across 35 suites (see below)
 │   ├── test_intrabar.py / test_sim.py / test_sim_views.py / test_take.py   # sim + intrabar
 │   ├── test_backtest.py / test_backtest_daily.py / test_backtest_strategies.py / test_walkforward.py
 │   ├── test_portfolio_backtest.py                  # portfolio book: sizing (risk/equal), slot+capital gating, DD/CAGR/Sharpe, equity curve, shorts, run() wiring
@@ -130,7 +130,7 @@ NSE/
 python app.py            # dashboard at http://127.0.0.1:5055
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python db_inspect.py     # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 797 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
+python -m pytest -q      # 808 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/…)
 ```
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
@@ -149,6 +149,10 @@ every request — open the app once with `?token=<secret>` to set the cookie).
 **`auto`** = impersonate only after repeat WAF blocks then revert; a literal profile
 like `chrome124` = always; `off` = never — only used when `curl_cffi` is installed).
 `NSE_TLS_AUTO_AT` (default 2) is the block count that arms auto-failover.
+NSE-load knobs: `NSE_CTX_CANDIDATES` (default 30) bounds the per-context quote+candle
+fan-out; `SIM_INTRABAR_SEC` / `IDEAS_INTRABAR_SEC` (default 180) space out the 1-min
+intrabar chart sweeps; `SIM_WARM_DELAY_SEC` (default 60) defers the startup strategy-of-day
+warm pass (which also auto-skips during market hours) — raise them if the Akamai budget is tight.
 Health/liveness is at `GET /api/health`. See `AUDIT.md` for the full posture.
 
 ### Phone / LAN access
@@ -552,6 +556,25 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Fix: boot warm-up starved the app ("first call won't load")** — `_warm_sim` eager-ran a
+  live-universe daily-bar backtest at startup; in market hours that ~60-fetch + heavy-CPU burst
+  starved the dev server for minutes. Extracted testable `_warm_sim_pass()` that **skips during
+  market hours** (Sim card warms lazily on first visit, cached ~6h) and bails on a WAF block; the
+  boot thread now defers it `SIM_WARM_DELAY_SEC` (60s). Live-verified: boot no longer hangs;
+  steady-state reqLastMin ~55/120. Suite 801 → 804.
+- **Cut the per-symbol chart fan-out** — `/api/health` showed we were pegged at the pacer ceiling
+  (120/min, not WAF-blocked), dominated by `charting.nseindia.com` (`symbolsDynamic` +
+  `symbolHistoricalData` ≈ 63/120). Cause: `build_context`'s 5-min candle fan-out (~30 candidates,
+  stable cache key) re-hit charting every 30s. Fix: `nse_quote._ohlc_ttl()` caches coarser bars far
+  longer (5-min→150s, 15-min→300s, daily→600s; 1-min stays 30s) → ~5× fewer chart calls, no strategy
+  change. Added knobs `SIM_INTRABAR_SEC` / `IDEAS_INTRABAR_SEC` (default 180s) to lengthen the 1-min
+  intrabar sweeps. Suite 799 → 801.
+- **Fix: SIM/F&O tabs stalled + piled up NSE calls** — under the pacer, `sim.summary()` re-priced
+  every OPEN trade on *every* poll (F&O names fall through to sequential per-symbol NSE quotes), and
+  the frontend kept firing polls without waiting → requests stacked until even `/api/health` went
+  pending. `sim.update()` now throttles the reprice (`_UPDATE_TTL` 45s, `force=` to bypass) and
+  resolves prices in parallel via `_resolve_prices()`; the UI got in-flight guards on the auto-refresh
+  (`_loadInFlight`) and the 20s idea-alert poll (`_ideaTickBusy`). Suite 797 → 799.
 - **Endpoint budget in the UI** — a NSE request-budget table (`#nseBudget`) in the Log modal
   renders `/api/health.nse.endpoints` (endpoint + hits/min & /hour, ranked) so "where our quota
   goes" is visible in the dashboard, not just JSON. UI only; `test_index_renders` asserts it.

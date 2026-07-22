@@ -1812,28 +1812,37 @@
         n.onclick = () => { window.focus(); openDetail(i.symbol); };
       }
     }
+    let _ideaTickBusy = false;
     async function ideaAlertTick() {
       const level = document.getElementById("ideaAlertSel").value;
       if (level === "off" || !_marketishNow()) return;
-      let data;
-      try { data = await fetch("/api/recommendations").then(r => r.json()); }
-      catch (e) { return; }
-      const ideas = (data.longs || []).concat(data.shorts || []);
-      if (!ideas.length) return;
-      if (!ideaSeeded) {                 // first non-empty poll: baseline silently
-        ideas.forEach(i => ideaNotified.add(ideaKey(i)));
-        ideaSeeded = true;
-        return;
+      // /api/recommendations is a heavy scanner sweep; don't fire a new poll while
+      // the previous is still resolving (it stacks up behind the NSE pacer).
+      if (_ideaTickBusy) return;
+      _ideaTickBusy = true;
+      try {
+        let data;
+        try { data = await fetch("/api/recommendations").then(r => r.json()); }
+        catch (e) { return; }
+        const ideas = (data.longs || []).concat(data.shorts || []);
+        if (!ideas.length) return;
+        if (!ideaSeeded) {                 // first non-empty poll: baseline silently
+          ideas.forEach(i => ideaNotified.add(ideaKey(i)));
+          ideaSeeded = true;
+          return;
+        }
+        let fired = 0;
+        ideas.forEach(i => {
+          const k = ideaKey(i);
+          if (ideaNotified.has(k)) return;
+          if (i.fresh === false) { ideaNotified.add(k); return; }   // stale/tracking — never ping
+          if (!ideaRatingOK(i.rating, level)) return;               // keep watching; may upgrade later
+          ideaNotified.add(k);
+          if (fired < 5) { fireIdeaAlert(i); fired++; }             // cap a burst so we never spam
+        });
+      } finally {
+        _ideaTickBusy = false;
       }
-      let fired = 0;
-      ideas.forEach(i => {
-        const k = ideaKey(i);
-        if (ideaNotified.has(k)) return;
-        if (i.fresh === false) { ideaNotified.add(k); return; }   // stale/tracking — never ping
-        if (!ideaRatingOK(i.rating, level)) return;               // keep watching; may upgrade later
-        ideaNotified.add(k);
-        if (fired < 5) { fireIdeaAlert(i); fired++; }             // cap a burst so we never spam
-      });
     }
     function setupIdeaAlerts() {
       const sel = document.getElementById("ideaAlertSel");
@@ -4348,7 +4357,21 @@
         <p class="muted">TradingView Lightweight Charts couldn't be fetched. Check your internet connection, or vendor it into <code>static/vendor/lightweight-charts.standalone.production.js</code> to self-host, then reload.</p></div>`;
     }
 
+    // Guard against overlapping refreshes: when the server is slow (e.g. a cold
+    // SIM reprice or a scanner sweep behind the NSE pacer), the self-scheduling
+    // auto-refresh could fire a NEW load() before the previous finished — stacking
+    // fetches until the browser's ~6-connection limit is saturated and even
+    // /api/health goes pending. We skip an auto-tick while one is in flight.
+    let _loadInFlight = false;
     async function load() {
+      _loadInFlight = true;
+      try {
+        return await _loadBody();
+      } finally {
+        _loadInFlight = false;
+      }
+    }
+    async function _loadBody() {
       const wrap = document.getElementById("tableWrap");
       const dot = document.getElementById("liveDot");
       // The Live tab owns its own realtime loop (SSE + a persistent chart), so it
@@ -4569,7 +4592,9 @@
     }
     function refreshTick() {
       timer = null;
-      if (!refreshPaused()) load();                 // skip the NSE hit while paused
+      // Skip the NSE hit while paused, and never stack a new load on top of one
+      // that's still running (prevents the request pile-up when a poll is slow).
+      if (!refreshPaused() && !_loadInFlight) load();
       scheduleRefresh();
     }
     function setupRefresh() {

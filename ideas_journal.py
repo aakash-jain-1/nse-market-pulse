@@ -40,8 +40,13 @@ import db
 IST = timezone(timedelta(hours=5, minutes=30))
 MAX_PER_SIDE = 20          # cap how many tracked ideas we surface per direction
 # Intrabar outcome pass: how often (seconds) we re-check unresolved ideas against
-# real 1-min candles. Throttled + market-hours gated to stay light on NSE.
-INTRABAR_INTERVAL = 180
+# real 1-min candles (a paced NSE chart fan-out over the day's pending ideas).
+# Throttled + market-hours gated to stay light on NSE; env-configurable so it can
+# be lengthened when the Akamai budget is tight.
+try:
+    INTRABAR_INTERVAL = max(60, int(os.getenv("IDEAS_INTRABAR_SEC", "").strip() or 180))
+except ValueError:
+    INTRABAR_INTERVAL = 180
 _last_intrabar = 0.0
 # Legacy per-day JSON (pre-SQLite). Imported once so a mid-day switch loses nothing.
 LEGACY_FILE = os.path.join(os.path.dirname(__file__), "ideas_journal.json")

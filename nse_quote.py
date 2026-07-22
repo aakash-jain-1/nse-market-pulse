@@ -297,7 +297,23 @@ def get_book_stats(symbols, limit=_BOOK_MAX):
 _CHARTING = "https://charting.nseindia.com/v1"
 _CHARTING_REF = {"Referer": "https://charting.nseindia.com/", "Accept": "*/*"}
 _token_cache = {}    # symbol -> scripcode (str)
-_OHLC_TTL = 30       # seconds
+_OHLC_TTL = 30       # seconds (base; coarser intervals cached longer — see _ohlc_ttl)
+
+
+def _ohlc_ttl(interval, chart_type="I"):
+    """Cache freshness for a candle series. A forming N-minute bar barely changes
+    within ~N minutes, so COARSER intervals are cached much longer — this is what
+    stops build_context's 5-min fan-out (over ~30 candidates, several sweeps/min)
+    from re-hitting charting.nseindia.com every 30s and dominating the NSE budget.
+    1-min keeps the tight base window for the intrabar outcome resolvers (which
+    pass a moving to_ts and rarely cache-hit anyway); daily is cached longest."""
+    if chart_type == "D":
+        return 600
+    try:
+        iv = int(interval)
+    except (TypeError, ValueError):
+        iv = 1
+    return _OHLC_TTL if iv < 5 else min(iv * 30, 300)
 
 
 def _charting_get(path):
@@ -374,7 +390,7 @@ def get_ohlc(symbol, interval=1, chart_type="I", days=None,
     symbol = symbol.upper().strip()
     key = ("ohlc", symbol, interval, chart_type, days, from_ts, to_ts)
     hit = _cache.get(key)
-    if hit and (time.time() - hit[0]) < _OHLC_TTL:
+    if hit and (time.time() - hit[0]) < _ohlc_ttl(interval, chart_type):
         return hit[1]
 
     token = get_token(symbol)

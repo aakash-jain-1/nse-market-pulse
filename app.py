@@ -1143,6 +1143,29 @@ def _lan_ip():
         return None
 
 
+def _warm_sim_pass():
+    """One strategy-of-the-day / walk-forward warm pass, run GENTLY.
+
+    The card is a daily-bar backtest over a LIVE universe (~60 paced NSE fetches +
+    a heavy CPU pass), so warming it eagerly at boot DURING MARKET HOURS starved the
+    serving dev server for minutes — that was the "first call won't load" boot hang.
+    So we SKIP it in market hours (the Sim tab computes the card lazily on first
+    visit, server-cached ~6h, and idea generation just falls back to the un-warmed
+    board until then) and only warm OFF-HOURS, when there's no live contention — which
+    also primes both caches for the next session. Bails immediately on a WAF cooldown."""
+    import backtest_daily as _btd
+    if snaplog.is_market_hours():
+        log.info("sim pre-warm deferred: market hours (card warms lazily on first Sim visit)")
+        return
+    for fn in (_btd.cached_regime_leaderboard, _btd.cached_walkforward):
+        if nse.blocked_for():
+            break
+        try:
+            fn()
+        except Exception:
+            log.warning("sim pre-warm failed (%s)", fn.__name__, exc_info=True)
+
+
 if __name__ == "__main__":
     # With the reloader on, Flask spawns a watcher parent + a worker child. Only
     # the worker (which actually serves) sets WERKZEUG_RUN_MAIN, so start the
@@ -1210,16 +1233,21 @@ if __name__ == "__main__":
         # the second is ~pure CPU) in a daemon thread, so the Sim tab's card is ready
         # — with robustness verdicts — without stalling the first poll on a cold run.
         import threading
-        import backtest_daily as _btd
+
+        # DEFER the warm pass past the initial page/first-poll window, then run it
+        # gently (_warm_sim_pass skips during market hours). This is what stops the
+        # boot-time NSE+CPU burst from starving the app right as it comes up. Tunable
+        # via SIM_WARM_DELAY_SEC.
+        try:
+            _sim_warm_delay = max(0, int(os.getenv("SIM_WARM_DELAY_SEC", "").strip() or 60))
+        except ValueError:
+            _sim_warm_delay = 60
 
         def _warm_sim():
-            for fn in (_btd.cached_regime_leaderboard, _btd.cached_walkforward):
-                try:
-                    fn()
-                except Exception:
-                    log.warning("sim pre-warm failed (%s)", fn.__name__, exc_info=True)
+            time.sleep(_sim_warm_delay)
+            _warm_sim_pass()
 
-        threading.Thread(target=_warm_sim, daemon=True).start()
+        threading.Thread(target=_warm_sim, daemon=True, name="sim-warm").start()
 
         # Pre-warm the EOD bhavcopy cache (2 static archive files) so the last-
         # resort price fallback + EOD status are instant, and off-hours pricing

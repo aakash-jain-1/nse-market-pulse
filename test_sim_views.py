@@ -46,6 +46,9 @@ def _temp_sim():
     sim.STATE_FILE = os.path.join(d, "sim_state.json")
     sim._migrated = True                      # skip legacy migration
     sim._ensure_migrated = lambda: None
+    sim._regime_cache = None                  # SWR regime cache: start each test cold
+    sim._regime_ts = 0.0
+    sim._regime_running = False
     try:
         yield
     finally:
@@ -160,11 +163,25 @@ def test_prior_day_move():
         assert sim._prior_day_move({"daily": {}}) is None
 
 
+def _await_regime(timeout=3.0):
+    """current_regime() is now non-blocking (stale-while-revalidate): the real
+    regime is computed on a background thread. Kick it, then wait for the cache."""
+    import time as _t
+    sim.current_regime()                          # kicks the bg compute
+    end = _t.time() + timeout
+    while _t.time() < end:
+        with sim._regime_gate:
+            if sim._regime_cache is not None:
+                return sim._regime_cache
+        _t.sleep(0.01)
+    raise AssertionError("regime cache not populated in time")
+
+
 def test_current_regime_from_index():
     with _temp_sim(), _patch(sim.nse, "get_index_snapshot",
                              lambda: {"NIFTY": {"pChange": 1.0, "advances": 100,
                                                 "declines": 50}}):
-        r = sim.current_regime()
+        r = _await_regime()
     assert r["label"] == "Trend-Up" and r["niftyPct"] == 1.0
 
 
@@ -172,9 +189,49 @@ def test_current_regime_surfaces_volatility():
     idx = {"NIFTY": {"pChange": 1.0, "advances": 100, "declines": 50},
            "INDIAVIX": {"last": 20.0, "yearLow": 10.0, "yearHigh": 30.0}}
     with _temp_sim(), _patch(sim.nse, "get_index_snapshot", lambda: idx):
-        r = sim.current_regime()
+        r = _await_regime()
     assert r["label"] == "Trend-Up"          # direction unaffected by the vol axis
     assert r["vix"] == 20.0 and r["volState"] == "Elevated" and r["vixPctile"] == 50.0
+
+
+def test_current_regime_nonblocking_on_cold_start():
+    # A cold call must NOT block on a slow index fetch: it returns a neutral regime
+    # at once and computes the real one in the background (this was the residual
+    # "first SIM/F&O call won't load" — the last synchronous NSE hop in summary()).
+    import time as _t
+    hit = {"v": False}
+
+    def _slow_snap():
+        hit["v"] = True
+        _t.sleep(1.0)
+        return {"NIFTY": {"pChange": 1.0, "advances": 100, "declines": 50}}
+
+    with _temp_sim(), _patch(sim.nse, "get_index_snapshot", _slow_snap):
+        t0 = _t.time()
+        r = sim.current_regime()                  # returns immediately (fallback)
+        assert (_t.time() - t0) < 0.5
+        assert isinstance(r, dict) and "label" in r
+        end = _t.time() + 3.0
+        while _t.time() < end and sim._regime_cache is None:
+            _t.sleep(0.01)
+        assert hit["v"] and sim._regime_cache["niftyPct"] == 1.0
+
+
+def test_current_regime_serves_stale_then_refreshes():
+    # A stale cache is served instantly while a background refresh recomputes it.
+    import time as _t
+    with _temp_sim():
+        sim._regime_cache = {"label": "Range", "niftyPct": 0.0}
+        sim._regime_ts = 0.0                       # force stale
+        with _patch(sim.nse, "get_index_snapshot",
+                    lambda: {"NIFTY": {"pChange": 1.0, "advances": 100,
+                                       "declines": 50}}):
+            r = sim.current_regime()              # instant: the stale value
+            assert r["label"] == "Range"
+            end = _t.time() + 3.0
+            while _t.time() < end and sim._regime_cache.get("label") != "Trend-Up":
+                _t.sleep(0.01)
+            assert sim._regime_cache["label"] == "Trend-Up"
 
 
 # ---------------------------------------------------------------------------

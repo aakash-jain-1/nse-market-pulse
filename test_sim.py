@@ -229,6 +229,95 @@ def test_request_stop_halts_intrabar_fetch():
         sim._STOPPING.clear()
 
 
+# ---------------------------------------------------------------------------
+# update() throttle + parallel reprice (stops SIM/F&O piling up NSE calls)
+# ---------------------------------------------------------------------------
+def test_resolve_prices_fans_out_all_symbols():
+    # Parallel price resolution returns one entry per symbol; the empty and
+    # single-symbol shortcuts work too. get_price_map is warmed once (stubbed here
+    # so the test never touches the network).
+    restore = _patch("_price", lambda s: 100.0 + len(s))
+    orig_gpm = sim.nse.get_price_map
+    sim.nse.get_price_map = lambda: {}
+    try:
+        assert sim._resolve_prices(set()) == {}
+        assert sim._resolve_prices({"Z"}) == {"Z": 101.0}
+        assert sim._resolve_prices({"AAA", "BB"}) == {"AAA": 103.0, "BB": 102.0}
+    finally:
+        sim.nse.get_price_map = orig_gpm
+        restore()
+
+
+def test_update_throttles_nse_reprice():
+    # summary() calls update() on every poll; the per-symbol NSE fan-out must run at
+    # most once per _UPDATE_TTL (repeated polls reuse the last reprice), while
+    # force=True bypasses it. Guards the fix for SIM/F&O piling up NSE requests.
+    import db
+    calls = {"n": 0}
+
+    def _fake_resolve(symbols):
+        calls["n"] += 1
+        return {}
+
+    restores = [
+        _patch("_resolve_prices", _fake_resolve),
+        _patch("_intrabar_fetch", lambda seed: None),
+        _patch("_intrabar_apply", lambda *a, **k: None),
+        _patch("_load", lambda: {"daily": {}}),
+        _patch("_last_update", 0.0),
+        _patch("_reprice_running", False),
+    ]
+    orig_open, orig_ins = db.sim_open_trades, db.sim_insert_trades
+    db.sim_open_trades = lambda *a, **k: []
+    db.sim_insert_trades = lambda *a, **k: None
+    try:
+        sim.update()             # cold -> reprices
+        sim.update()             # within TTL -> skipped, serves last reprice
+        assert calls["n"] == 1
+        sim.update(force=True)   # force -> reprices again
+        assert calls["n"] == 2
+    finally:
+        db.sim_open_trades, db.sim_insert_trades = orig_open, orig_ins
+        for r in reversed(restores):
+            r()
+
+
+def test_maybe_reprice_async_is_nonblocking_and_reprices():
+    # summary() must NOT block on the fan-out: the async kick runs the reprice on a
+    # background thread and returns immediately. force=True bypasses the TTL.
+    import threading as _th
+    done = _th.Event()
+    restores = [
+        _patch("_reprice_open_trades", lambda: done.set()),
+        _patch("_last_update", 0.0),
+        _patch("_reprice_running", False),
+    ]
+    try:
+        sim._maybe_reprice_async(force=True)   # returns at once
+        assert done.wait(timeout=5)            # background pass actually ran
+    finally:
+        for r in reversed(restores):
+            r()
+
+
+def test_maybe_reprice_async_skips_when_fresh():
+    # A reprice within _UPDATE_TTL is a no-op (repeated polls reuse the last one).
+    import time as _t
+    calls = {"n": 0}
+    restores = [
+        _patch("_reprice_open_trades", lambda: calls.__setitem__("n", calls["n"] + 1)),
+        _patch("_last_update", _t.time()),     # just repriced
+        _patch("_reprice_running", False),
+    ]
+    try:
+        sim._maybe_reprice_async()
+        _t.sleep(0.2)
+        assert calls["n"] == 0
+    finally:
+        for r in reversed(restores):
+            r()
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

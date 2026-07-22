@@ -122,6 +122,45 @@ def test_get_ohlc_token_not_found():
     assert out["error"] == "token-not-found" and out["points"] == []
 
 
+def test_ohlc_ttl_scales_with_interval():
+    # Coarser intervals cache far longer (a forming N-min bar barely moves in ~N min),
+    # so the 5-min context fan-out stops re-hitting charting every 30s.
+    assert q._ohlc_ttl(1, "I") == q._OHLC_TTL       # 1-min: tight base window
+    assert q._ohlc_ttl(5, "I") == 150               # 5-min cached far longer
+    assert q._ohlc_ttl(15, "I") == 300              # capped at 300
+    assert q._ohlc_ttl(60, "I") == 300
+    assert q._ohlc_ttl(1, "D") == 600               # daily longest
+    assert q._ohlc_ttl(None, "I") == q._OHLC_TTL    # bad interval -> base
+
+
+def test_get_ohlc_5min_served_from_cache_past_base_ttl():
+    # The 5-min context fan-out must NOT re-hit charting every 30s: an entry aged
+    # beyond the 1-min base TTL but within the 5-min window is still served cached,
+    # while a 1-min series at the same age would have expired and refetched.
+    calls = {"n": 0}
+
+    def _fake(_p):
+        calls["n"] += 1
+        return {"data": []}
+
+    with _clean(), _patch(q, "get_token", lambda s: "TKN"), \
+         _patch(q, "_charting_get", _fake):
+        q.get_ohlc("ACC", interval=5)               # cold -> 1 fetch
+        assert calls["n"] == 1
+        k5 = ("ohlc", "ACC", 5, "I", None, None, None)
+        ts, val = q._cache[k5]
+        q._cache[k5] = (ts - 90, val)               # age 90s: past 30s base, under 150s
+        q.get_ohlc("ACC", interval=5)               # still cached -> no new fetch
+        assert calls["n"] == 1
+        q.get_ohlc("ACC", interval=1)               # different key, cold -> fetch
+        assert calls["n"] == 2
+        k1 = ("ohlc", "ACC", 1, "I", None, None, None)
+        ts1, val1 = q._cache[k1]
+        q._cache[k1] = (ts1 - 90, val1)             # age 90s: past the 1-min TTL
+        q.get_ohlc("ACC", interval=1)               # expired -> refetch
+        assert calls["n"] == 3
+
+
 # ---------------------------------------------------------------------------
 # get_option_expiries / get_option_summary
 # ---------------------------------------------------------------------------

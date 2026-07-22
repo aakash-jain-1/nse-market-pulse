@@ -106,7 +106,7 @@ snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQL
 db_inspect.py        Read-only SQLite inspector CLI
 nse_demand.py        Standalone CLI scanner
 templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 797 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+test_*.py            Unit tests — 804 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
@@ -338,7 +338,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **797 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **808 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -494,6 +494,84 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-22 — SIM summary made fully non-blocking (first F&O load is instant) (suite 804 → 808)
+- **Why:** after the reprice throttle, repeated SIM polls were instant but the FIRST (cold)
+  `summary?book=fno` still blocked 8–25s, and *every* poll landing after a >30s idle gap stalled 6–9s.
+  Two residual synchronous NSE hops in `summary()`: (1) the reprice fan-out (cold hot-list map +
+  charting tokens → big per-symbol quote fan-out), and (2) `current_regime()` → `get_index_snapshot()`,
+  whose cache is only ~30s — so an expired index fetch queued behind the reprice on the global pacer.
+- **What (`sim.py`):**
+  - **Reprice is async.** `summary()` calls `_maybe_reprice_async()`, which kicks the fan-out on a
+    daemon thread and returns immediately — the tab renders the last reprice from the DB at once and the
+    fresh numbers land on the next poll. `_reprice_running` (under `_update_gate`) + `_UPDATE_TTL` ensure
+    only one runs at a time; the SYNCHRONOUS `update()` (snapshot logger MTM) is unchanged. Shared body
+    factored into `_reprice_open_trades()`.
+  - **Regime is stale-while-revalidate.** `current_regime()` now serves the last snapshot INSTANTLY and
+    recomputes in the background when stale (`_REGIME_TTL` 30s, `_regime_cache`/`_refresh_regime`); a
+    cold start returns a cheap neutral regime and the real one lands on the next poll. This was the LAST
+    synchronous NSE hop in the summary path.
+- **Result (live-verified):** cold first `summary?book=fno` **0.04s** (was 22s); after a 35s idle gap
+  **0.03s** (was 6–9s); `cash` 0.1s, `/regime` 0.001s. Regime badge fills with real data (Trend-Down,
+  NIFTY/VIX) a beat after load. Tests **+4** (async kick non-blocking + reprices + skips within TTL;
+  regime non-blocking on cold + serves-stale-then-refreshes). Suite **804 → 808**.
+
+### 2026-07-22 — Fix: boot warm-up starved the app ("first call won't load") (suite 801 → 804)
+- **Why:** a clean restart during market hours confirmed the acute boot hang — for ~5 min after
+  startup even the local `/api/health` timed out. Cause: `_warm_sim` eagerly runs
+  `cached_regime_leaderboard` + `cached_walkforward`, a **daily-bar backtest over a LIVE universe**
+  (~60 paced NSE fetches + a heavy CPU pass). At boot, in market hours, that burst saturates the
+  pacer and starves the dev server before the user does anything.
+- **What (`app.py`):** extracted `_warm_sim_pass()` (module-level, testable) that (1) **skips during
+  market hours** — the Sim tab computes the strategy-of-day card lazily on first visit (server-cached
+  ~6h), idea generation falls back to the un-warmed board until then — and (2) bails on a WAF
+  cooldown. Off-hours it still warms both caches (no contention, primes next session). The boot
+  thread now also **defers** the pass by `SIM_WARM_DELAY_SEC` (default 60s) so the first
+  page/poll is served first.
+- **Result (live-verified):** after the fix a fresh boot no longer runs the live burst in market
+  hours; steady-state settled at **reqLastMin ~55/120** (was pegged at 120), `symbolHistoricalData`
+  27/min (was ~63), `symbolsDynamic` ~1/min, `/api/health` ~0.7s, and `summary?book=fno` 8.4s cold
+  then **0.029s** throttled. Tests **+3** (`_warm_sim_pass` skips in-hours / warms off-hours / bails
+  on block). Suite **801 → 804**.
+
+### 2026-07-22 — Cut the per-symbol chart fan-out (biggest NSE consumer) (suite 799 → 801)
+- **Why:** with SIM fixed, `/api/health` showed we were pegged at the pacer ceiling
+  (`reqLastMin: 120`, **not** WAF-blocked) and the per-endpoint budget was dominated by
+  charting: `symbolsDynamic` + `symbolHistoricalData` ≈ **63/120** of the minute. The bulk is
+  `strategies.build_context`'s **5-min candle fan-out** over ~30 candidates — a *stable* cache
+  key, so it re-hit `charting.nseindia.com` every `_OHLC_TTL` (30s), several sweeps/min.
+- **What (`nse_quote.py`):** interval-aware cache TTL — `_ohlc_ttl(interval, chart_type)` caches
+  COARSER bars much longer (5-min → 150s, 15-min → 300s, daily → 600s; 1-min stays 30s). A
+  forming N-min bar barely moves in ~N min, so this is pure efficiency: build_context's 5-min
+  refetch rate drops ~5× with no strategy-behavior change. The 1-min intrabar resolvers pass a
+  moving `to_ts` (keys never repeat) so they're unaffected — for them we added **knobs**:
+  `SIM_INTRABAR_SEC` / `IDEAS_INTRABAR_SEC` (default 180s) to lengthen those sweeps if the
+  Akamai budget is tight.
+- **Result:** the dominant chart consumer now serves mostly from cache; the minute budget frees
+  up for the market-wide lists. Tests **+2** (`_ohlc_ttl` scaling; 5-min served from cache past
+  the 1-min base TTL while 1-min refetches). Suite **799 → 801**.
+
+### 2026-07-22 — Fix: SIM/F&O tabs stalled + piled up NSE calls (suite 797 → 799)
+- **Why:** with the global NSE pacer live, the SIM (esp. **F&O**) tabs stopped loading and
+  the network tab showed the same requests firing over and over (`summary?book=fno`,
+  `recommendations`, even `health` all stuck *pending*). Root cause: `sim.summary()` calls
+  `sim.update()` on **every** poll, which re-prices every OPEN trade — and F&O names are
+  rarely in the hot-list map, so each fell through to a **per-symbol NSE quote**, run
+  **sequentially** and funnelled through the pacer (min-gap + concurrency cap). So each poll
+  did a slow N-symbol fan-out; meanwhile the frontend's auto-refresh + 20s idea-alert timer
+  kept firing new polls without waiting, stacking requests until the browser's ~6-connection
+  limit saturated and everything (incl. `/api/health`) queued.
+- **What (`sim.py`):** throttle the reprice — `update()` now skips the NSE fan-out if it ran
+  within `_UPDATE_TTL` (45s) and serves the last reprice from the DB (the snapshot logger still
+  calls `update()` every cycle, so MTM stays fresh in market hours); added `force=True` to
+  bypass. New `_resolve_prices()` warms the shared hot-list map **once** then fans the rest out
+  in **parallel** (still pacer-bounded) instead of one blocking call at a time.
+- **What (`templates/index.html`):** in-flight guards so a slow response can't stack — the
+  auto-refresh tick skips while a `load()` is running (`_loadInFlight`), and `ideaAlertTick()`
+  skips while its `/api/recommendations` poll is still resolving (`_ideaTickBusy`).
+- **Result:** repeated SIM/F&O polls are now cheap DB reads; only one bounded reprice per 45s;
+  no request pile-up. Tests **+2** (throttle honors TTL/force; parallel resolver maps all
+  symbols). Suite **797 → 799**.
 
 ### 2026-07-20 — Endpoint budget in the UI (Log modal table) (suite 797, UI only)
 - **Why:** the per-endpoint budget was only in `/api/health` JSON. Make "where our NSE quota

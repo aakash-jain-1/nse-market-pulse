@@ -179,8 +179,22 @@ def build_ctx():
     return ctx
 
 
-def current_regime():
-    """Cheap regime for the banner: index snapshot only, no full context."""
+# Regime cache (stale-while-revalidate). summary() is polled constantly and calls
+# current_regime() on every hit, but get_index_snapshot() is only cached ~30s — so
+# each poll that landed after that cache expired paid a cold /allIndices fetch, and
+# when the background reprice was saturating the NSE pacer that cold fetch queued
+# behind it, stalling the SIM/F&O summary for several seconds (the recurring
+# "summary won't load" spinner). Now we serve the last regime INSTANTLY and refresh
+# it in the BACKGROUND when stale, so summary() never blocks on the index fetch.
+_REGIME_TTL = 30
+_regime_cache = None
+_regime_ts = 0.0
+_regime_running = False
+_regime_gate = threading.Lock()
+
+
+def _compute_regime():
+    """Cheap regime from the index snapshot only (no full context). Blocking."""
     state = _load()
     idx = {}
     try:
@@ -188,6 +202,38 @@ def current_regime():
     except Exception:
         pass
     return strat.detect_regime({"index": idx}, _prior_day_move(state))
+
+
+def _refresh_regime():
+    global _regime_cache, _regime_ts, _regime_running
+    try:
+        rg = _compute_regime()
+        with _regime_gate:
+            _regime_cache, _regime_ts = rg, time.time()
+    finally:
+        with _regime_gate:
+            _regime_running = False
+
+
+def current_regime():
+    """NON-BLOCKING market regime for the SIM banner. Returns the last snapshot
+    instantly and (re)computes it in a BACKGROUND thread when stale, so summary()
+    never blocks on a cold index fetch funnelled through the NSE pacer. On a cold
+    start (nothing computed yet) it returns a cheap neutral regime; the real one
+    lands on the next poll."""
+    global _regime_running
+    now = time.time()
+    with _regime_gate:
+        cached = _regime_cache
+        if cached is not None and (now - _regime_ts) < _REGIME_TTL:
+            return cached
+        if not _regime_running and not _STOPPING.is_set():
+            _regime_running = True
+            threading.Thread(target=_refresh_regime, name="sim-regime",
+                             daemon=True).start()
+    if cached is not None:
+        return cached
+    return strat.detect_regime({"index": {}}, _prior_day_move(_load()))
 
 
 # ----------------------------------------------------------------------------
@@ -333,7 +379,13 @@ def _refresh_trade(state, t, px=_UNSET):
 
 
 _last_intrabar = 0.0
-INTRABAR_INTERVAL = 180   # seconds between minute-candle catch-up sweeps
+# Seconds between the per-open-trade minute-candle catch-up sweeps (a paced NSE
+# chart fan-out). Env-configurable so it can be lengthened to cut NSE load if the
+# Akamai budget is tight; the 45s coarse reprice already tracks P&L between sweeps.
+try:
+    INTRABAR_INTERVAL = max(60, int(os.getenv("SIM_INTRABAR_SEC", "").strip() or 180))
+except ValueError:
+    INTRABAR_INTERVAL = 180
 
 # Set on app shutdown so the intrabar fetch bails instead of racing the interpreter
 # teardown into a ThreadPoolExecutor. See app.py's shutdown wiring.
@@ -436,18 +488,65 @@ def _intrabar_apply(state, open_trades, candles):
             t["closedDay"] = probe.get("closedDay")
 
 
-def update(ctx=None):
-    """Re-price and resolve every OPEN trade; persist changes to the DB ledger.
+# Repricing throttle + async kick. summary() is polled constantly, and each open
+# symbol NOT in the hot-list map falls through to a per-symbol NSE quote — which,
+# funnelled through the global request pacer, made the fan-out slow (esp. the F&O
+# book, whose names are rarely in the hot lists). Two guards:
+#  • THROTTLE: skip the fan-out if it ran within _UPDATE_TTL (repeated polls reuse
+#    the last reprice from the DB), and never run two at once (_reprice_running).
+#  • ASYNC: summary() kicks the reprice in the BACKGROUND and returns the last values
+#    immediately, so the SIM/F&O tab never blocks on a cold per-symbol fan-out (the
+#    "first call won't load" case); the fresh numbers land on the next poll.
+# The snapshot logger still calls the SYNCHRONOUS update() each cycle, so open-trade
+# MTM stays fresh during market hours regardless of how the UI polls.
+_UPDATE_TTL = 45        # seconds between actual NSE reprice fan-outs
+_last_update = 0.0
+_reprice_running = False
+_update_gate = threading.Lock()
 
-    All network I/O — per-symbol price resolution and the minute-candle catch-up
-    fan-out — is done OUTSIDE _lock (AUDIT2 N1). The lock only guards the pure
-    in-memory reprice/resolve + the DB write, so a slow NSE call can no longer
-    serialize concurrent sim readers/writers.
-    """
+
+def _resolve_prices(symbols):
+    """LTPs for the open-trade symbols. Warms the shared hot-list map ONCE (so the
+    fan-out mostly hits that cache and avoids a thundering herd rebuilding it), then
+    resolves the rest in PARALLEL — the pacer still bounds concurrency/rate, but
+    parallel submission beats resolving off-hot-list names one blocking call at a
+    time. Falls back to sequential on shutdown or pool failure."""
+    syms = list(symbols)
+    if not syms:
+        return {}
+    try:
+        nse.get_price_map()          # warm the shared cache once, single-threaded
+    except Exception:
+        pass
+    if len(syms) == 1 or _STOPPING.is_set():
+        return {s: _price(s) for s in syms}
+    try:
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(max_workers=min(6, len(syms))) as ex:
+            return dict(zip(syms, ex.map(_price, syms)))
+    except Exception:
+        return {s: _price(s) for s in syms}
+
+
+def _should_reprice(force, now):
+    """Caller MUST hold _update_gate. Returns True (and stamps _last_update) when a
+    reprice should start now: none already in flight, and stale (or forced)."""
+    global _last_update
+    if _reprice_running:
+        return False
+    if not force and (now - _last_update) < _UPDATE_TTL:
+        return False
+    _last_update = now
+    return True
+
+
+def _reprice_open_trades():
+    """Re-price + intrabar-resolve every OPEN trade and persist. All network I/O
+    (per-symbol price resolution + the minute-candle catch-up) is done OUTSIDE _lock
+    (AUDIT2 N1); the lock only guards the in-memory reprice/resolve + the DB write,
+    so a slow NSE call can't serialize concurrent sim readers/writers."""
     seed = db.sim_open_trades()
-    # Resolve every open symbol's price (may hit NSE for off-hot-list names) and
-    # fetch the catch-up candles up front, lock-free.
-    prices = {s: _price(s) for s in {t["symbol"] for t in seed}}
+    prices = _resolve_prices({t["symbol"] for t in seed})
     candles = _intrabar_fetch(seed)
     with _lock:
         state = _load()
@@ -457,6 +556,45 @@ def update(ctx=None):
         _intrabar_apply(state, open_trades, candles)
         db.sim_insert_trades(open_trades)    # REPLACE-updates the changed rows
         return state
+
+
+def update(ctx=None, force=False):
+    """SYNCHRONOUS throttled reprice (used by the snapshot logger each cycle).
+    Returns the (possibly unchanged) state. The SIM tab uses _maybe_reprice_async()
+    so the UI never blocks on the fan-out."""
+    global _reprice_running
+    with _update_gate:
+        if not _should_reprice(force, time.time()):
+            return _load()               # recent enough / in flight — no fan-out now
+        _reprice_running = True
+    try:
+        return _reprice_open_trades()
+    finally:
+        with _update_gate:
+            _reprice_running = False
+
+
+def _maybe_reprice_async(force=False):
+    """Kick a background reprice if stale — NON-BLOCKING. summary() calls this so the
+    SIM/F&O tab returns the last reprice from the DB instantly (no blocking on the
+    cold per-symbol NSE fan-out); the fresh numbers arrive on the next poll."""
+    global _reprice_running
+    if _STOPPING.is_set():
+        return
+    with _update_gate:
+        if not _should_reprice(force, time.time()):
+            return
+        _reprice_running = True
+
+    def _run():
+        global _reprice_running
+        try:
+            _reprice_open_trades()
+        finally:
+            with _update_gate:
+                _reprice_running = False
+
+    threading.Thread(target=_run, name="sim-reprice", daemon=True).start()
 
 
 def take(strategy_ids=None, ctx=None, auto=False, limit=10, book="cash"):
@@ -1022,7 +1160,7 @@ def _scorecard(trades):
 
 def summary(strategy_id=None, book="cash"):
     """Overview scorecards + regime; plus one strategy's trade detail if asked."""
-    update()
+    _maybe_reprice_async()   # non-blocking: return last values now, refresh in bg
     state = _load()
     regime = current_regime()
 
