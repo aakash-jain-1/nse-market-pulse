@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 import requests
 from requests.adapters import HTTPAdapter
 
+from nse_pulse.core import swr
+
 # Optional TLS-fingerprint impersonation (Akamai resilience Phase 2). Plain requests'
 # TLS/HTTP2 fingerprint (JA3/JA4) is trivially flagged as "not a browser"; curl_cffi
 # wraps curl-impersonate to present a REAL Chrome handshake — the one layer the pacer
@@ -1737,6 +1739,28 @@ def get_all_futures(force=False):
         rows.sort(key=lambda x: (x.get("volume") or 0), reverse=True)
         _all_fut_cache.update(ts=time.time(), rows=rows)
         return rows
+
+
+# /api/futures/all sweeps the whole ~215-name F&O universe per-symbol through the NSE
+# pacer — ~8.5 MINUTES cold in the prod access log. Because one sweep can't finish
+# inside the 90s cache TTL, the endpoint was effectively re-sweeping on almost every
+# call AND blocking the caller (starving the shared pacer/GIL, which dragged down other
+# endpoints incl. /api/health). Serve the last sweep instantly and refresh in the
+# background instead; a long SWR TTL avoids kicking back-to-back multi-minute sweeps.
+# get_all_futures() itself stays blocking + single-flight for any direct/forced caller.
+_ALL_FUT_SWR_TTL = 600     # 10 min >> one sweep, so we never sweep continuously
+_all_fut_swr = swr.SwrCache(
+    get_all_futures, ttl=_ALL_FUT_SWR_TTL, placeholder=lambda: [],
+    should_refresh=lambda: not blocked_for(),   # don't sweep during a WAF cooldown
+    maxsize=1, name="all-fut")
+
+
+def get_all_futures_cached():
+    """NON-BLOCKING /api/futures/all: the last full-universe futures sweep instantly,
+    refreshed in the background when stale (a cold start returns [] while the first
+    ~minutes-long sweep runs off-thread). get_all_futures() stays blocking + single-flight
+    for direct/forced callers and the tests."""
+    return _all_fut_swr.get()
 
 
 def get_demand_score(limit=25):

@@ -590,6 +590,12 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **`/api/futures/all` non-blocking (SWR)** — the access log's worst endpoint (up to ~507s / 8.5-min cold
+  full-universe futures sweep, which blocked the caller and starved the shared pacer) now serves the last
+  sweep instantly via `nse_client.get_all_futures_cached()` (reuses `SwrCache`; 10-min TTL so multi-minute
+  sweeps never chain; WAF-cooldown veto). `get_all_futures()` stays blocking + single-flight for direct
+  callers. Suite 844 (unchanged — route test repointed at the wrapper).
+
 - **Non-blocking heavy endpoints (SWR) + `start.py` launcher** — `/api/sim/strategy_of_day`
   (16–97s cold) and `/api/eod/conviction` (~43s cold) now serve the last value instantly and
   refresh in a background thread via a new `nse_pulse/core/swr.py` (`SwrCache`). Additive

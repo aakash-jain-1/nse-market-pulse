@@ -224,7 +224,7 @@ def api_futures():
 
 @app.route("/api/futures/all")
 def api_futures_all():
-    return jsonify(nse.get_all_futures())
+    return jsonify(nse.get_all_futures_cached())
 
 
 @app.route("/api/futures/<symbol>")

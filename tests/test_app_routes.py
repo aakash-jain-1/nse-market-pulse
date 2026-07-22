@@ -55,7 +55,7 @@ def test_board_endpoints_passthrough():
         (nse, "get_volume_gainers", lambda limit=20: [{"vg": 1}]),
         (nse, "get_oi_spurts", lambda limit=20: [{"oi": 1}]),
         (nse, "get_futures", lambda limit=25: [{"fut": 1}]),
-        (nse, "get_all_futures", lambda: [{"allfut": 1}]),
+        (nse, "get_all_futures_cached", lambda: [{"allfut": 1}]),
         (nse, "get_demand_score", lambda limit=25: [{"demand": 1}]),
         (nse, "get_fno_universe", lambda: {"stocks": ["A"], "count": 1}),
     ):

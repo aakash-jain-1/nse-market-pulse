@@ -514,6 +514,20 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-07-22 — `/api/futures/all` non-blocking (SWR) (suite 844, unchanged)
+- **Why:** the access log's worst offender — `/api/futures/all` at up to **507s** (~8.5 min) cold. It sweeps
+  the whole ~215-name F&O universe per-symbol through the NSE pacer; one sweep can't finish inside the 90s
+  `_ALL_FUT_TTL`, so it was effectively re-sweeping on almost every call AND blocking the caller — starving the
+  shared pacer/GIL and dragging down other endpoints (incl. `/api/health`).
+- **What:** reused `SwrCache` for a third heavy path. New additive `nse_client.get_all_futures_cached()` (used
+  ONLY by the route) serves the last full sweep instantly and refreshes in the background; **10-min SWR TTL**
+  (`_ALL_FUT_SWR_TTL = 600` ≫ one sweep) so we never chain back-to-back multi-minute sweeps, plus a
+  `should_refresh=lambda: not blocked_for()` veto that skips sweeping during a WAF cooldown. A cold start
+  returns `[]` while the first sweep runs off-thread. `get_all_futures()` stays blocking + single-flight for
+  any direct/forced caller and the tests.
+- **Tests:** repointed the `/api/futures/all` route test at the wrapper; the thin wrapper is otherwise covered
+  by that route test + `tests/test_swr.py`. Suite **844**, all green; cold call confirmed instant (`[]`).
+
 ### 2026-07-22 — Non-blocking strategy_of_day + conviction board (SWR) + start.py launcher (suite 826 → 844)
 - **Why:** the access log exposed `/api/sim/strategy_of_day` taking **16–97s** and `/api/eod/conviction`
   **~43s** on a COLD cache (both ~2ms / ~300ms once warm). Each ran its full pipeline *synchronously* on
