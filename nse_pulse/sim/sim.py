@@ -1,0 +1,1308 @@
+"""
+Multi-strategy recommendation simulator (forward-test)
+======================================================
+"Buy your own recommendations" — for SEVERAL strategies at once. Each strategy
+in `strategies.py` gets its OWN parallel ledger: we snapshot its ideas, enter
+at the recommended entry (flat notional), then track each trade against its
+target / stop (with a multi-day horizon). Every day is tagged with a market
+regime, so a day-by-day rollup shows WHICH strategy works in WHICH regime
+(momentum on trend days, mean-reversion on recovery days, ...).
+
+Kept SEPARATE from the manual paper account (`paper.py`). State persists to
+`sim_state.json` (gitignored). Educational only — NOT investment advice.
+
+Books
+-----
+Trades carry a `book` tag so two parallel portfolios run off the SAME live
+context and strategies:
+- `cash` : the all-market book (every idea) — the original sim.
+- `fno`  : only F&O-eligible ideas (idea['fno']) — a dedicated F&O book.
+Both use identical risk-based sizing, so their scorecards are directly
+comparable. All read views take a `book=` argument (default 'cash').
+
+Entry modes
+-----------
+- `continuous` : auto-take fresh qualifying ideas every cycle (deduped).
+- `open`       : auto-take ONE snapshot per strategy per day (near the open).
+(Manual "Take" always takes now, regardless of mode.)
+
+Exit
+----
+Target or stop, else a multi-day horizon (`maxSessions`, default 3 trading
+sessions) after which the trade is time-expired at the current price.
+"""
+
+import json
+import os
+import threading
+import time
+from datetime import datetime, timezone, timedelta
+
+from nse_pulse.core import db
+from nse_pulse.core import intrabar
+from nse_pulse.core import nse_client as nse
+from nse_pulse.core import paths
+from nse_pulse.sim import strategies as strat
+
+IST = timezone(timedelta(hours=5, minutes=30))
+STATE_FILE = paths.root("sim_state.json")
+NOTIONAL = 100_000.0   # fallback notional when a trade has no usable stop
+RISK_PER_TRADE = 2_000.0   # fixed rupees risked per trade (position sizing unit)
+MAX_NOTIONAL = 500_000.0   # cap so a very tight stop can't blow up position size
+DEFAULT_MAX_SESSIONS = 3
+STATE_VERSION = 2
+
+
+def size_position(entry, stop, risk=RISK_PER_TRADE):
+    """
+    Risk-based sizing: pick a quantity so that hitting the stop loses exactly
+    `risk` rupees (per-share risk = |entry - stop|). Capped by MAX_NOTIONAL.
+    Falls back to flat NOTIONAL when there's no usable stop.
+    Returns (qty, notional). With the default risk every trade risks the same,
+    so equity curves / expectancy are comparable across strategies; passing a
+    scaled `risk` lets a strategy size up/down by conviction (see gen_adaptive).
+    """
+    if not entry or entry <= 0:
+        return 0.0, 0.0
+    risk_per_share = abs(entry - stop) if stop else 0
+    if risk_per_share > 0:
+        qty = risk / risk_per_share
+        qty = min(qty, MAX_NOTIONAL / entry)
+    else:
+        qty = NOTIONAL / entry
+    return qty, round(qty * entry, 2)
+
+_lock = threading.RLock()
+
+
+def _now():
+    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _today():
+    return datetime.now(IST).strftime("%Y-%m-%d")
+
+
+def _default_state():
+    # Trades now live in SQLite (db.sim_trades). The JSON holds only the small,
+    # document-shaped settings + the bounded per-day rollup.
+    return {
+        "version": STATE_VERSION,
+        "auto": True,   # sims run automatically on startup (no user input needed)
+        "entryMode": "continuous",
+        "maxSessions": DEFAULT_MAX_SESSIONS,
+        "daily": {},
+        "lastAutoDate": {},
+        "createdAt": _now(),
+    }
+
+
+def _load():
+    _ensure_migrated()
+    if not os.path.exists(STATE_FILE):
+        return _default_state()
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            st = json.load(f)
+        if st.get("version") != STATE_VERSION:
+            return _default_state()
+        st.pop("strategies", None)   # trades moved to SQLite; drop stale blob
+        st.setdefault("daily", {})
+        st.setdefault("lastAutoDate", {})
+        st.setdefault("entryMode", "continuous")
+        st.setdefault("maxSessions", DEFAULT_MAX_SESSIONS)
+        st.setdefault("auto", True)
+        return st
+    except Exception:
+        return _default_state()
+
+
+def _save(state):
+    state.pop("strategies", None)    # never persist trades back into JSON
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, STATE_FILE)
+
+
+_migrated = False
+
+
+def _ensure_migrated():
+    """One-time move of any trades embedded in sim_state.json into SQLite."""
+    global _migrated
+    if _migrated:
+        return
+    with _lock:
+        if _migrated:
+            return
+        db.init()
+        try:
+            if db.sim_trade_count() == 0 and os.path.exists(STATE_FILE):
+                with open(STATE_FILE, encoding="utf-8") as f:
+                    raw = json.load(f)
+                trades = []
+                for sid, book in (raw.get("strategies") or {}).items():
+                    for t in (book or {}).get("trades", []):
+                        t.setdefault("strategy", sid)
+                        trades.append(t)
+                if trades:
+                    db.sim_insert_trades(trades)
+        except Exception:
+            pass
+        _migrated = True
+
+
+def _price(symbol):
+    try:
+        return nse.get_price(symbol)
+    except Exception:
+        return None
+
+
+# ----------------------------------------------------------------------------
+# Context / regime
+# ----------------------------------------------------------------------------
+def _prior_day_move(state):
+    """NIFTY %change of the most recent daily entry BEFORE today (for regime)."""
+    today = _today()
+    dates = sorted(d for d in state.get("daily", {}) if d < today)
+    if not dates:
+        return None
+    return state["daily"][dates[-1]].get("niftyPct")
+
+
+def build_ctx():
+    """Full data bundle with today's regime attached (used for taking ideas)."""
+    state = _load()
+    ctx = strat.build_context()
+    ctx["regime"] = strat.detect_regime(ctx, _prior_day_move(state))
+    return ctx
+
+
+# Regime cache (stale-while-revalidate). summary() is polled constantly and calls
+# current_regime() on every hit, but get_index_snapshot() is only cached ~30s — so
+# each poll that landed after that cache expired paid a cold /allIndices fetch, and
+# when the background reprice was saturating the NSE pacer that cold fetch queued
+# behind it, stalling the SIM/F&O summary for several seconds (the recurring
+# "summary won't load" spinner). Now we serve the last regime INSTANTLY and refresh
+# it in the BACKGROUND when stale, so summary() never blocks on the index fetch.
+_REGIME_TTL = 30
+_regime_cache = None
+_regime_ts = 0.0
+_regime_running = False
+_regime_gate = threading.Lock()
+
+
+def _compute_regime():
+    """Cheap regime from the index snapshot only (no full context). Blocking."""
+    state = _load()
+    idx = {}
+    try:
+        idx = nse.get_index_snapshot()
+    except Exception:
+        pass
+    return strat.detect_regime({"index": idx}, _prior_day_move(state))
+
+
+def _refresh_regime():
+    global _regime_cache, _regime_ts, _regime_running
+    try:
+        rg = _compute_regime()
+        with _regime_gate:
+            _regime_cache, _regime_ts = rg, time.time()
+    finally:
+        with _regime_gate:
+            _regime_running = False
+
+
+def current_regime():
+    """NON-BLOCKING market regime for the SIM banner. Returns the last snapshot
+    instantly and (re)computes it in a BACKGROUND thread when stale, so summary()
+    never blocks on a cold index fetch funnelled through the NSE pacer. On a cold
+    start (nothing computed yet) it returns a cheap neutral regime; the real one
+    lands on the next poll."""
+    global _regime_running
+    now = time.time()
+    with _regime_gate:
+        cached = _regime_cache
+        if cached is not None and (now - _regime_ts) < _REGIME_TTL:
+            return cached
+        if not _regime_running and not _STOPPING.is_set():
+            _regime_running = True
+            threading.Thread(target=_refresh_regime, name="sim-regime",
+                             daemon=True).start()
+    if cached is not None:
+        return cached
+    return strat.detect_regime({"index": {}}, _prior_day_move(_load()))
+
+
+# ----------------------------------------------------------------------------
+# Trades
+# ----------------------------------------------------------------------------
+def _open_trade(idea, strategy_id, regime_label, book="cash", vol_label=None):
+    entry = idea.get("entry") or idea.get("ltp")
+    if not entry:
+        return None
+    direction = idea["direction"]
+    # Regime-conditioned sizing: strategies may carry a conviction multiplier
+    # (only the adaptive playbook does today). 1.0 = the standard fixed risk, so
+    # every fixed strategy stays perfectly comparable.
+    size_mult = idea.get("sizeMult") or 1.0
+    risk = round(RISK_PER_TRADE * size_mult, 2)
+    qty, notional = size_position(entry, idea.get("stop"), risk=risk)
+    return {
+        "id": f"{book}|{strategy_id}|{idea['symbol']}|{direction}|"
+              f"{datetime.now(IST).strftime('%Y%m%d%H%M%S')}",
+        "book": book,
+        "strategy": strategy_id,
+        "symbol": idea["symbol"],
+        "direction": direction,
+        "conviction": idea.get("conviction"),
+        "rating": idea.get("rating"),
+        "reasons": idea.get("reasons", []),
+        "fno": idea.get("fno", False),
+        "entry": round(entry, 2),
+        "stop": idea.get("stop"),
+        "target": idea.get("target"),
+        "stopPct": idea.get("stopPct"),
+        "targetPct": idea.get("targetPct"),
+        "rr": idea.get("rr"),
+        "qty": qty,
+        "notional": notional,
+        "risk": risk,
+        "status": "OPEN",
+        "ltp": round(entry, 2),
+        "mfePct": 0.0,
+        "maePct": 0.0,
+        "pnl": 0.0,
+        "pnlPct": 0.0,
+        "rMultiple": 0.0,
+        "openedAt": _now(),
+        "openedDate": _today(),
+        "regimeAtEntry": regime_label,
+        "volAtEntry": vol_label,
+        "exitPrice": None,
+        "closedAt": None,
+        "closedDay": None,
+        "minsToExit": None,
+    }
+
+
+def _move_pct(t, px):
+    if t["direction"] == "LONG":
+        return (px - t["entry"]) / t["entry"] * 100
+    return (t["entry"] - px) / t["entry"] * 100
+
+
+def _sessions_elapsed(state, opened_date):
+    """Trading sessions (business days) from entry date through today, inclusive.
+
+    Counts weekdays rather than only the days the app happened to log (AUDIT.md
+    L6): the old daily-log count under-counted whenever the app was offline for a
+    session, so multi-day trades could linger past their horizon. Holidays are
+    counted as sessions — a minor over-count that at worst expires a trade one
+    session early in a holiday-heavy week, far better than never expiring.
+    """
+    try:
+        start = datetime.strptime(str(opened_date)[:10], "%Y-%m-%d").date()
+        end = datetime.strptime(_today(), "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return 1
+    if end < start:
+        return 1
+    days = 0
+    d = start
+    while d <= end:
+        if d.weekday() < 5:      # Mon-Fri
+            days += 1
+        d += timedelta(days=1)
+    return days or 1
+
+
+_UNSET = object()
+
+
+def _refresh_trade(state, t, px=_UNSET):
+    """Reprice one OPEN trade; close on target/stop, or time-expire at horizon.
+
+    `px` may be a price pre-fetched OUTSIDE _lock by update() (AUDIT2 N1) so the
+    sim's critical section never blocks on network I/O. Leave it UNSET to fetch
+    inline via _price() (used by tests and any direct caller); pass None
+    explicitly to signal 'no live price available'.
+    """
+    if t["status"] != "OPEN":
+        return
+    if px is _UNSET:
+        px = _price(t["symbol"])
+    if px is None:
+        # No live price — the symbol has cooled off the hot lists. Don't let the
+        # trade hang OPEN forever (AUDIT.md M4): still enforce the max-hold
+        # horizon, closing at the last known mark. The intrabar catch-up will
+        # supersede this with a candle-accurate exit if the symbol has a token.
+        if _sessions_elapsed(state, t["openedDate"]) > state.get(
+                "maxSessions", DEFAULT_MAX_SESSIONS):
+            last = t.get("ltp") or t["entry"]
+            t["status"] = "EXPIRED"
+            t["exitPrice"] = round(last, 2)
+            t["closedAt"] = _now()
+            t["closedDay"] = t["closedAt"][:10]   # AUDIT2 N6: stamp like intrabar
+            t["pnl"] = round(t["qty"] * (last - t["entry"]) *
+                             (1 if t["direction"] == "LONG" else -1), 2)
+            t["pnlPct"] = round(_move_pct(t, last), 2)
+            t["rMultiple"] = round(t["pnl"] / t.get("risk", RISK_PER_TRADE), 2)
+        return
+    t["ltp"] = round(px, 2)
+    fav = _move_pct(t, px)
+    t["mfePct"] = round(max(t["mfePct"], fav), 2)
+    t["maePct"] = round(min(t["maePct"], fav), 2)
+
+    # Coarse single-price resolution via the shared helper (AUDIT.md M9); the
+    # intrabar catch-up later supersedes this with candle-accurate exits.
+    hit, exit_px = intrabar.resolve_point(
+        t["direction"], t["entry"], t.get("stop"), t.get("target"), px)
+
+    if not hit and _sessions_elapsed(state, t["openedDate"]) > state.get("maxSessions", DEFAULT_MAX_SESSIONS):
+        hit, exit_px = "EXPIRED", px
+
+    if hit:
+        t["status"] = hit
+        t["exitPrice"] = round(exit_px, 2)
+        t["closedAt"] = _now()
+        t["closedDay"] = t["closedAt"][:10]   # AUDIT2 N6: stamp like intrabar
+        t["ltp"] = round(exit_px, 2)
+        px = exit_px
+
+    t["pnl"] = round(t["qty"] * (px - t["entry"]) *
+                     (1 if t["direction"] == "LONG" else -1), 2)
+    t["pnlPct"] = round(_move_pct(t, px), 2)
+    t["rMultiple"] = round(t["pnl"] / t.get("risk", RISK_PER_TRADE), 2)
+
+
+_last_intrabar = 0.0
+# Seconds between the per-open-trade minute-candle catch-up sweeps (a paced NSE
+# chart fan-out). Env-configurable so it can be lengthened to cut NSE load if the
+# Akamai budget is tight; the 45s coarse reprice already tracks P&L between sweeps.
+try:
+    INTRABAR_INTERVAL = max(60, int(os.getenv("SIM_INTRABAR_SEC", "").strip() or 180))
+except ValueError:
+    INTRABAR_INTERVAL = 180
+
+# Set on app shutdown so the intrabar fetch bails instead of racing the interpreter
+# teardown into a ThreadPoolExecutor. See app.py's shutdown wiring.
+_STOPPING = threading.Event()
+
+
+def request_stop():
+    """Signal background passes to stop spawning/using thread pools (app shutdown)."""
+    _STOPPING.set()
+
+
+def _baked_epoch(ts_str):
+    dt = datetime.fromisoformat(str(ts_str).replace(" ", "T"))
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return int(dt.replace(tzinfo=timezone.utc).timestamp())
+
+
+def _intrabar_fetch(open_trades):
+    """
+    Network half of the minute-candle catch-up (throttled to INTRABAR_INTERVAL).
+
+    Between the coarse 60s LTP samples a stop/target can be pierced by a wick and
+    missed. Every few minutes we pull real 1-min candles for every still-OPEN
+    symbol so the apply half can close any that actually hit their level intrabar.
+
+    Returns {symbol: bars}, or None when it isn't time yet / nothing is open.
+    Runs OUTSIDE _lock (AUDIT2 N1) so the sim's critical section never blocks on
+    this 6-worker fan-out to NSE.
+    """
+    global _last_intrabar
+    now = time.time()
+    if _STOPPING.is_set() or now - _last_intrabar < INTRABAR_INTERVAL:
+        return None
+    ot = [t for t in open_trades if t["status"] == "OPEN"]
+    if not ot:
+        return None
+    try:
+        import concurrent.futures as cf
+        from nse_pulse.core import nse_quote
+    except Exception:
+        return None
+    # Only consume the throttle window once we're actually about to fetch.
+    _last_intrabar = now
+
+    first = {}
+    for t in ot:
+        s = t["symbol"]
+        if s not in first or t["openedAt"] < first[s]:
+            first[s] = t["openedAt"]
+    to = nse_quote._baked_now()
+
+    def _one(s):
+        try:
+            d = nse_quote.get_ohlc(s, interval=1,
+                                   from_ts=_baked_epoch(first[s]) - 120, to_ts=to)
+            return s, (d.get("points") or []) if not d.get("error") else []
+        except Exception:
+            return s, []
+
+    try:
+        with cf.ThreadPoolExecutor(max_workers=6) as ex:
+            return dict(ex.map(_one, sorted(first)))
+    except RuntimeError:
+        return None   # interpreter shutting down — pool refuses new work; skip sweep
+
+
+def _intrabar_apply(state, open_trades, candles):
+    """
+    In-memory half of the catch-up: resolve still-OPEN trades against the
+    pre-fetched `candles` (from _intrabar_fetch). Only CLOSES are applied here
+    (open trades keep their live LTP mark); LTP remains the fallback for symbols
+    with no charting token. Runs INSIDE _lock — no network I/O (AUDIT2 N1).
+    """
+    if not candles:
+        return
+    max_sessions = state.get("maxSessions", DEFAULT_MAX_SESSIONS)
+    for t in open_trades:
+        if t["status"] != "OPEN":
+            continue
+        bars = candles.get(t["symbol"])
+        if not bars:
+            continue
+        probe = dict(t)
+        probe["openedTs"] = t["openedAt"]
+        probe["maxSessions"] = max_sessions
+        res = intrabar.resolve(probe, bars, t.get("risk", RISK_PER_TRADE),
+                               max_sessions=max_sessions)
+        if res in ("TARGET", "STOP", "EXPIRED"):
+            t["status"] = res
+            t["exitPrice"] = probe["exitPrice"]
+            t["ltp"] = probe["ltp"]
+            t["pnl"] = probe["pnl"]
+            t["pnlPct"] = probe["pnlPct"]
+            t["rMultiple"] = probe["rMultiple"]
+            t["mfePct"] = probe["mfePct"]
+            t["maePct"] = probe["maePct"]
+            t["minsToExit"] = probe.get("minsToExit")
+            t["closedAt"] = probe["closedTs"].replace("T", " ")
+            t["closedDay"] = probe.get("closedDay")
+
+
+# Repricing throttle + async kick. summary() is polled constantly, and each open
+# symbol NOT in the hot-list map falls through to a per-symbol NSE quote — which,
+# funnelled through the global request pacer, made the fan-out slow (esp. the F&O
+# book, whose names are rarely in the hot lists). Two guards:
+#  • THROTTLE: skip the fan-out if it ran within _UPDATE_TTL (repeated polls reuse
+#    the last reprice from the DB), and never run two at once (_reprice_running).
+#  • ASYNC: summary() kicks the reprice in the BACKGROUND and returns the last values
+#    immediately, so the SIM/F&O tab never blocks on a cold per-symbol fan-out (the
+#    "first call won't load" case); the fresh numbers land on the next poll.
+# The snapshot logger still calls the SYNCHRONOUS update() each cycle, so open-trade
+# MTM stays fresh during market hours regardless of how the UI polls.
+_UPDATE_TTL = 45        # seconds between actual NSE reprice fan-outs
+_last_update = 0.0
+_reprice_running = False
+_update_gate = threading.Lock()
+
+
+def _resolve_prices(symbols):
+    """LTPs for the open-trade symbols. Warms the shared hot-list map ONCE (so the
+    fan-out mostly hits that cache and avoids a thundering herd rebuilding it), then
+    resolves the rest in PARALLEL — the pacer still bounds concurrency/rate, but
+    parallel submission beats resolving off-hot-list names one blocking call at a
+    time. Falls back to sequential on shutdown or pool failure."""
+    syms = list(symbols)
+    if not syms:
+        return {}
+    try:
+        nse.get_price_map()          # warm the shared cache once, single-threaded
+    except Exception:
+        pass
+    if len(syms) == 1 or _STOPPING.is_set():
+        return {s: _price(s) for s in syms}
+    try:
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(max_workers=min(6, len(syms))) as ex:
+            return dict(zip(syms, ex.map(_price, syms)))
+    except Exception:
+        return {s: _price(s) for s in syms}
+
+
+def _should_reprice(force, now):
+    """Caller MUST hold _update_gate. Returns True (and stamps _last_update) when a
+    reprice should start now: none already in flight, and stale (or forced)."""
+    global _last_update
+    if _reprice_running:
+        return False
+    if not force and (now - _last_update) < _UPDATE_TTL:
+        return False
+    _last_update = now
+    return True
+
+
+def _reprice_open_trades():
+    """Re-price + intrabar-resolve every OPEN trade and persist. All network I/O
+    (per-symbol price resolution + the minute-candle catch-up) is done OUTSIDE _lock
+    (AUDIT2 N1); the lock only guards the in-memory reprice/resolve + the DB write,
+    so a slow NSE call can't serialize concurrent sim readers/writers."""
+    seed = db.sim_open_trades()
+    prices = _resolve_prices({t["symbol"] for t in seed})
+    candles = _intrabar_fetch(seed)
+    with _lock:
+        state = _load()
+        open_trades = db.sim_open_trades()   # re-read fresh so we never resurrect
+        for t in open_trades:                # a trade another thread just closed
+            _refresh_trade(state, t, prices.get(t["symbol"]))
+        _intrabar_apply(state, open_trades, candles)
+        db.sim_insert_trades(open_trades)    # REPLACE-updates the changed rows
+        return state
+
+
+def update(ctx=None, force=False):
+    """SYNCHRONOUS throttled reprice (used by the snapshot logger each cycle).
+    Returns the (possibly unchanged) state. The SIM tab uses _maybe_reprice_async()
+    so the UI never blocks on the fan-out."""
+    global _reprice_running
+    with _update_gate:
+        if not _should_reprice(force, time.time()):
+            return _load()               # recent enough / in flight — no fan-out now
+        _reprice_running = True
+    try:
+        return _reprice_open_trades()
+    finally:
+        with _update_gate:
+            _reprice_running = False
+
+
+def _maybe_reprice_async(force=False):
+    """Kick a background reprice if stale — NON-BLOCKING. summary() calls this so the
+    SIM/F&O tab returns the last reprice from the DB instantly (no blocking on the
+    cold per-symbol NSE fan-out); the fresh numbers arrive on the next poll."""
+    global _reprice_running
+    if _STOPPING.is_set():
+        return
+    with _update_gate:
+        if not _should_reprice(force, time.time()):
+            return
+        _reprice_running = True
+
+    def _run():
+        global _reprice_running
+        try:
+            _reprice_open_trades()
+        finally:
+            with _update_gate:
+                _reprice_running = False
+
+    threading.Thread(target=_run, name="sim-reprice", daemon=True).start()
+
+
+def take(strategy_ids=None, ctx=None, auto=False, limit=10, book="cash"):
+    """
+    Snapshot ideas into each strategy's ledger, for one BOOK. Dedups by
+    (symbol, direction) among that strategy's trades opened today IN THAT BOOK.
+    Honors entry mode for AUTO calls (in 'open' mode, only the first take per
+    strategy per day per book). Returns per-strategy counts of new trades.
+
+    The 'fno' book takes only F&O-eligible ideas (idea['fno']) from the SAME
+    shared context — a filtered, parallel portfolio of the exact same setups,
+    so cash-vs-F&O performance is directly comparable (same risk-based sizing).
+    """
+    ctx = ctx or build_ctx()
+    regime = ctx.get("regime") or {}
+    regime_label = regime.get("label", "?")
+    vol_label = regime.get("volState")
+    with _lock:
+        state = _load()
+        ids = strategy_ids or [s["id"] for s in strat.STRATEGIES]
+        mode = state.get("entryMode", "continuous")
+        today = _today()
+        added = {}
+        new_trades = []
+        for sid in ids:
+            akey = f"{book}:{sid}"
+            if auto and mode == "open" and state["lastAutoDate"].get(akey) == today:
+                added[sid] = 0
+                continue
+            # One entry per (symbol, direction) per strategy per day per book: dedup
+            # against everything opened TODAY in this book (any status), not just
+            # still-open trades. This stops continuous mode from instantly
+            # re-entering the same setup the moment a trade closes. The name is free
+            # to reappear next session.
+            taken_keys = {(t["symbol"], t["direction"])
+                          for t in db.sim_trades_where(strategy=sid, opened_date=today, book=book)}
+            ideas = strat.generate(sid, ctx)
+            if book == "fno":
+                ideas = [i for i in ideas if i.get("fno")]
+            longs = sorted([i for i in ideas if i["direction"] == "LONG"],
+                           key=lambda x: x.get("conviction", 0), reverse=True)[:limit]
+            shorts = sorted([i for i in ideas if i["direction"] == "SHORT"],
+                            key=lambda x: x.get("conviction", 0), reverse=True)[:limit]
+            n = 0
+            for idea in longs + shorts:
+                key = (idea["symbol"], idea["direction"])
+                if key in taken_keys:
+                    continue
+                tr = _open_trade(idea, sid, regime_label, book, vol_label)
+                if tr:
+                    new_trades.append(tr)
+                    taken_keys.add(key)
+                    n += 1
+            added[sid] = n
+            if auto and mode == "open":
+                state["lastAutoDate"][akey] = today
+        if new_trades:
+            db.sim_insert_trades(new_trades)
+        _save(state)
+    return added
+
+
+# ----------------------------------------------------------------------------
+# Daily rollup
+# ----------------------------------------------------------------------------
+def daily_rollup(ctx=None):
+    """Upsert today's per-strategy stats + regime + NIFTY close into the log."""
+    ctx = ctx or build_ctx()
+    regime = ctx.get("regime") or {}
+    idx = (ctx.get("index") or {}).get("NIFTY") or {}
+    today = _today()
+    with _lock:
+        state = _load()
+        day = state["daily"].setdefault(today, {})
+        day["regime"] = regime.get("label")
+        day["niftyPct"] = regime.get("niftyPct")
+        day["niftyLast"] = idx.get("last")
+        day["priorDayMove"] = regime.get("priorDayMove")
+        day["breadth"] = f"{int(regime.get('breadthAdv') or 0)}:{int(regime.get('breadthDec') or 0)}"
+        # Per-book × per-strategy stats for the heatmap. by[book][sid] = [trades].
+        by = {"cash": {}, "fno": {}}
+        for t in db.sim_all_trades():
+            bk = t.get("book") or "cash"
+            by.setdefault(bk, {}).setdefault(t["strategy"], []).append(t)
+
+        def _stats_for(book_map):
+            out = {}
+            for s in strat.STRATEGIES:
+                sid = s["id"]
+                opened = closed = wins = 0
+                realized = unreal = 0.0
+                for t in book_map.get(sid, []):
+                    if t.get("openedDate") == today:
+                        opened += 1
+                    if t["status"] == "OPEN":
+                        unreal += t["pnl"]
+                    elif (t.get("closedAt") or "").startswith(today):
+                        closed += 1
+                        realized += t["pnl"]
+                        if t["status"] == "TARGET":
+                            wins += 1
+                out[sid] = {
+                    "opened": opened, "closed": closed, "wins": wins,
+                    "winRate": round(wins / closed * 100, 1) if closed else None,
+                    "realized": round(realized, 2),
+                    "unrealized": round(unreal, 2),
+                }
+            return out
+
+        day["books"] = {bk: _stats_for(by.get(bk, {})) for bk in ("cash", "fno")}
+        day["strategies"] = day["books"]["cash"]   # back-compat (cash = all-market)
+        _save(state)
+        return day
+
+
+def daily_performance(days=30, book="cash"):
+    """
+    Date-wise P&L across ALL strategies, straight from the durable ledger — the
+    'what happened today / this week' view. For each calendar day we attribute:
+      • opened  — trades entered that day (by openedDate)
+      • closed  — trades that RESOLVED that day (by closedDay/closedAt), with the
+                  realized P&L, R-multiple sum and target/stop/expiry split
+    Plus a `today` card that also carries the whole live open book + its unrealised
+    mark-to-market (open MTM belongs to 'now', not to any past day). Regime / NIFTY
+    context per day is merged from the rollup log when available.
+
+    Note: does NOT call update() — open-trade MTM is kept fresh by summary()'s
+    per-poll update (fetched together in the UI) and by the Auto loop; repeating
+    the heavy reprice here would double it on a large open book.
+    """
+    _ensure_migrated()
+    trades = db.sim_all_trades(book=book)
+    today = _today()
+    ctxd = _load().get("daily", {})
+
+    agg = {}
+
+    def bucket(d):
+        return agg.setdefault(d, {
+            "date": d, "opened": 0, "closed": 0, "wins": 0, "stops": 0,
+            "expired": 0, "realized": 0.0, "realizedR": 0.0,
+        })
+
+    open_now, unreal = 0, 0.0
+    for t in trades:
+        od = t.get("openedDate")
+        if od:
+            bucket(od)["opened"] += 1
+        if t["status"] == "OPEN":
+            open_now += 1
+            unreal += t.get("pnl") or 0.0
+            continue
+        cd = ((t.get("closedDay") or "")[:10]
+              or (t.get("closedAt") or "")[:10] or od)
+        if not cd:
+            continue
+        b = bucket(cd)
+        b["closed"] += 1
+        b["realized"] += t.get("pnl") or 0.0
+        b["realizedR"] += t.get("rMultiple") or 0.0
+        st = t["status"]
+        if st == "TARGET":
+            b["wins"] += 1
+        elif st == "STOP":
+            b["stops"] += 1
+        else:
+            b["expired"] += 1
+
+    def finish(b):
+        c = ctxd.get(b["date"], {}) or {}
+        return {
+            **b,
+            "realized": round(b["realized"], 2),
+            "realizedR": round(b["realizedR"], 2),
+            "winRate": round(b["wins"] / b["closed"] * 100, 1) if b["closed"] else None,
+            "regime": c.get("regime"),
+            "niftyPct": c.get("niftyPct"),
+        }
+
+    rows = [finish(agg[d]) for d in sorted(agg, reverse=True)[:days]]
+
+    tb = agg.get(today) or bucket(today)
+    today_card = {
+        **finish(tb),
+        "openNow": open_now,
+        "unrealized": round(unreal, 2),
+    }
+    return {"today": today_card, "rows": rows, "riskPerTrade": RISK_PER_TRADE}
+
+
+def day_trades(date, limit=400, book="cash"):
+    """Individual trades for one calendar date — the drill-down behind a daily row:
+    trades that CLOSED that day (the realized P&L) + trades OPENED that day that are
+    still running. Trimmed to display fields, newest first, each tagged with its
+    strategy's display name."""
+    _ensure_migrated()
+    date = (date or "")[:10]
+    names = {s["id"]: s["name"] for s in strat.STRATEGIES}
+    closed, opened_open = [], []
+    for t in db.sim_all_trades(book=book):
+        if t["status"] == "OPEN":
+            if t.get("openedDate") == date:
+                opened_open.append(t)
+            continue
+        cd = (t.get("closedDay") or "")[:10] or (t.get("closedAt") or "")[:10]
+        if cd == date:
+            closed.append(t)
+    closed.sort(key=lambda t: t.get("closedAt") or "", reverse=True)
+    opened_open.sort(key=lambda t: t.get("openedAt") or "", reverse=True)
+
+    def trim(t):
+        return {
+            "strategy": t["strategy"],
+            "strategyName": names.get(t["strategy"], t["strategy"]),
+            "symbol": t["symbol"], "direction": t["direction"],
+            "fno": t.get("fno", False),
+            "entry": t.get("entry"), "exitPrice": t.get("exitPrice"),
+            "ltp": t.get("ltp"), "stop": t.get("stop"), "target": t.get("target"),
+            "pnl": t.get("pnl"), "pnlPct": t.get("pnlPct"),
+            "rMultiple": t.get("rMultiple"), "status": t["status"],
+            "openedAt": t.get("openedAt"), "closedAt": t.get("closedAt"),
+        }
+
+    return {
+        "date": date,
+        "closed": [trim(t) for t in closed[:limit]],
+        "open": [trim(t) for t in opened_open[:limit]],
+        "closedTotal": len(closed), "openTotal": len(opened_open),
+    }
+
+
+def daily_matrix(book="cash"):
+    """Day × strategy comparison grid for the heatmap (per book)."""
+    state = _load()
+    ids = [s["id"] for s in strat.STRATEGIES]
+    dates = sorted(state.get("daily", {}).keys(), reverse=True)
+    rows = []
+    for d in dates:
+        day = state["daily"][d]
+        # Prefer the per-book stats; fall back to the legacy 'strategies' blob
+        # (all-market = cash) for days logged before the book split.
+        cells_src = (day.get("books", {}) or {}).get(book)
+        if cells_src is None and book == "cash":
+            cells_src = day.get("strategies", {})
+        cells_src = cells_src or {}
+        rows.append({
+            "date": d,
+            "regime": day.get("regime"),
+            "niftyPct": day.get("niftyPct"),
+            "breadth": day.get("breadth"),
+            "cells": {sid: cells_src.get(sid) for sid in ids},
+        })
+    return {"strategies": strat.strategy_meta(), "rows": rows}
+
+
+# ----------------------------------------------------------------------------
+# Regime leaderboard / strategy-of-the-day / equity curves
+# ----------------------------------------------------------------------------
+# Nice display order for regimes (unknown/extra ones appended after).
+_REGIME_ORDER = ["Trend-Up", "Recovery", "Range", "Pullback", "Mixed", "Trend-Down"]
+
+
+def regime_leaderboard(min_closed=1, trades=None, book="cash"):
+    """
+    Aggregate every trade by (regime-at-entry × strategy): closed count, win%,
+    average per-trade %, total P&L. Flags the best strategy per regime by avg %.
+    This is the accumulating forward-test — 'what works on a recovery day?'.
+    """
+    if trades is None:
+        _ensure_migrated()
+        trades = db.sim_all_trades(book=book)
+    by = {}
+    for t in trades:
+        by.setdefault(t["strategy"], []).append(t)
+    ids = [s["id"] for s in strat.STRATEGIES]
+    agg = {}
+    regimes = set()
+    for s in strat.STRATEGIES:
+        sid = s["id"]
+        for t in by.get(sid, []):
+            rg = t.get("regimeAtEntry") or "?"
+            regimes.add(rg)
+            a = agg.setdefault((rg, sid),
+                               {"closed": 0, "open": 0, "wins": 0,
+                                "pnl": 0.0, "pnlPctSum": 0.0})
+            if t["status"] == "OPEN":
+                a["open"] += 1
+            else:
+                a["closed"] += 1
+                if t["status"] == "TARGET":
+                    a["wins"] += 1
+                a["pnl"] += t.get("pnl") or 0.0
+                a["pnlPctSum"] += t.get("pnlPct") or 0.0
+
+    ordered = ([r for r in _REGIME_ORDER if r in regimes] +
+               sorted(r for r in regimes if r not in _REGIME_ORDER))
+    rows = []
+    for rg in ordered:
+        cells = {}
+        best_sid, best_val = None, None
+        for sid in ids:
+            a = agg.get((rg, sid))
+            if not a or (a["closed"] == 0 and a["open"] == 0):
+                cells[sid] = None
+                continue
+            avg = a["pnlPctSum"] / a["closed"] if a["closed"] else None
+            cells[sid] = {
+                "closed": a["closed"], "open": a["open"],
+                "winRate": round(a["wins"] / a["closed"] * 100, 1) if a["closed"] else None,
+                "avgPnlPct": round(avg, 2) if avg is not None else None,
+                "totalPnl": round(a["pnl"], 2),
+            }
+            if a["closed"] >= min_closed and avg is not None and (best_val is None or avg > best_val):
+                best_val, best_sid = avg, sid
+        rows.append({"regime": rg, "best": best_sid, "cells": cells})
+    return {"strategies": strat.strategy_meta(), "rows": rows}
+
+
+def strategy_of_the_day(regime_label=None, min_closed=3, lb=None):
+    """
+    Pick the strategy to lean on today: the one with the best historical avg %
+    in the current regime (needs >= min_closed samples), else fall back to the
+    strategy whose design fits this regime.
+    """
+    if regime_label is None:
+        regime_label = current_regime().get("label")
+    if lb is None:
+        lb = regime_leaderboard()
+    row = next((r for r in lb["rows"] if r["regime"] == regime_label), None)
+    ranked = []
+    if row:
+        for sid, cell in row["cells"].items():
+            if cell and cell["closed"] >= min_closed and cell["avgPnlPct"] is not None:
+                ranked.append({"id": sid, "name": strat.STRATEGY_MAP.get(sid, {}).get("name", sid), **cell})
+        ranked.sort(key=lambda x: x["avgPnlPct"], reverse=True)
+
+    if ranked:
+        top = ranked[0]
+        pick = {
+            "id": top["id"], "name": top["name"], "basis": "history",
+            "avgPnlPct": top["avgPnlPct"], "winRate": top["winRate"], "closed": top["closed"],
+            "reason": (f"Best avg P&L ({top['avgPnlPct']:+.2f}%/trade, {top['winRate']}% win) "
+                       f"in '{regime_label}' days across {top['closed']} closed trades."),
+        }
+    else:
+        fit = [s for s in strat.STRATEGIES if regime_label in s.get("regimeFit", [])]
+        if fit:
+            s = fit[0]
+            pick = {"id": s["id"], "name": s["name"], "basis": "fit",
+                    "reason": f"No closed history in '{regime_label}' yet — {s['name']} is built for this regime."}
+        else:
+            pick = None
+    return {"regime": regime_label, "pick": pick, "ranked": ranked}
+
+
+def equity_curves(trades=None):
+    """Cumulative realized P&L per strategy, ordered by close time (equity curve)."""
+    if trades is None:
+        _ensure_migrated()
+        trades = db.sim_all_trades()
+    by = {}
+    for t in trades:
+        by.setdefault(t["strategy"], []).append(t)
+    out = {}
+    for s in strat.STRATEGIES:
+        sid = s["id"]
+        closed = [t for t in by.get(sid, [])
+                  if t["status"] != "OPEN" and t.get("closedAt")]
+        closed.sort(key=lambda t: t["closedAt"])
+        cum, pts = 0.0, []
+        for t in closed:
+            cum += t.get("pnl") or 0.0
+            pts.append(round(cum, 0))
+        out[sid] = {"points": pts, "final": round(cum, 0), "n": len(pts)}
+    return out
+
+
+def _analytics_for(closed):
+    """
+    Equity points (cumulative R & ₹), running drawdown, an R-multiple histogram
+    and summary stats for a set of already-CLOSED trades, ordered by close time.
+    This is the visual companion to the number-only scorecards: the equity curve
+    shows the *path* (not just the endpoint), the drawdown shows the worst dip you
+    would have sat through, and the histogram shows the shape of the edge.
+    """
+    closed = sorted(closed, key=lambda t: t.get("closedAt") or "")
+    pts = []
+    cumR = cumInr = 0.0
+    peakR = peakInr = 0.0
+    maxddR = maxddInr = 0.0
+    rs = []
+    for i, t in enumerate(closed, 1):
+        r = t.get("rMultiple") or 0.0
+        pnl = t.get("pnl") or 0.0
+        rs.append(r)
+        cumR += r
+        cumInr += pnl
+        peakR = max(peakR, cumR)
+        peakInr = max(peakInr, cumInr)
+        ddR = cumR - peakR            # <= 0 (underwater from the running peak)
+        maxddR = min(maxddR, ddR)
+        maxddInr = min(maxddInr, cumInr - peakInr)
+        pts.append({
+            "i": i,
+            "cumR": round(cumR, 2), "cumInr": round(cumInr, 0),
+            "ddR": round(ddR, 2),
+            "r": round(r, 2), "pnl": round(pnl, 0),
+            "day": (t.get("closedDay") or "")[:10] or (t.get("closedAt") or "")[:10],
+            "symbol": t.get("symbol"), "dir": t.get("direction"),
+            "status": t.get("status"),
+        })
+
+    # R-multiple histogram: open-ended tails + 0.5R bins between -2R and +2R.
+    edges = [-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0]
+    bins = ([{"lo": None, "hi": edges[0]}]
+            + [{"lo": edges[k], "hi": edges[k + 1]} for k in range(len(edges) - 1)]
+            + [{"lo": edges[-1], "hi": None}])
+    for b in bins:
+        b["count"] = 0
+    for r in rs:
+        for b in bins:
+            lo, hi = b["lo"], b["hi"]
+            if (lo is None or r >= lo) and (hi is None or r < hi):
+                b["count"] += 1
+                break
+
+    n = len(closed)
+    wins = [t for t in closed if (t.get("rMultiple") or 0) > 0]
+    losses = [t for t in closed if (t.get("rMultiple") or 0) < 0]
+    grossW = sum(t["pnl"] for t in closed if (t.get("pnl") or 0) > 0)
+    grossL = -sum(t["pnl"] for t in closed if (t.get("pnl") or 0) < 0)
+    exp = (sum(rs) / n) if n else None
+    sd = None
+    if n > 1 and exp is not None:
+        sd = (sum((r - exp) ** 2 for r in rs) / n) ** 0.5   # population stdev of R
+    holds = [t["minsToExit"] for t in closed if t.get("minsToExit") is not None]
+    stats = {
+        "closed": n,
+        "target": sum(1 for t in closed if t["status"] == "TARGET"),
+        "stop": sum(1 for t in closed if t["status"] == "STOP"),
+        "expired": sum(1 for t in closed if t["status"] == "EXPIRED"),
+        "winRate": round(len(wins) / n * 100, 1) if n else None,
+        "expectancyR": round(exp, 3) if exp is not None else None,
+        "totalR": round(sum(rs), 2) if rs else 0.0,
+        "avgWinR": round(sum(t["rMultiple"] for t in wins) / len(wins), 2) if wins else None,
+        "avgLossR": round(sum(t["rMultiple"] for t in losses) / len(losses), 2) if losses else None,
+        "bestR": round(max(rs), 2) if rs else None,
+        "worstR": round(min(rs), 2) if rs else None,
+        "profitFactor": round(grossW / grossL, 2) if grossL else (99.9 if grossW else None),
+        "maxDrawdownR": round(maxddR, 2),
+        "maxDrawdownInr": round(maxddInr, 0),
+        "finalR": round(cumR, 2), "finalInr": round(cumInr, 0),
+        "sharpeR": round(exp / sd, 2) if (exp is not None and sd) else None,
+        "avgHoldMins": int(sum(holds) / len(holds)) if holds else None,
+    }
+    return {"points": pts, "hist": bins, "stats": stats}
+
+
+def _by_regime_r(closed):
+    """Per-regime expectancy (R) + win% for a strategy's closed trades (chips)."""
+    rg = {}
+    for t in closed:
+        k = t.get("regimeAtEntry") or "?"
+        g = rg.setdefault(k, {"n": 0, "sumR": 0.0, "wins": 0})
+        g["n"] += 1
+        g["sumR"] += t.get("rMultiple") or 0.0
+        if t["status"] == "TARGET":
+            g["wins"] += 1
+    out = [{"regime": k, "closed": v["n"],
+            "expectancyR": round(v["sumR"] / v["n"], 2) if v["n"] else None,
+            "winRate": round(v["wins"] / v["n"] * 100, 1) if v["n"] else None}
+           for k, v in rg.items()]
+    order = {r: i for i, r in enumerate(_REGIME_ORDER)}
+    out.sort(key=lambda x: order.get(x["regime"], 99))
+    return out
+
+
+def analytics(book="cash"):
+    """
+    Visual analytics for the Sim tab: per-strategy (and a combined portfolio)
+    equity curve (cumulative R & ₹), running drawdown, and R-multiple distribution,
+    computed over the durable ledger's CLOSED trades. This turns the number-only
+    scorecards into charts. Open trades don't move a realised curve, so they're
+    excluded here (their MTM lives in the Today card / scorecards).
+    """
+    _ensure_migrated()
+    trades = db.sim_all_trades(book=book)
+    by = {}
+    for t in trades:
+        if t["status"] in ("TARGET", "STOP", "EXPIRED"):
+            by.setdefault(t["strategy"], []).append(t)
+
+    strategies = []
+    for s in strat.STRATEGIES:
+        cl = by.get(s["id"], [])
+        a = _analytics_for(cl)
+        strategies.append({
+            "id": s["id"], "name": s["name"],
+            "closed": a["stats"]["closed"], "expectancyR": a["stats"]["expectancyR"],
+            "byRegime": _by_regime_r(cl), **a,
+        })
+
+    # Portfolio: every closed trade chronologically, each one fixed-risk unit —
+    # "if I'd taken every signal from every strategy". Dominated by the busiest
+    # strategy, so it's a blended view, not a real book you'd hold (see UI note).
+    all_closed = [t for lst in by.values() for t in lst]
+    portfolio = {"id": "_all", "name": "All strategies (blended)",
+                 "byRegime": _by_regime_r(all_closed), **_analytics_for(all_closed)}
+    portfolio["closed"] = portfolio["stats"]["closed"]
+    portfolio["expectancyR"] = portfolio["stats"]["expectancyR"]
+
+    return {"book": book, "portfolio": portfolio, "strategies": strategies,
+            "riskPerTrade": RISK_PER_TRADE, "generatedAt": _now()}
+
+
+def leaderboard_bundle(book="cash"):
+    """One call for the whole leaderboard section: table + today's pick + curves."""
+    regime = current_regime()
+    trades = db.sim_all_trades(book=book)
+    lb = regime_leaderboard(trades=trades)
+    return {
+        "regime": regime,
+        "leaderboard": lb,
+        "pick": strategy_of_the_day(regime.get("label"), lb=lb)["pick"],
+        "equity": equity_curves(trades=trades),
+        "generatedAt": _now(),
+    }
+
+
+# ----------------------------------------------------------------------------
+# Summary
+# ----------------------------------------------------------------------------
+def _scorecard(trades):
+    closed = [t for t in trades if t["status"] in ("TARGET", "STOP", "EXPIRED")]
+    open_t = [t for t in trades if t["status"] == "OPEN"]
+    wins = sum(1 for t in closed if t["status"] == "TARGET")
+    n = len(closed)
+    realized = sum(t["pnl"] for t in closed)
+    unreal = sum(t["pnl"] for t in open_t)
+    total_r = sum(t.get("rMultiple") or 0 for t in closed)
+    risk_sum = sum(t.get("risk") or RISK_PER_TRADE for t in closed)
+    today = _today()
+    today_closed = [t for t in closed if (t.get("closedAt") or "").startswith(today)]
+    today_wins = sum(1 for t in today_closed if t["status"] == "TARGET")
+    return {
+        "open": len(open_t),
+        "closed": n,
+        "target": wins,
+        "stop": sum(1 for t in closed if t["status"] == "STOP"),
+        "expired": sum(1 for t in closed if t["status"] == "EXPIRED"),
+        "winRate": round(wins / n * 100, 1) if n else None,
+        "realizedPnl": round(realized, 2),
+        "unrealizedPnl": round(unreal, 2),
+        "totalPnl": round(realized + unreal, 2),
+        "totalR": round(total_r, 2),
+        "riskSum": round(risk_sum, 2),
+        "expectancyR": round(total_r / n, 2) if n else None,
+        "weightedR": round(realized / risk_sum, 3) if risk_sum else None,
+        "todayClosed": len(today_closed),
+        "todayWinRate": round(today_wins / len(today_closed) * 100, 1) if today_closed else None,
+    }
+
+
+def summary(strategy_id=None, book="cash"):
+    """Overview scorecards + regime; plus one strategy's trade detail if asked."""
+    _maybe_reprice_async()   # non-blocking: return last values now, refresh in bg
+    state = _load()
+    regime = current_regime()
+
+    all_trades = db.sim_all_trades(book=book)
+    by_strat = {}
+    for t in all_trades:
+        by_strat.setdefault(t["strategy"], []).append(t)
+
+    cards = []
+    for s in strat.STRATEGIES:
+        sc = _scorecard(by_strat.get(s["id"], []))
+        cards.append({
+            "id": s["id"], "name": s["name"], "description": s["description"],
+            "regimeFit": s["regimeFit"], **sc,
+            "fitsNow": regime.get("label") in s["regimeFit"],
+        })
+
+    lb = regime_leaderboard(trades=all_trades)
+    out = {
+        "mode": "overview",
+        "book": book,
+        "auto": state.get("auto", False),
+        "entryMode": state.get("entryMode", "continuous"),
+        "maxSessions": state.get("maxSessions", DEFAULT_MAX_SESSIONS),
+        "notional": NOTIONAL,
+        "riskPerTrade": RISK_PER_TRADE,
+        "regime": regime,
+        "pick": strategy_of_the_day(regime.get("label"), lb=lb)["pick"],
+        "strategies": cards,
+        "generatedAt": _now(),
+    }
+
+    # What the Regime-Adaptive track is delegating to right now + today's
+    # conviction multiplier. Drives the "playbook flip" / high-conviction alerts
+    # and the live delegation line on the scoreboard.
+    a_via, a_basis, a_cell = strat._regime_playbook_pick(regime.get("label"))
+    out["adaptive"] = {
+        "regime": regime.get("label"),
+        "via": a_via,
+        "viaName": strat.STRATEGY_MAP.get(a_via, {}).get("name") if a_via else None,
+        "basis": a_basis,
+        "sizeMult": strat.conviction_mult(a_basis, a_cell, regime) if a_via else None,
+        "strength": strat.regime_strength(regime),
+    }
+
+    if strategy_id and strategy_id in strat.STRATEGY_MAP:
+        trades = by_strat.get(strategy_id, [])
+        meta = strat.STRATEGY_MAP.get(strategy_id, {})
+        open_t = sorted([t for t in trades if t["status"] == "OPEN"],
+                        key=lambda t: t["pnlPct"], reverse=True)
+        closed_t = sorted([t for t in trades if t["status"] != "OPEN"],
+                          key=lambda t: t.get("closedAt") or "", reverse=True)
+        out["detail"] = {
+            "id": strategy_id,
+            "name": meta.get("name", strategy_id),
+            "description": meta.get("description"),
+            "regimeFit": meta.get("regimeFit", []),
+            "scorecard": _scorecard(trades),
+            "open": open_t,
+            "closed": closed_t[:200],
+        }
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Settings
+# ----------------------------------------------------------------------------
+def set_auto(on):
+    with _lock:
+        state = _load()
+        state["auto"] = bool(on)
+        _save(state)
+        return state["auto"]
+
+
+def get_auto():
+    return _load().get("auto", False)
+
+
+def set_entry_mode(mode):
+    mode = "open" if mode == "open" else "continuous"
+    with _lock:
+        state = _load()
+        state["entryMode"] = mode
+        _save(state)
+        return mode
+
+
+def reset(book=None):
+    """Clear the ledger. book=None wipes everything + resets settings; a specific
+    book clears only that book's trades (settings and the other book untouched)."""
+    with _lock:
+        if book is None:
+            db.sim_clear()
+            _save(_default_state())
+        else:
+            db.sim_clear(book=book)
+
+
+# ----------------------------------------------------------------------------
+# All-time performance (durable, cross-session)
+# ----------------------------------------------------------------------------
+def performance(book="cash"):
+    """
+    Cross-session leaderboard ranked by expectancy (R). One row per strategy plus
+    a portfolio total, computed over the entire durable ledger — this is the
+    'how has each strategy actually done, all-time' view.
+    """
+    _ensure_migrated()
+    trades = db.sim_all_trades(book=book)
+    by = {}
+    for t in trades:
+        by.setdefault(t["strategy"], []).append(t)
+
+    def _extra(ts):
+        closed = [t for t in ts if t["status"] in ("TARGET", "STOP", "EXPIRED")]
+        gains = sum(t["pnl"] for t in closed if (t["pnl"] or 0) > 0)
+        losses = -sum(t["pnl"] for t in closed if (t["pnl"] or 0) < 0)
+        holds = [t["minsToExit"] for t in closed if t.get("minsToExit") is not None]
+        days = {t["openedDate"] for t in ts if t.get("openedDate")}
+        return {
+            "profitFactor": round(gains / losses, 2) if losses else (None if not gains else 99.9),
+            "avgHoldMins": int(sum(holds) / len(holds)) if holds else None,
+            "tradingDays": len(days),
+        }
+
+    rows = []
+    for s in strat.STRATEGIES:
+        ts = by.get(s["id"], [])
+        rows.append({"id": s["id"], "name": s["name"],
+                     **_scorecard(ts), **_extra(ts)})
+    # Rank by expectancy (R), strategies with no closed trades sink to the bottom.
+    rows.sort(key=lambda r: (r["expectancyR"] if r["expectancyR"] is not None else -1e9),
+              reverse=True)
+
+    totals = {**_scorecard(trades), **_extra(trades)}
+    first = min((t["openedAt"] for t in trades), default=None)
+    return {
+        "rows": rows,
+        "totals": totals,
+        "tradeCount": len(trades),
+        "since": first,
+        "generatedAt": _now(),
+    }

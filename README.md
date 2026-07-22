@@ -819,52 +819,61 @@ python nse_demand.py losers     # top losers
 
 ```
 nse-market-pulse/
-├── app.py                  # Flask server + JSON API (thin routes) — port 5055
-├── observability.py        # Terminal access log (entry→exit/timing) + opt-in OpenTelemetry (OTLP)
-├── nse_client.py           # NSE session mgmt + hot lists + scanner + ideas (CORE)
-├── nse_quote.py            # Quote/chart/depth + option chain + Greeks + OHLCV candles
-├── bhavcopy.py             # EOD UDiFF bhavcopy ingest + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill
-├── deals.py                # Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status
-├── eod_scanner.py          # Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal + sector-RS + futures-rollover xref) — off-hours
-├── eod_conviction.py       # EOD conviction board — fuses breakout+delivery+deals+OI+sector RS+option chain+futures rollover, ranks by #signals agreeing; save→ideas / digest→notify
-├── eod_options.py          # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape; oi_map() = market-wide analytics in one parse (the Conviction option fuse)
-├── eod_scheduler.py        # Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest)
-├── sectors.py              # Curated NSE symbol→sector map (17 sectors, ~303 names) — static data + sector_of()/all_sectors()
-├── sector_scan.py          # Sector relative-strength board over db.eod_bars — cross-sectional RS vs market, ranks sectors + leaders/laggards (+ strength_map/context: the reusable sector pillar the EOD Scan + Conviction boards fold in)
-├── conviction_calibration.py # Does confirmation-stacking pay? Scores realized TARGET/STOP of saved conviction ideas — win rate by pillar count / per-pillar lift / option-⚠️ impact + verdict; pillar_weights() feeds that edge back into board scoring (⚖️ adaptive)
-├── rollover.py             # Futures rollover tracker off the FO bhavcopy — near-vs-next month rollover% / roll cost (contango·backwardation) / basis / net-OI state, cross-sectionally ranked; reuses eod_options' cached FO text (off-hours)
-├── angel_feed.py           # Live feed — Angel One SmartAPI WebSocket (free, default)
-├── dhan_feed.py            # Live feed — Dhan WebSocket (paid data plan); same interface
-├── strategies.py           # 17 strategy generators (incl. regime-adaptive) + regime detector
-├── sim.py                  # Multi-strategy forward-tester + regime leaderboard
-├── intrabar.py             # Minute-candle trade resolver (target/stop/MFE/MAE)
-├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
-├── backtest_daily.py        # Daily-bar historical backtest — source=live (curated NSE) or source=eod (whole bhavcopy universe from SQLite, off-hours)
-├── walkforward.py          # Walk-forward out-of-sample / overfit validation (pure over trades)
-├── portfolio_backtest.py   # Portfolio-level backtest — replay bd trades through a real book (finite capital, max concurrent, conviction-ranked, daily mark-to-market) → equity curve + CAGR/DD/Sharpe
-├── notify.py               # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger; EOD digest carries a calibration-sourced track-record footer (does stacking pay?)
-├── paper.py                # Paper-trading engine (equity + long/short options + long/short futures)
-├── snapshot_logger.py      # Background logger (snapshots + IV + context + alerts) → SQLite
-├── db.py                   # SQLite store (time-series)
-├── nse_demand.py           # Standalone CLI scanner
-├── db_inspect.py           # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── test_*.py               # 826 unit tests, 36 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/observability/…)
-├── templates/
-│   └── index.html          # Entire dashboard UI (HTML + CSS + JS inline)
-├── static/vendor/          # (optional) self-hosted Lightweight Charts for offline use
-├── .cursor/rules/          # Always-apply agent rules (testing / no-subagents / docs / context)
-├── angel_config.example.json # Template for Angel One creds → copy to angel_config.json
-├── dhan_config.example.json  # Template for Dhan creds → copy to dhan_config.json
-├── notify_config.example.json # Template for alert creds → copy to notify_config.json
-├── data/                   # (gitignored) market.db + any legacy CSVs
+├── app.py                  # Thin shim → nse_pulse.web.app:main (python app.py still works)
+├── nse_demand.py           # Thin shim → nse_pulse.cli.nse_demand:main
+├── pyproject.toml          # Packaging + pytest config (pythonpath=["."], testpaths=["tests"])
 ├── requirements.txt
-├── docker-compose.otel.yml # Local OpenTelemetry backend (grafana/otel-lgtm) — see observability.py
+├── docker-compose.otel.yml # Local OpenTelemetry backend (grafana/otel-lgtm) — see web/observability.py
 ├── README.md
 ├── CONTEXT.md              # Living project memory (current state + dated findings log)
 ├── AGENTS.md               # Project guide for AI agents & future sessions
-├── AUDIT.md                # Deep code audit round 1 — findings, severities, roadmap
-├── AUDIT2.md               # Deep audit round 2 — financial-correctness + concurrency
-└── *.json                  # (gitignored) sim_state.json, paper_state.json, *_config.json
+├── .cursor/rules/          # Always-apply agent rules (testing / no-subagents / docs / context)
+├── nse_pulse/              # application package — import as `from nse_pulse.<sub> import <mod>`
+│   ├── core/
+│   │   ├── nse_client.py       # NSE session mgmt + hot lists + scanner + ideas (CORE)
+│   │   ├── nse_quote.py        # Quote/chart/depth + option chain + Greeks + OHLCV candles
+│   │   ├── db.py               # SQLite store (time-series)
+│   │   ├── intrabar.py         # Minute-candle trade resolver (target/stop/MFE/MAE)
+│   │   ├── snapshot_logger.py  # Background logger (snapshots + IV + context + alerts) → SQLite
+│   │   └── paths.py            # Repo-root-anchored paths — data/, config, state, logs stay at root
+│   ├── feeds/
+│   │   ├── angel_feed.py       # Live feed — Angel One SmartAPI WebSocket (free, default)
+│   │   └── dhan_feed.py        # Live feed — Dhan WebSocket (paid data plan); same interface
+│   ├── sim/
+│   │   ├── sim.py              # Multi-strategy forward-tester + regime leaderboard
+│   │   ├── strategies.py       # 17 strategy generators (incl. regime-adaptive) + regime detector
+│   │   ├── paper.py            # Paper-trading engine (equity + long/short options + long/short futures)
+│   │   └── ideas_journal.py    # Per-day idea entry/timestamp/live-move journal (Ideas tab)
+│   ├── eod/
+│   │   ├── bhavcopy.py         # EOD UDiFF bhavcopy + sec_bhavdata_full delivery% — price/universe fallback + backfill
+│   │   ├── deals.py            # Bulk/block deals (institutional footprint) from nsearchives CSV
+│   │   ├── eod_scanner.py      # Full-market EOD/swing scanner over db.eod_bars — off-hours
+│   │   ├── eod_conviction.py   # EOD conviction board — fuses breakout+delivery+deals+OI+RS+chain+rollover
+│   │   ├── eod_options.py      # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls)
+│   │   ├── eod_scheduler.py    # Auto post-close EOD refresh — block-aware daemon
+│   │   ├── conviction_calibration.py # Does stacking pay? per-pillar lift + verdict; adaptive pillar_weights()
+│   │   ├── rollover.py         # Futures rollover tracker off the FO bhavcopy (roll%/cost/basis/net-OI)
+│   │   ├── sector_scan.py      # Sector relative-strength (rotation) board over db.eod_bars
+│   │   └── sectors.py          # Curated NSE symbol→sector map (17 sectors, ~303 names)
+│   ├── backtest/
+│   │   ├── backtest_daily.py       # Daily-bar historical backtest — source live (curated) or eod (universe)
+│   │   ├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
+│   │   ├── walkforward.py          # Walk-forward out-of-sample / overfit validation
+│   │   └── portfolio_backtest.py   # Portfolio-level backtest → equity curve + CAGR/DD/Sharpe
+│   ├── web/
+│   │   ├── app.py              # Flask server + JSON API (thin routes) + main() — port 5055
+│   │   ├── observability.py    # Terminal access log (entry→exit/timing) + opt-in OpenTelemetry (OTLP)
+│   │   ├── notify.py           # Off-screen alerts (Telegram/webhook) — opt-in, rides the logger
+│   │   ├── templates/index.html # Entire dashboard UI (HTML + CSS + JS inline)
+│   │   └── static/vendor/      # (optional) self-hosted Lightweight Charts for offline use
+│   └── cli/
+│       ├── nse_demand.py       # Standalone CLI scanner
+│       └── db_inspect.py       # Read-only SQLite inspector CLI (overview/tail/SQL)
+├── tests/                  # 826 unit tests, 36 suites (import from nse_pulse.<sub>)
+├── docs/                   # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
+├── data/                   # (gitignored) market.db + any legacy CSVs
+├── *.example.json          # Config templates (angel/dhan/notify) → copy to gitignored real files
+└── *.json                  # (gitignored) sim_state.json, paper_state.json, ideas_journal.json, *_config.json
 ```
 
 ---

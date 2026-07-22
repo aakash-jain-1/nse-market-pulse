@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nse-market-pulse"
+version = "0.1.0"
+description = "Live NSE market-pulse dashboard + CLI (educational; not investment advice)."
+requires-python = ">=3.13"
+readme = "README.md"
+
+# Root entry points (app.py, nse_demand.py) are thin shims, not installable
+# modules; the real code lives in the nse_pulse package discovered below.
+[tool.setuptools]
+py-modules = []
+
+[tool.setuptools.packages.find]
+include = ["nse_pulse*"]
+
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so `import nse_pulse...` resolves during tests
+# without an editable install; keep discovery scoped to tests/.
+pythonpath = ["."]
+testpaths = ["tests"]

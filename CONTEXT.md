@@ -53,7 +53,7 @@ optional live broker feed, and off-screen alerts. Data from NSE India's public
 ```bash
 python app.py            # dashboard at http://127.0.0.1:5055 (binds 0.0.0.0 for LAN)
 python nse_demand.py     # CLI scanner (gainers/losers/volume/value/volgainers)
-python db_inspect.py     # read-only SQLite peek (overview / <table> [N] / sql "...")
+python -m nse_pulse.cli.db_inspect   # read-only SQLite peek (overview / <table> [N] / sql "...")
 python -m pytest -q      # full unit-test suite
 ```
 
@@ -77,38 +77,54 @@ python -m pytest -q      # full unit-test suite
 ## File map
 
 ```
-app.py               Flask routes (thin) + startup wiring + security guard/headers
-nse_client.py        NSE session mgmt + hot-list fetch/normalize (CORE) + _fetch micro-cache
-nse_quote.py         Per-stock quote/chart/DEPTH (NextApi) + OHLCV (charting) + get_book_stats
-bhavcopy.py          EOD UDiFF bhavcopy ingest (static archive) + sec_bhavdata_full delivery% — resilient price/universe fallback + backfill(days)
-deals.py             Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, by_symbol/recent/status, off-hours
-eod_scanner.py       Full-market EOD/swing scanner over db.eod_bars (breakouts/gaps/vol/MA/NR7/delivery + bulk-deal + sector-RS + futures-rollover xref) — off-hours, pure math
-eod_conviction.py    EOD conviction board — fuses breakout+delivery+deals+OI buildup+sector RS+option chain+futures rollover, ranks by #signals that agree; save→ideas / digest→notify
-eod_options.py       Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls) — matches live shape, off-hours; oi_map() = market-wide analytics in one parse (the Conviction option fuse)
-eod_scheduler.py     Auto post-close EOD refresh — pure should_run() + block-aware daemon (backfill→deals→optional digest), persists last-run in eod_meta
-sectors.py           Curated NSE symbol→sector map (17 sectors, ~303 names) — dependency-free static data + sector_of()/all_sectors()
-sector_scan.py       Sector relative-strength (rotation) board over db.eod_bars — cross-sectional RS vs market median, ranks sectors + surfaces leaders/laggards; strength_map()/context() = the reusable sector pillar the EOD Scan + Conviction boards fold in
-conviction_calibration.py  Does confirmation-stacking pay? Scores realized TARGET/STOP outcomes of saved conviction ideas — win rate by pillar count / rating / direction, per-pillar lift, option-⚠️ impact, honest verdict (pure math + one db.ideas_all() read); pillar_weights() feeds that edge back into board scoring (adaptive)
-rollover.py          Futures rollover tracker off the FO bhavcopy — near-vs-next month rollover% / roll-cost (contango·backwardation) / basis / net-OI state, cross-sectionally ranked; board() + rank_map() (the market-wide {sym:metrics} the Conviction board folds in as a pillar); reuses eod_options' cached FO text (off-hours)
-angel_feed.py        Live feed adapter — Angel One SmartAPI WebSocket (FREE default); also rest_quote/rest_chart/rest_ohlc (on-demand quote+chart+candles for the detail modal AND the Live-tab seed → no NSE hit)
-dhan_feed.py         Live feed adapter — Dhan WebSocket (paid data plan)
-notify.py            Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger; EOD digest carries a calibration-sourced track-record footer (does stacking pay?)
-paper.py             Paper-trading engine (equity + long/short options + long/short futures, margin-based; JSON-persisted)
-strategies.py        Strategy library (17 generators) + market-regime detector
-sim.py               Multi-strategy forward-tester (per-strategy sims + daily rollup)
-intrabar.py          Minute-candle trade resolver (target/stop/MFE/MAE) + resolve_point
-backtest_strategies.py  Offline backtester: replays archived context, resolves on OHLCV
-backtest_daily.py    Daily-bar historical backtest — source="live" (curated NSE) OR "eod" (whole bhavcopy universe from SQLite, off-hours)
-walkforward.py       Walk-forward out-of-sample / overfit validation (pure over trades)
-portfolio_backtest.py Portfolio-level backtest — replay bd trades through a real book (finite capital, max concurrent, sizing) → equity curve + CAGR/DD/Sharpe
-db.py                SQLite store (snapshots/IV/context/sim_trades/ideas/alert_log/EOD/min_bars)
-snapshot_logger.py   Background logger (snapshots+IV+context+sim+alerts) → SQLite
-db_inspect.py        Read-only SQLite inspector CLI
-nse_demand.py        Standalone CLI scanner
-templates/index.html Entire dashboard UI (HTML+CSS+JS inline)
-test_*.py            Unit tests — 804 across 35 suites (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/bhavcopy/deals/eodscanner/eodconviction/eodoptions/eodscheduler/sectors/sectorscan/convictioncalibration/rollover/db/app+routes/feeds/notify/…)
+app.py               Root shim → nse_pulse.web.app:main (python app.py unchanged)
+nse_demand.py        Root shim → nse_pulse.cli.nse_demand:main
+pyproject.toml       Packaging + pytest config (pythonpath=["."], testpaths=["tests"])
+
+nse_pulse/core/
+  nse_client.py      NSE session mgmt + hot-list fetch/normalize (CORE) + _fetch micro-cache
+  nse_quote.py       Per-stock quote/chart/DEPTH (NextApi) + OHLCV (charting) + get_book_stats
+  db.py              SQLite store (snapshots/IV/context/sim_trades/ideas/alert_log/EOD/min_bars)
+  intrabar.py        Minute-candle trade resolver (target/stop/MFE/MAE) + resolve_point
+  snapshot_logger.py Background logger (snapshots+IV+context+sim+alerts) → SQLite
+  paths.py           Repo-root-anchored paths — data/, *_config.json, state JSON, logs/ stay at root
+nse_pulse/feeds/
+  angel_feed.py      Live feed adapter — Angel One SmartAPI WebSocket (FREE default) + rest_quote/chart/ohlc
+  dhan_feed.py       Live feed adapter — Dhan WebSocket (paid data plan)
+nse_pulse/sim/
+  sim.py             Multi-strategy forward-tester (per-strategy sims + daily rollup)
+  strategies.py      Strategy library (17 generators) + market-regime detector
+  paper.py           Paper-trading engine (equity + long/short options + long/short futures, margin-based)
+  ideas_journal.py   Per-day idea entry/timestamp/live-move journal (Ideas tab)
+nse_pulse/eod/
+  bhavcopy.py        EOD UDiFF bhavcopy + sec_bhavdata_full delivery% — price/universe fallback + backfill(days)
+  deals.py           Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, off-hours
+  eod_scanner.py     Full-market EOD/swing scanner over db.eod_bars — off-hours, pure math
+  eod_conviction.py  EOD conviction board — fuses breakout+delivery+deals+OI+sector RS+chain+rollover; save→ideas
+  eod_options.py     Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls); oi_map() analytics
+  eod_scheduler.py   Auto post-close EOD refresh — pure should_run() + block-aware daemon, persists in eod_meta
+  conviction_calibration.py  Does stacking pay? per-pillar lift + honest verdict; pillar_weights() feeds back (adaptive)
+  rollover.py        Futures rollover tracker off the FO bhavcopy — roll%/cost/basis/net-OI, ranked
+  sector_scan.py     Sector relative-strength (rotation) board over db.eod_bars — RS vs market median
+  sectors.py         Curated NSE symbol→sector map (17 sectors, ~303 names) — static data
+nse_pulse/backtest/
+  backtest_daily.py  Daily-bar historical backtest — source="live" (curated NSE) OR "eod" (whole universe)
+  backtest_strategies.py  Offline backtester: replays archived context, resolves on OHLCV
+  walkforward.py     Walk-forward out-of-sample / overfit validation (pure over trades)
+  portfolio_backtest.py  Portfolio-level backtest — replay through a real book → equity curve + CAGR/DD/Sharpe
+nse_pulse/web/
+  app.py             Flask routes (thin) + startup wiring (main()) + security guard/headers
+  observability.py   Per-request access log (entry→exit/timing) + opt-in OpenTelemetry (OTLP)
+  notify.py          Off-screen alerts (Telegram/webhook) — opt-in, rides snapshot logger
+  templates/index.html   Entire dashboard UI (HTML+CSS+JS inline)
+nse_pulse/cli/
+  nse_demand.py      Standalone CLI scanner
+  db_inspect.py      Read-only SQLite inspector CLI
+
+tests/               Unit tests — 826 across 36 suites; import `from nse_pulse.<sub> import <mod>`
+docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
+data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
-data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json (gitignored)
 ```
 
 ## Architecture notes
@@ -494,6 +510,26 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-22 — Restructure: flat root → domain-grouped `nse_pulse/` package (suite 826, unchanged)
+- **Why:** ~30 modules + templates all sat at the repo root; hard to navigate and to reason about
+  boundaries. Standardised into a package **without changing behaviour or the run commands**.
+- **What:** `git mv` the 30 modules into `nse_pulse/{core,feeds,sim,eod,backtest,web,cli}` (history
+  preserved) + `templates/` → `nse_pulse/web/templates/`. A name-keyed codemod rewrote **322 import
+  lines across 62 files** to `from nse_pulse.<sub> import <mod>` (plus one `from sim import …` →
+  `from nse_pulse.sim.sim import …`). New `nse_pulse/core/paths.py` (`PROJECT_ROOT` / `DATA_DIR` /
+  `root()`) so `data/market.db`, the `*_config.json`, `sim_state.json` / `paper_state.json` /
+  `ideas_journal.json` and `logs/` still resolve to the **repo root** (repointed db / sim / paper /
+  ideas / angel / dhan / notify / snapshot_logger + app logging off `os.path.dirname(__file__)`).
+  `app.py`'s `__main__` block became `web/app.py:main()`; root `app.py` + `nse_demand.py` are now thin
+  shims → package `main()`. `db_inspect` runs via `python -m nse_pulse.cli.db_inspect`. Tests moved to
+  `tests/`, `AUDIT*.md` to `docs/`, added `pyproject.toml` (pytest `pythonpath=["."]`, `testpaths=["tests"]`).
+- **Fix (tests):** `test_bhavcopy._patch_nse_module` swapped `sys.modules["nse_client"]`; since `_download`
+  now binds `from nse_pulse.core import nse_client`, it patches the `nse_client` attribute on the
+  `nse_pulse.core` package (+ `sys.modules["nse_pulse.core.nse_client"]`) instead.
+- **Verified:** full suite **826 green**; smoke-ran `python app.py` (served `/api/health` 200, banner shows
+  `Serving Flask app 'nse_pulse.web.app'`) and `python nse_demand.py gainers` (live table). Import graph +
+  repo-root path resolution confirmed for all 31 modules.
 
 ### 2026-07-22 — Local OpenTelemetry backend (`docker-compose.otel.yml`, grafana/otel-lgtm)
 - **Why:** the OTel export path (added earlier) had no backend to view it in; Docker is now available.
