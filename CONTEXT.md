@@ -338,7 +338,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **822 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **826 tests** (grow it with every change; never shrink it).
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -494,6 +494,23 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-22 — /api/recommendations non-blocking + parallel scanner fan-out (suite 822 → 826)
+- **Why (surfaced by the new access log):** `/api/recommendations` occasionally took **tens of
+  seconds** (`GET /api/recommendations 200 43237ms` right after a reload). Two causes: (1) on a cold
+  cache `get_scanner(250)` fetched **7 hot-lists sequentially** through the pacer, so under boot
+  contention the paced round-trips stacked end-to-end; (2) the endpoint is polled constantly (Ideas tab
+  + new-idea alert), yet **every** poll landing on an expired 12s cache **blocked** on the whole sweep.
+- **Fix 1 — parallel fan-out (`_gather` in `nse_client.py`).** `get_scanner` now fetches its 7 hot lists
+  CONCURRENTLY (the pacer still bounds the true rate; this just overlaps network latency). Benefits every
+  caller (`/api/scanner`, `strategies.build_context`, CLI). Aggregation stays ordered/deterministic.
+- **Fix 2 — stale-while-revalidate `get_recommendations`.** Split into `_reco_compute()` +
+  `_maybe_refresh_reco()`: **cold** (no data) computes once (single-flight, dedupes concurrent
+  first-calls); **stale** (have data, expired) serves the last set INSTANTLY and refreshes in a daemon
+  thread. Journaling moves to the background pass. The endpoint never blocks in steady state.
+- **Result (live-verified on :5056):** cold **43s → 2.5s**; the post-expiry (stale) poll that used to
+  block now returns in **~2.5ms**; background refresh swaps in the fresh set. Tests **+4**
+  (`_gather` collect/failure-isolation/concurrency + reco SWR serves-stale-then-refreshes). Suite **822 → 826**.
 
 ### 2026-07-22 — API request logging + OpenTelemetry (CNCF) instrumentation (suite 808 → 822)
 - **Why:** wanted to see each API request in the terminal — entry/exit time, duration, status — and to

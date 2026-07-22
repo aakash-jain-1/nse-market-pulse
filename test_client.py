@@ -311,6 +311,32 @@ def test_scanner_filters():
         assert len(nse.get_scanner(fno_only=True)) == 1         # A is F&O
 
 
+# ---------------------------------------------------------------------------
+# _gather — the concurrent hot-list fan-out get_scanner runs on
+# ---------------------------------------------------------------------------
+def test_gather_collects_all_results():
+    out = nse._gather({"a": lambda: [1], "b": lambda: [2, 3]})
+    assert out == {"a": [1], "b": [2, 3]}
+
+
+def test_gather_isolates_failures():
+    def boom():
+        raise RuntimeError("nope")
+    out = nse._gather({"ok": lambda: ["v"], "bad": boom})
+    assert out["ok"] == ["v"] and out["bad"] == []      # one failure → [] , others intact
+
+
+def test_gather_runs_concurrently():
+    import time as _t
+    def slow():
+        _t.sleep(0.2)
+        return ["x"]
+    t0 = _t.perf_counter()
+    out = nse._gather({"a": slow, "b": slow, "c": slow})
+    assert _t.perf_counter() - t0 < 0.45                # parallel, not ~0.6s sequential
+    assert out == {"a": ["x"], "b": ["x"], "c": ["x"]}
+
+
 def test_demand_score():
     with _patch(nse, "get_volume_gainers",
                 lambda limit=30: [{"symbol": "A", "week1volChange": 30, "ltp": 100, "pChange": 5}]), \

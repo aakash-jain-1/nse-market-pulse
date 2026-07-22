@@ -181,6 +181,33 @@ def test_get_recommendations_split_filter_limit():
         assert len(lim["longs"]) == 1 and lim["longs"][0]["symbol"] == "C"
 
 
+def test_get_recommendations_swr_serves_stale_then_refreshes():
+    # Non-blocking: with an expired-but-present cache, the call returns the STALE set
+    # immediately and swaps in the fresh one via a background thread (no sweep on the
+    # request path — that's what killed the recurring per-poll stalls).
+    import time as _t
+
+    import ideas_journal
+    with _reset_caches():
+        nse._reco_cache.update(
+            data={"longs": [{"symbol": "OLD", "fno": True}], "shorts": [], "generatedAt": "old"},
+            ts=_t.time() - (nse._RECO_TTL + 5))
+        nse._reco_running = False
+        new_rows = [{"symbol": "NEW", "direction": "LONG", "conviction": 90, "fno": True}]
+        with _patch(nse, "get_scanner", lambda limit=250: (_t.sleep(0.1), list(new_rows))[1]), \
+             _patch(nse, "_build_idea", lambda e: dict(e)), \
+             _patch(nse, "get_price_map", lambda: {}), \
+             _patch(ideas_journal, "enrich", lambda longs, shorts, price_fn=None: (longs, shorts)):
+            out = nse.get_recommendations()
+            assert [i["symbol"] for i in out["longs"]] == ["OLD"]     # served stale, instantly
+            deadline = _t.time() + 5
+            while _t.time() < deadline and (nse._reco_running
+                                            or nse._reco_cache["data"]["generatedAt"] == "old"):
+                _t.sleep(0.02)
+            assert [i["symbol"] for i in nse._reco_cache["data"]["longs"]] == ["NEW"]
+        nse._reco_running = False
+
+
 # ---------------------------------------------------------------------------
 # _underlying_price_map + _oi_change_map
 # ---------------------------------------------------------------------------

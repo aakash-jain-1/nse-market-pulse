@@ -906,6 +906,40 @@ def get_lot_size(symbol):
     return get_lot_sizes().get(symbol.upper().strip())
 
 
+def _gather(fns):
+    """Run independent NSE getters CONCURRENTLY and return {key: result} (each
+    failure → []). The global pacer (_NSE_GATE + min-gap) still bounds the real
+    request rate; this only overlaps the network round-trips so a cold multi-list
+    sweep stops stacking paced fetches end-to-end. Falls back to sequential for a
+    single getter or if the pool can't start."""
+    out = {}
+    if len(fns) <= 1:
+        for k, fn in fns.items():
+            try:
+                out[k] = fn()
+            except Exception:
+                out[k] = []
+        return out
+    import concurrent.futures as _cf
+    try:
+        workers = min(len(fns), _NSE_MAX_CONCURRENCY + 2)
+        with _cf.ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="nse-gather") as ex:
+            futs = {ex.submit(fn): k for k, fn in fns.items()}
+            for fut in _cf.as_completed(futs):
+                try:
+                    out[futs[fut]] = fut.result()
+                except Exception:
+                    out[futs[fut]] = []
+    except Exception:
+        for k, fn in fns.items():
+            try:
+                out[k] = fn()
+            except Exception:
+                out[k] = []
+    return out
+
+
 def get_scanner(
     direction="any",
     min_abs_change=None,
@@ -942,9 +976,24 @@ def get_scanner(
         if v is not None and e.get(k) is None:
             e[k] = v
 
+    # Fetch every independent hot list CONCURRENTLY. The global pacer still bounds
+    # the real request rate, but overlapping the network round-trips stops a COLD
+    # sweep from stacking 7 paced fetches end-to-end (which, under boot contention,
+    # is what pushed /api/recommendations to tens of seconds). Aggregation below is
+    # unchanged and deterministic — it just reads these results.
+    src = _gather({
+        "volgainers": lambda: get_volume_gainers(limit=40),
+        "value": lambda: get_most_active("value", limit=25),
+        "volume": lambda: get_most_active("volume", limit=25),
+        "gainers": lambda: get_variations("gainers", limit=25),
+        "losers": lambda: get_variations("losers", limit=25),
+        "oi": lambda: get_oi_spurts(limit=40),
+        "futures": lambda: get_futures(limit=40),
+    })
+
     # Unusual volume (the strongest short-term "something's happening" signal).
     try:
-        for r in get_volume_gainers(limit=40):
+        for r in src["volgainers"]:
             if not r["symbol"]:
                 continue
             e = rec(r["symbol"]); e["lists"].add("vol")
@@ -959,7 +1008,7 @@ def get_scanner(
 
     # Money flow (heavy traded value).
     try:
-        for i, r in enumerate(get_most_active("value", limit=25)):
+        for i, r in enumerate(src["value"]):
             if not r["symbol"]:
                 continue
             e = rec(r["symbol"]); e["lists"].add("value")
@@ -973,7 +1022,7 @@ def get_scanner(
 
     # High absolute volume.
     try:
-        for i, r in enumerate(get_most_active("volume", limit=25)):
+        for i, r in enumerate(src["volume"]):
             if not r["symbol"]:
                 continue
             e = rec(r["symbol"]); e["lists"].add("volume")
@@ -986,7 +1035,7 @@ def get_scanner(
     # Price momentum (both directions).
     for kind, tag in (("gainers", "📈 Momentum up"), ("losers", "📉 Momentum down")):
         try:
-            for r in get_variations(kind, limit=25):
+            for r in src[kind]:
                 if not r["symbol"]:
                     continue
                 e = rec(r["symbol"]); e["lists"].add(kind)
@@ -1000,7 +1049,7 @@ def get_scanner(
 
     # OI buildup (derivatives conviction).
     try:
-        for r in get_oi_spurts(limit=40):
+        for r in src["oi"]:
             if not r["symbol"]:
                 continue
             e = rec(r["symbol"]); e["lists"].add("oi"); e["fno"] = True
@@ -1020,7 +1069,7 @@ def get_scanner(
 
     # Futures basis (adds F&O flag + premium/discount context).
     try:
-        for r in get_futures(limit=40):
+        for r in src["futures"]:
             if not r["symbol"]:
                 continue
             e = rec(r["symbol"]); e["fno"] = True
@@ -1175,6 +1224,79 @@ def _build_idea(e):
 
 _reco_cache = {"ts": 0.0, "data": None}
 _RECO_TTL = 12  # share one scanner sweep across the Ideas tab + the new-idea alert poll
+_reco_running = False           # single-flight guard for the background refresh
+_reco_gate = threading.Lock()
+
+
+def _reco_compute():
+    """The expensive path: full scanner sweep → LONG/SHORT ideas → journal enrich,
+    written into _reco_cache. Callers gate this behind the cache + _reco_running so
+    at most one runs at a time (it does the 7 hot-list fetches via get_scanner)."""
+    rows = get_scanner(limit=250)
+    # Journal ALL qualifying ideas (not just the fno subset) so entries stay
+    # consistent regardless of the F&O toggle; the toggle only filters the view.
+    ideas = [i for i in (_build_idea(e) for e in rows) if i]
+    longs = sorted([i for i in ideas if i["direction"] == "LONG"],
+                   key=lambda x: x["conviction"], reverse=True)
+    shorts = sorted([i for i in ideas if i["direction"] == "SHORT"],
+                    key=lambda x: x["conviction"], reverse=True)
+
+    # Fix each idea's entry + timestamp on first sight today and re-price the
+    # whole day's set, so the UI can show "given HH:MM" + move-since-entry even
+    # after an idea drops out of the fresh top set. Re-pricing uses ONLY the
+    # cached hot-list map (a dict lookup) — never a per-symbol network fetch.
+    try:
+        pmap = get_price_map()
+    except Exception:
+        pmap = {}
+    try:
+        import ideas_journal
+        longs, shorts = ideas_journal.enrich(longs, shorts,
+                                             price_fn=lambda s: pmap.get(s))
+    except Exception:
+        log.warning("ideas_journal.enrich failed; serving unenriched ideas",
+                    exc_info=True)
+
+    _reco_cache["data"] = {"longs": longs, "shorts": shorts,
+                           "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    _reco_cache["ts"] = time.time()
+
+
+def _maybe_refresh_reco():
+    """Keep _reco_cache warm WITHOUT blocking the caller once we have any data:
+
+    - fresh (< _RECO_TTL): nothing to do.
+    - cold (no data yet): compute synchronously ONCE (single-flight) so the first
+      call returns real ideas — and starts the day's journal — instead of empty.
+    - stale (have data, expired): serve the stale set NOW and refresh in a daemon
+      thread. This is what removes the recurring multi-second stalls that hit every
+      poll landing on an expired cache under NSE contention.
+    """
+    global _reco_running
+    c = _reco_cache
+    if c["data"] and (time.time() - c["ts"]) < _RECO_TTL:
+        return
+    if not c["data"]:
+        with _reco_gate:                       # cold: block once, dedupe concurrent first-calls
+            if not (c["data"] and (time.time() - c["ts"]) < _RECO_TTL):
+                _reco_compute()
+        return
+    with _reco_gate:
+        if _reco_running or (time.time() - c["ts"]) < _RECO_TTL:
+            return
+        _reco_running = True
+
+    def _run():
+        global _reco_running
+        try:
+            _reco_compute()
+        except Exception:
+            log.warning("background recommendations refresh failed", exc_info=True)
+        finally:
+            with _reco_gate:
+                _reco_running = False
+
+    threading.Thread(target=_run, name="reco-refresh", daemon=True).start()
 
 
 def get_recommendations(fno_only=False, limit=None):
@@ -1183,46 +1305,17 @@ def get_recommendations(fno_only=False, limit=None):
     Each idea carries a conviction score, plain-English reasons and a simple
     entry/stop/target plan. Educational signal summary — NOT investment advice.
 
-    The (unfiltered) enriched set is cached briefly so the dashboard's Ideas tab
-    and the always-on new-idea alert poll don't each trigger a full scanner
-    sweep; the F&O toggle only filters the already-computed view.
+    Non-blocking after the first call: the enriched set is cached, and once it
+    exists an expired cache is served immediately while a background thread
+    refreshes it (stale-while-revalidate) — so the Ideas tab + the always-on
+    new-idea alert poll never stall on a scanner sweep. The F&O toggle only
+    filters the already-computed view.
 
     `limit` (per side) is applied only to the returned view; the journal always
     records the full qualifying set. Default None = return everything.
     """
-    now = time.time()
-    c = _reco_cache
-    if not (c["data"] and (now - c["ts"]) < _RECO_TTL):
-        rows = get_scanner(limit=250)
-        # Journal ALL qualifying ideas (not just the fno subset) so entries stay
-        # consistent regardless of the F&O toggle; the toggle only filters the view.
-        ideas = [i for i in (_build_idea(e) for e in rows) if i]
-        longs = sorted([i for i in ideas if i["direction"] == "LONG"],
-                       key=lambda x: x["conviction"], reverse=True)
-        shorts = sorted([i for i in ideas if i["direction"] == "SHORT"],
-                        key=lambda x: x["conviction"], reverse=True)
-
-        # Fix each idea's entry + timestamp on first sight today and re-price the
-        # whole day's set, so the UI can show "given HH:MM" + move-since-entry even
-        # after an idea drops out of the fresh top set. Re-pricing uses ONLY the
-        # cached hot-list map (a dict lookup) — never a per-symbol network fetch.
-        try:
-            pmap = get_price_map()
-        except Exception:
-            pmap = {}
-        try:
-            import ideas_journal
-            longs, shorts = ideas_journal.enrich(longs, shorts,
-                                                 price_fn=lambda s: pmap.get(s))
-        except Exception:
-            log.warning("ideas_journal.enrich failed; serving unenriched ideas",
-                        exc_info=True)
-
-        c["data"] = {"longs": longs, "shorts": shorts,
-                     "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        c["ts"] = now
-
-    d = c["data"]
+    _maybe_refresh_reco()
+    d = _reco_cache["data"] or {"longs": [], "shorts": [], "generatedAt": None}
     longs, shorts = d["longs"], d["shorts"]
     if fno_only:
         longs = [i for i in longs if i.get("fno")]
