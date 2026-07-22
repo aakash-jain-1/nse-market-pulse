@@ -587,6 +587,11 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **Fix: fast dashboard boot** — `live_feed.start()` now runs on a daemon thread in
+  `web/app.py:main()`, so the Angel/Dhan instrument-master download no longer blocks the
+  socket bind. Boot dropped from ~85s to ~1s; the Live tab just fills in a few seconds
+  later. No-op for users without broker creds. Suite unchanged (826).
+
 - **Restructure: flat root → `nse_pulse/` package** — moved all 30 modules into
   domain subpackages (`core`/`feeds`/`sim`/`eod`/`backtest`/`web`/`cli`) via `git mv`
   (history preserved), rewrote ~322 imports to `from nse_pulse.<sub> import <mod>`, and

@@ -511,6 +511,20 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-07-22 — Fix: dashboard bind blocked ~85s by the live-feed scrip download (suite 826, unchanged)
+- **Why:** `python app.py` took ~85s to start serving. `web/app.py:main()` called `live_feed.start()`
+  synchronously before the banner + `app.run()`, and Angel's `start()` first runs `_load_scrip()` —
+  `requests.get(SCRIP_URL, timeout=60)` for the **full instrument master** (a large JSON) — before it
+  spawns its supervisor thread. So the socket bind waited on a network download every boot.
+- **What:** start the feed on a daemon thread — `_th.Thread(target=live_feed.start, daemon=True,
+  name="live-feed-start").start()`. Uses `_th` (not bare `threading`) because `main()` has a
+  function-local `import threading` further down that would otherwise shadow the name (`UnboundLocalError`).
+  The WS login/reconnect already ran inside `_supervise` (daemon); only the synchronous scrip fetch sat on
+  the critical path. No-op for users without broker creds, so behaviour is otherwise unchanged.
+  `snapshot_logger.start()` / `eod_scheduler.start()` were already non-blocking (they only spawn daemons).
+- **Verified:** fresh timed boot **bound in ~1s** (was ~85s), `/api/health` 200 in ~14ms; the banner now
+  prints with no preceding scrip/login lines. Full suite **826 green**.
+
 ### 2026-07-22 — Restructure: flat root → domain-grouped `nse_pulse/` package (suite 826, unchanged)
 - **Why:** ~30 modules + templates all sat at the repo root; hard to navigate and to reason about
   boundaries. Standardised into a package **without changing behaviour or the run commands**.

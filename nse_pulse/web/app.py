@@ -1251,7 +1251,10 @@ def main():
         _th.Thread(target=_retain, daemon=True).start()
         # Live realtime feed (Angel One or Dhan). No-op unless credentials + SDK
         # are present, so the app runs unchanged for users who haven't set it up.
-        live_feed.start()
+        # On a daemon thread: start() synchronously downloads the broker's large
+        # instrument master, which otherwise delayed the dashboard bind by ~1 min.
+        # The feed warms up in the background; the Live tab fills in shortly after.
+        _th.Thread(target=live_feed.start, daemon=True, name="live-feed-start").start()
         # Pre-warm the strategy-of-the-day leaderboard AND the walk-forward
         # robustness overlay (both EOD-cached backtests over the SAME daily bars, so
         # the second is ~pure CPU) in a daemon thread, so the Sim tab's card is ready
