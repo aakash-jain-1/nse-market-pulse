@@ -858,6 +858,7 @@ nse-market-pulse/
 ├── notify_config.example.json # Template for alert creds → copy to notify_config.json
 ├── data/                   # (gitignored) market.db + any legacy CSVs
 ├── requirements.txt
+├── docker-compose.otel.yml # Local OpenTelemetry backend (grafana/otel-lgtm) — see observability.py
 ├── README.md
 ├── CONTEXT.md              # Living project memory (current state + dated findings log)
 ├── AGENTS.md               # Project guide for AI agents & future sessions

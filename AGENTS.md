@@ -94,6 +94,7 @@ NSE/
 ├── notify_config.example.json # Template → copy to notify_config.json (gitignored) for alerts
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── requirements.txt
+├── docker-compose.otel.yml  # local OTel backend (grafana/otel-lgtm) for observability.py — dev only
 ├── README.md
 ├── AGENTS.md          # <- this file
 ├── AUDIT.md           # Deep code audit (round 1): findings, severities, fixes
@@ -138,17 +139,23 @@ The terminal access log (`observability.py`) is always on: one line per request 
 `HH:MM:SS.mmm -> HH:MM:SS.mmm  METHOD  /path  status  Nms  ip=…  size  trace=…` (the
 `?token=` secret is redacted). To also export OpenTelemetry traces/RED-metrics/logs
 (the CNCF standard), point it at a collector — nothing shows in the terminal from OTel
-itself, it goes to the backend:
+itself, it goes to the backend. A one-command local backend is committed
+(`docker-compose.otel.yml` = `grafana/otel-lgtm`: Grafana + Tempo + Prometheus + Loki
++ Collector, all three signals in one Grafana UI):
 
 ```bash
-docker run -p4318:4318 -p16686:16686 jaegertracing/all-in-one   # one-time
-set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318           # (OTEL_CONSOLE=1 to dump to stdout)
-python app.py                                                   # traces at http://localhost:16686
+docker compose -f docker-compose.otel.yml up -d                       # start (first pull ~1GB)
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 python app.py       # bash (PowerShell: $env:OTEL_...)
+#   click around, then open http://localhost:3000  → Explore → Tempo/Prometheus/Loki
+docker compose -f docker-compose.otel.yml down                        # stop
 ```
 
-OTel env: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_CONSOLE`, `OTEL_SERVICE_NAME`,
-`OTEL_SDK_DISABLED`, `OTEL_INSTRUMENT_REQUESTS` (opt-in: traces outbound `requests`,
-but injects `traceparent` headers into NSE calls — off by default, Akamai is header-sensitive).
+When active the access line's `trace=` shows the real 32-hex id (else `trace=-`). Verified
+end-to-end: request spans in Tempo, `http_server_duration_milliseconds_*` in Prometheus,
+logs in Loki (all tagged `service.name=nse-market-pulse`). `OTEL_CONSOLE=1` dumps to stdout
+instead. OTel env: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_CONSOLE`, `OTEL_SERVICE_NAME`,
+`OTEL_SDK_DISABLED`, `OTEL_INSTRUMENT_REQUESTS` (opt-in: traces outbound `requests`, but
+injects `traceparent` headers into NSE calls — off by default, Akamai is header-sensitive).
 
 `db_inspect.py` opens the DB **read-only** (safe while the app is live):
 `python db_inspect.py` (overview: tables, row counts, spans),

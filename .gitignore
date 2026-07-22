@@ -59,3 +59,6 @@ notify_config.json
 
 # Angel One SmartAPI SDK writes per-day tick logs here
 logs/
+
+# Optional persisted OTel backend data (docker-compose.otel.yml volume, if uncommented)
+.otel-data/

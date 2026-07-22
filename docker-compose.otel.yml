@@ -1,0 +1,30 @@
+# Local OpenTelemetry backend for NSE Market Pulse (pairs with observability.py).
+# =============================================================================
+# ONE container = Grafana + Loki (logs) + Tempo (traces) + Prometheus/Mimir
+# (metrics) + a built-in OpenTelemetry Collector. The app exports all three OTel
+# signals over OTLP, so this shows request traces, the http.server.* RED metrics,
+# and logs — correlated — in a single Grafana UI. LOCAL DEV ONLY; ephemeral.
+#
+# Quick start:
+#   docker compose -f docker-compose.otel.yml up -d      # start (first pull ~1GB)
+#   #   then run the app pointed at the collector:
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 python app.py      # bash
+#   $env:OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"; python app.py   # PowerShell
+#   #   click around the dashboard, then explore:
+#   open http://localhost:3000        # Grafana (anonymous admin; datasources pre-wired)
+#                                      #   Explore → Tempo (traces) / Prometheus (metrics) / Loki (logs)
+#   docker compose -f docker-compose.otel.yml down       # stop + remove
+#
+# Data is intentionally NOT persisted (it's a debugging sandbox). To keep it across
+# `down`, uncomment the volume below.
+services:
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.11.14
+    container_name: nse-otel-lgtm
+    ports:
+      - "3000:3000"   # Grafana UI
+      - "4317:4317"   # OTLP/gRPC  ingest
+      - "4318:4318"   # OTLP/HTTP  ingest  <- observability.py posts here
+    restart: unless-stopped
+    # volumes:
+    #   - ./.otel-data:/data     # (optional) persist traces/metrics/logs across restarts

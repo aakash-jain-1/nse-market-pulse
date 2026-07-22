@@ -495,6 +495,19 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-07-22 — Local OpenTelemetry backend (`docker-compose.otel.yml`, grafana/otel-lgtm)
+- **Why:** the OTel export path (added earlier) had no backend to view it in; Docker is now available.
+- **What:** committed `docker-compose.otel.yml` running `grafana/otel-lgtm:0.11.14` — ONE container with
+  Grafana + Tempo (traces) + Prometheus/Mimir (metrics) + Loki (logs) + a built-in OTel Collector, ports
+  3000 (Grafana UI) / 4317 (OTLP gRPC) / 4318 (OTLP HTTP). `docker compose -f docker-compose.otel.yml up
+  -d`, then run the app with `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`, explore at
+  http://localhost:3000. Ephemeral by design (optional `./.otel-data` volume, gitignored).
+- **Verified end-to-end (live):** launched an OTel-enabled instance, drove ~21 requests, and confirmed via
+  Grafana's datasource proxy — **Tempo: 21 traces** (`GET /api/health`, `/api/recommendations`, …),
+  **Prometheus: `http_server_duration_milliseconds_{bucket,count,sum}` + `http_server_active_requests`**,
+  **Loki: logs** — all tagged `service.name=nse-market-pulse`. The access line's `trace=` now shows the
+  real 32-hex id instead of `-`. No app code change; docs only (no test-count change).
+
 ### 2026-07-22 — /api/recommendations non-blocking + parallel scanner fan-out (suite 822 → 826)
 - **Why (surfaced by the new access log):** `/api/recommendations` occasionally took **tens of
   seconds** (`GET /api/recommendations 200 43237ms` right after a reload). Two causes: (1) on a cold
