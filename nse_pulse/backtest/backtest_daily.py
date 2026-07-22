@@ -46,6 +46,7 @@ from nse_pulse.core import db
 from nse_pulse.core import intrabar
 from nse_pulse.core import nse_client as nse
 from nse_pulse.core import nse_quote
+from nse_pulse.core import swr
 from nse_pulse.sim import sim
 from nse_pulse.sim import strategies as strat
 from nse_pulse.sim.sim import RISK_PER_TRADE, size_position
@@ -1275,3 +1276,39 @@ def strategy_of_day(days=60, universe_size=60, min_closed=5, source="live"):
                    "volDays": (lb_data.get("volDist") or {}).get(vol_state)},
         "generatedAt": _now(),
     }
+
+
+# ----------------------------------------------------------------------------
+# Non-blocking strategy-of-the-day (stale-while-revalidate). The composed card
+# above is cheap to assemble, but its inputs (cached_regime_leaderboard +
+# cached_walkforward) run heavy daily-bar backtests on a cold/expired 6h cache —
+# 16–97s in the prod access log, worst during market hours when the boot
+# pre-warm is intentionally skipped. The GET endpoint uses this wrapper so a
+# request never blocks on that: it serves the last card instantly and recomputes
+# in the background (mirrors sim.current_regime). strategy_of_day() itself stays
+# blocking for direct callers (tests, the off-hours warm pass).
+# ----------------------------------------------------------------------------
+_SOD_CARD_TTL = 90         # recompose at most ~1/90s; the heavy backtests stay 6h-cached
+
+
+def _sod_placeholder(days=60, universe_size=60, min_closed=5, source="live"):
+    """Cheap 'warming' card, returned only until the first background compute lands."""
+    return {
+        "regime": None, "source": source, "basis": "warming", "pick": None,
+        "ranked": [], "walkForward": None, "skippedOverfit": None,
+        "sample": {}, "generatedAt": _now(), "warming": True,
+    }
+
+
+_sod_swr = swr.SwrCache(
+    strategy_of_day, ttl=_SOD_CARD_TTL, placeholder=_sod_placeholder,
+    should_refresh=lambda: not nse.blocked_for(),   # skip the backtest during a WAF cooldown
+    maxsize=8, name="sod-card")
+
+
+def strategy_of_day_cached(days=60, universe_size=60, min_closed=5, source="live"):
+    """NON-BLOCKING strategy-of-the-day for the dashboard: the last card instantly,
+    refreshed in the background when stale (a cold start returns a 'warming'
+    placeholder while the first backtest runs off-thread)."""
+    return _sod_swr.get(days=days, universe_size=universe_size,
+                        min_closed=min_closed, source=source)

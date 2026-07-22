@@ -693,7 +693,8 @@ source .venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 
 # 4. Run the dashboard
-python app.py
+python start.py     # recommended: clears stale instances + preflights, then launches app.py
+# (or just `python app.py` directly)
 ```
 
 Then open **http://127.0.0.1:5055**.
@@ -819,6 +820,7 @@ python nse_demand.py losers     # top losers
 
 ```
 nse-market-pulse/
+├── start.py                # Clean-slate launcher: kills stale instances + preflight, then app.py
 ├── app.py                  # Thin shim → nse_pulse.web.app:main (python app.py still works)
 ├── nse_demand.py           # Thin shim → nse_pulse.cli.nse_demand:main
 ├── pyproject.toml          # Packaging + pytest config (pythonpath=["."], testpaths=["tests"])

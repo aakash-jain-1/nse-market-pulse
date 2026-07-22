@@ -36,6 +36,7 @@ Educational / research — NOT investment advice.
 import logging
 from datetime import datetime, timedelta, timezone
 
+from nse_pulse.core import swr
 from nse_pulse.eod import eod_scanner as _es
 
 log = logging.getLogger("eod_conviction")
@@ -538,6 +539,52 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
             "No EOD history yet — load it first (⬇ Backfill history on the EOD "
             "Scan tab) so the conviction board has data."),
     }
+
+
+# ---------------------------------------------------------------------------
+# Non-blocking board (stale-while-revalidate). board() is DB + bhavcopy-parse
+# heavy: on a COLD cache (the day's pillar maps not built yet) it took ~43s in
+# the prod access log; once warm it's ~300ms. The GET endpoint serves the last
+# board instantly and rebuilds in the background so a request never eats that
+# cold cost. board() itself stays blocking for save()/digest and the tests,
+# which need the freshly-computed board.
+# ---------------------------------------------------------------------------
+_BOARD_TTL = 300           # rebuild at most ~1/5min; the filter set is part of the key
+
+
+def _board_placeholder(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
+                       with_deals=True, fno_only=False, lookback=_es.LOOKBACK,
+                       with_options=True, with_rollover=True, adaptive=False):
+    """Cheap 'warming' board, returned only until the first background build lands."""
+    return {
+        "date": None, "longs": [], "shorts": [], "count": 0,
+        "universe": 0, "scanned": 0, "withDeals": False, "withOptions": False,
+        "withRollover": False, "adaptive": bool(adaptive), "adaptiveWeights": None,
+        "filters": {"minPrice": min_price, "minValueCr": min_value_cr,
+                    "minPillars": min_pillars, "fnoOnly": bool(fno_only),
+                    "withDeals": bool(with_deals), "withOptions": bool(with_options),
+                    "withRollover": bool(with_rollover),
+                    "adaptive": bool(adaptive), "limit": limit},
+        "coverage": {}, "note": "Building the conviction board…", "warming": True,
+    }
+
+
+_board_swr = swr.SwrCache(board, ttl=_BOARD_TTL, placeholder=_board_placeholder,
+                          maxsize=32, name="conv-board")
+
+
+def board_cached(**kw):
+    """NON-BLOCKING conviction board for the dashboard: the last board instantly,
+    rebuilt in the background when stale (a cold start returns a 'warming' placeholder
+    while the first build runs off-thread). Keyed by the full filter set."""
+    return _board_swr.get(**kw)
+
+
+def warm_board(**kw):
+    """Synchronously build + cache the board now (startup pre-warm). Warming ANY
+    filter set primes the shared pillar caches (bars / OI / options / rollover), so
+    every later board_cached() — for any filters — takes the fast ~300ms path."""
+    return _board_swr.prime(**kw)
 
 
 # ---------------------------------------------------------------------------

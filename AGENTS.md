@@ -38,6 +38,7 @@ intraday momentum and unusual activity. It pulls data from NSE India's public
 
 ```
 NSE/
+├── start.py           # Clean-slate launcher: kill stale instances (port + app.py) + preflight, then app.py
 ├── app.py             # Thin shim → nse_pulse.web.app:main (so `python app.py` still works)
 ├── nse_demand.py      # Thin shim → nse_pulse.cli.nse_demand:main (CLI scanner)
 ├── pyproject.toml     # Packaging + pytest config (pythonpath=["."], testpaths=["tests"])
@@ -52,7 +53,8 @@ NSE/
 │   │   ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
 │   │   ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
 │   │   ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context + alerts) → SQLite
-│   │   └── paths.py           # Repo-root-anchored paths — keeps data/, config, state, logs at the repo root
+│   │   ├── paths.py           # Repo-root-anchored paths — keeps data/, config, state, logs at the repo root
+│   │   └── swr.py             # Stale-while-revalidate cache — serve stale + single-flight bg refresh (non-blocking endpoints)
 │   ├── feeds/         # optional live broker feeds (creds → gitignored config)
 │   │   ├── angel_feed.py      # Angel One SmartAPI WebSocket (FREE) → tick store; + rest_quote/rest_chart/rest_ohlc
 │   │   └── dhan_feed.py       # Dhan WebSocket (paid data plan); same interface
@@ -86,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 826 unit tests across 36 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 844 unit tests across 38 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -136,10 +138,11 @@ NSE/
 ## How to run
 
 ```bash
+python start.py          # RECOMMENDED: kill stale instances + preflight, then launch app.py (--dry-run/--kill-only/--no-kill/--background/--port)
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 826 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/…)
+python -m pytest -q      # 844 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -586,6 +589,13 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **Non-blocking heavy endpoints (SWR) + `start.py` launcher** — `/api/sim/strategy_of_day`
+  (16–97s cold) and `/api/eod/conviction` (~43s cold) now serve the last value instantly and
+  refresh in a background thread via a new `nse_pulse/core/swr.py` (`SwrCache`). Additive
+  `strategy_of_day_cached()` / `board_cached()` wrap the (unchanged, still-blocking)
+  `strategy_of_day()` / `board()`; startup pre-warm primes the shared caches. New root `start.py`
+  kills stale instances + preflights before launching. Cold endpoints measured at ~2ms. Suite 826 → 844.
 
 - **Fix: fast dashboard boot** — `live_feed.start()` now runs on a daemon thread in
   `web/app.py:main()`, so the Angel/Dhan instrument-master download no longer blocks the

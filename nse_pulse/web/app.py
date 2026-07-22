@@ -479,7 +479,7 @@ def api_eod_conviction():
         except ValueError:
             return default
 
-    return jsonify(eod_conviction.board(
+    return jsonify(eod_conviction.board_cached(
         limit=int(fnum("limit", 25)),
         min_price=fnum("minPrice", 20.0),
         min_value_cr=fnum("minValueCr", 2.0),
@@ -919,7 +919,7 @@ def api_sim_strategy_of_day():
     from nse_pulse.backtest import backtest_daily as btd
     source = "eod" if request.args.get("source") == "eod" else "live"
     default_uni = 2500 if source == "eod" else 60
-    return jsonify(btd.strategy_of_day(
+    return jsonify(btd.strategy_of_day_cached(
         days=int(request.args.get("days", 60)),
         universe_size=int(request.args.get("universe", default_uni)),
         source=source,
@@ -1273,6 +1273,16 @@ def main():
         def _warm_sim():
             time.sleep(_sim_warm_delay)
             _warm_sim_pass()
+            # Also prime the composed strategy-of-day CARD (cheap once the inner 6h
+            # backtests warmed above), so the first Sim poll gets the real card rather
+            # than the 'warming' placeholder. Off-hours only — mirrors _warm_sim_pass,
+            # which skips the live backtest during market hours to avoid NSE contention.
+            if not snaplog.is_market_hours():
+                try:
+                    from nse_pulse.backtest import backtest_daily as _btd
+                    _btd.strategy_of_day_cached()
+                except Exception:
+                    log.warning("strategy-of-day card pre-warm failed", exc_info=True)
 
         threading.Thread(target=_warm_sim, daemon=True, name="sim-warm").start()
 
@@ -1285,6 +1295,15 @@ def main():
                 bhavcopy.latest()
             except Exception:
                 log.warning("EOD bhavcopy pre-warm failed", exc_info=True)
+            # Prime the conviction board (default filters) so the first EOD/conviction
+            # request takes the fast ~300ms path instead of the ~43s cold pillar build.
+            # Warming ANY filter set warms the SHARED pillar caches; it's DB/bhavcopy
+            # only (no live NSE), so it's safe to warm anytime, off the request path.
+            try:
+                from nse_pulse.eod import eod_conviction
+                eod_conviction.warm_board()
+            except Exception:
+                log.warning("conviction board pre-warm failed", exc_info=True)
 
         threading.Thread(target=_warm_eod, daemon=True).start()
 

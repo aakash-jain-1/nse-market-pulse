@@ -462,11 +462,11 @@ def test_sim_backtest_arg_parsing():
 def test_sim_strategy_of_day():
     from nse_pulse.backtest import backtest_daily as btd
     seen = {}
-    with _patch(btd, "strategy_of_day", lambda **k: seen.update(k) or {"pick": None}):
+    with _patch(btd, "strategy_of_day_cached", lambda **k: seen.update(k) or {"pick": None}):
         client.get("/api/sim/strategy_of_day?days=30&universe=25")
     assert seen["days"] == 30 and seen["universe_size"] == 25 and seen["source"] == "live"
     seen2 = {}
-    with _patch(btd, "strategy_of_day", lambda **k: seen2.update(k) or {"pick": None}):
+    with _patch(btd, "strategy_of_day_cached", lambda **k: seen2.update(k) or {"pick": None}):
         client.get("/api/sim/strategy_of_day?source=eod")
     assert seen2["source"] == "eod" and seen2["universe_size"] == 2500   # whole market
 
@@ -622,7 +622,7 @@ def test_eod_conviction_arg_parsing():
                     adaptive=adaptive)
         return {"date": "2026-07-15", "longs": [], "shorts": [], "count": 0}
 
-    with _patch(eod_conviction, "board", fake):
+    with _patch(eod_conviction, "board_cached", fake):
         st, j = _json("/api/eod/conviction?limit=10&minPrice=50&minValueCr=5&minPillars=4&fno=1&deals=0&options=0&rollover=0&adaptive=1")
         assert st == 200 and j["date"] == "2026-07-15"
         assert seen == {"limit": 10, "min_price": 50.0, "min_value_cr": 5.0,

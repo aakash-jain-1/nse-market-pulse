@@ -51,6 +51,7 @@ optional live broker feed, and off-screen alerts. Data from NSE India's public
 ## How to run
 
 ```bash
+python start.py          # RECOMMENDED: kill stale instances + preflight, then launch app.py
 python app.py            # dashboard at http://127.0.0.1:5055 (binds 0.0.0.0 for LAN)
 python nse_demand.py     # CLI scanner (gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # read-only SQLite peek (overview / <table> [N] / sql "...")
@@ -77,6 +78,7 @@ python -m pytest -q      # full unit-test suite
 ## File map
 
 ```
+start.py             Clean-slate launcher: kill stale instances (port + app.py) + preflight, then app.py
 app.py               Root shim → nse_pulse.web.app:main (python app.py unchanged)
 nse_demand.py        Root shim → nse_pulse.cli.nse_demand:main
 pyproject.toml       Packaging + pytest config (pythonpath=["."], testpaths=["tests"])
@@ -88,6 +90,7 @@ nse_pulse/core/
   intrabar.py        Minute-candle trade resolver (target/stop/MFE/MAE) + resolve_point
   snapshot_logger.py Background logger (snapshots+IV+context+sim+alerts) → SQLite
   paths.py           Repo-root-anchored paths — data/, *_config.json, state JSON, logs/ stay at root
+  swr.py             Stale-while-revalidate cache — serve stale + single-flight bg refresh (non-blocking heavy endpoints)
 nse_pulse/feeds/
   angel_feed.py      Live feed adapter — Angel One SmartAPI WebSocket (FREE default) + rest_quote/chart/ohlc
   dhan_feed.py       Live feed adapter — Dhan WebSocket (paid data plan)
@@ -121,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-tests/               Unit tests — 826 across 36 suites; import `from nse_pulse.<sub> import <mod>`
+tests/               Unit tests — 844 across 38 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -510,6 +513,33 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-22 — Non-blocking strategy_of_day + conviction board (SWR) + start.py launcher (suite 826 → 844)
+- **Why:** the access log exposed `/api/sim/strategy_of_day` taking **16–97s** and `/api/eod/conviction`
+  **~43s** on a COLD cache (both ~2ms / ~300ms once warm). Each ran its full pipeline *synchronously* on
+  whichever request hit an empty/expired cache — worst for strategy_of_day DURING MARKET HOURS, when the
+  boot pre-warm is deliberately skipped. Same "request blocks on a cold recompute" shape already fixed for
+  `/api/recommendations`. Ruled out (log): no duplicate listener, no WAF/403 spikes — genuinely cold compute.
+- **What (SWR):** new `nse_pulse/core/swr.py` — `SwrCache` (fresh→serve; stale→serve stale + single-flight
+  background refresh; cold→placeholder + kick refresh; optional `should_refresh` veto + size cap), generalising
+  the hand-rolled `sim.current_regime()` pattern. Added ADDITIVE non-blocking wrappers used ONLY by the GET
+  routes — `backtest_daily.strategy_of_day_cached()` and `eod_conviction.board_cached()`; the blocking
+  `strategy_of_day()` / `board()` stay unchanged for `save()`/digest and the tests. The sod refresh is vetoed
+  during a WAF cooldown (needs live NSE); the board is DB/bhavcopy-only.
+- **What (pre-warm):** `_warm_eod` now primes the conviction board (warming ANY filter set warms the SHARED
+  pillar caches → every filter combo becomes the ~300ms path); `_warm_sim` primes the composed sod card
+  off-hours (mirrors `_warm_sim_pass`, which skips the live backtest during market hours).
+- **What (start.py):** repo-root launcher that kills stale instances (anything LISTENING on the port + any
+  python running this repo's `app.py`), preflights (reuses `sys.executable` → dodges the Store-shim trap,
+  waits for the port to free, ensures `data/`, checks core deps import), then launches `app.py` (foreground;
+  Ctrl+C stops it). Flags: `--dry-run` / `--kill-only` / `--no-kill` / `--background` / `--port` / `--host`.
+  ASCII-only console output (cp1252-safe, per the banner-crash lesson).
+- **Tests:** `+tests/test_swr.py` (12) and `+tests/test_start.py` (6, incl. the pure netstat parser);
+  repointed the two GET-route tests at the `*_cached` wrappers. **826 → 844**, all green.
+- **Verified (live):** a COLD fresh instance (launched via `start.py --no-kill` on :5061) served both endpoints
+  in **~2ms** (warming placeholder), and after the background refresh returned real data (conviction
+  `count=50`) still in ~2ms. `start.py --dry-run` correctly found the running instance + deps; kill path
+  scoped to the target tree (the :5055 instance was untouched).
 
 ### 2026-07-22 — Fix: dashboard bind blocked ~85s by the live-feed scrip download (suite 826, unchanged)
 - **Why:** `python app.py` took ~85s to start serving. `web/app.py:main()` called `live_feed.start()`
