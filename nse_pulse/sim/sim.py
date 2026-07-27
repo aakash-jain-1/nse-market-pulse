@@ -153,6 +153,33 @@ def _ensure_migrated():
         _migrated = True
 
 
+# ---------------------------------------------------------------------------
+# Cached full-ledger read. One SIM/F&O tab poll fans out to ~5 endpoints
+# (summary / daily / leaderboard / performance / analytics) that EACH need the
+# whole ledger; without sharing they each re-run db.sim_all_trades() — a full
+# table scan + per-row json.loads — concurrently, and being CPU-bound under the
+# GIL they pile up into a ~2s tab load. This memoises the read per book, keyed by
+# db's write epoch, so it's invalidated the instant any trade is inserted/cleared
+# (reprice, buy/sell, reset) and is otherwise shared across the burst — i.e. always
+# EXACTLY consistent with the DB, never stale. Single-flight: the scan runs under
+# the lock so N simultaneous cold callers do ONE read, not N. Callers treat the
+# returned list as read-only (verified across every aggregation that uses it).
+# ---------------------------------------------------------------------------
+_trades_cache = {}                    # book -> (epoch, list[trade])
+_trades_cache_lock = threading.Lock()
+
+
+def _all_trades_cached(book="cash"):
+    epoch = db.sim_trades_epoch()
+    with _trades_cache_lock:
+        hit = _trades_cache.get(book)
+        if hit is not None and hit[0] == epoch:
+            return hit[1]
+        trades = db.sim_all_trades(book=book)
+        _trades_cache[book] = (epoch, trades)
+        return trades
+
+
 def _price(symbol):
     try:
         return nse.get_price(symbol)
@@ -727,7 +754,7 @@ def daily_performance(days=30, book="cash"):
     the heavy reprice here would double it on a large open book.
     """
     _ensure_migrated()
-    trades = db.sim_all_trades(book=book)
+    trades = _all_trades_cached(book)
     today = _today()
     ctxd = _load().get("daily", {})
 
@@ -795,7 +822,7 @@ def day_trades(date, limit=400, book="cash"):
     date = (date or "")[:10]
     names = {s["id"]: s["name"] for s in strat.STRATEGIES}
     closed, opened_open = [], []
-    for t in db.sim_all_trades(book=book):
+    for t in _all_trades_cached(book):
         if t["status"] == "OPEN":
             if t.get("openedDate") == date:
                 opened_open.append(t)
@@ -866,7 +893,7 @@ def regime_leaderboard(min_closed=1, trades=None, book="cash"):
     """
     if trades is None:
         _ensure_migrated()
-        trades = db.sim_all_trades(book=book)
+        trades = _all_trades_cached(book)
     by = {}
     for t in trades:
         by.setdefault(t["strategy"], []).append(t)
@@ -955,7 +982,7 @@ def equity_curves(trades=None):
     """Cumulative realized P&L per strategy, ordered by close time (equity curve)."""
     if trades is None:
         _ensure_migrated()
-        trades = db.sim_all_trades()
+        trades = _all_trades_cached(book=None)
     by = {}
     for t in trades:
         by.setdefault(t["strategy"], []).append(t)
@@ -1082,7 +1109,7 @@ def analytics(book="cash"):
     excluded here (their MTM lives in the Today card / scorecards).
     """
     _ensure_migrated()
-    trades = db.sim_all_trades(book=book)
+    trades = _all_trades_cached(book)
     by = {}
     for t in trades:
         if t["status"] in ("TARGET", "STOP", "EXPIRED"):
@@ -1114,7 +1141,7 @@ def analytics(book="cash"):
 def leaderboard_bundle(book="cash"):
     """One call for the whole leaderboard section: table + today's pick + curves."""
     regime = current_regime()
-    trades = db.sim_all_trades(book=book)
+    trades = _all_trades_cached(book)
     lb = regime_leaderboard(trades=trades)
     return {
         "regime": regime,
@@ -1165,7 +1192,7 @@ def summary(strategy_id=None, book="cash"):
     state = _load()
     regime = current_regime()
 
-    all_trades = db.sim_all_trades(book=book)
+    all_trades = _all_trades_cached(book)
     by_strat = {}
     for t in all_trades:
         by_strat.setdefault(t["strategy"], []).append(t)
@@ -1271,7 +1298,7 @@ def performance(book="cash"):
     'how has each strategy actually done, all-time' view.
     """
     _ensure_migrated()
-    trades = db.sim_all_trades(book=book)
+    trades = _all_trades_cached(book)
     by = {}
     for t in trades:
         by.setdefault(t["strategy"], []).append(t)

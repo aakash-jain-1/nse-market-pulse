@@ -49,6 +49,7 @@ def _temp_sim():
     sim._regime_cache = None                  # SWR regime cache: start each test cold
     sim._regime_ts = 0.0
     sim._regime_running = False
+    sim._trades_cache.clear()                 # ledger cache: start each test cold (epoch is a global)
     try:
         yield
     finally:
@@ -89,6 +90,27 @@ def test_performance_ranked_by_expectancy():
     assert ranked[0]["tradingDays"] == 1
     assert ranked[1]["id"] == "vwap"
     assert perf["totals"]["closed"] == 3 and perf["tradeCount"] == 3
+
+
+# ---------------------------------------------------------------------------
+# _all_trades_cached — shared, epoch-invalidated full-ledger read
+# ---------------------------------------------------------------------------
+def test_all_trades_cached_shares_within_epoch_and_invalidates_on_write():
+    """A SIM-tab poll's 5 endpoints share ONE ledger read; any write re-reads."""
+    with _temp_sim():
+        db.sim_insert_trades([_t("1")])
+        a = sim._all_trades_cached("cash")
+        b = sim._all_trades_cached("cash")
+        assert a is b                                    # same epoch -> one read, shared object
+        assert [t["id"] for t in a] == ["1"]
+
+        db.sim_insert_trades([_t("2")])                  # a write bumps db.sim_trades_epoch()
+        c = sim._all_trades_cached("cash")
+        assert c is not a                                # epoch changed -> fresh read
+        assert sorted(t["id"] for t in c) == ["1", "2"]
+
+        db.sim_clear()                                   # clear bumps the epoch too
+        assert sim._all_trades_cached("cash") == []
 
 
 # ---------------------------------------------------------------------------

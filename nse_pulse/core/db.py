@@ -45,6 +45,11 @@ _init_lock = threading.Lock()
 _write_lock = threading.Lock()
 _initialized = False
 
+# Monotonic counter bumped on every sim_trades write (insert/clear). Lets caches
+# (e.g. sim._all_trades_cached) detect a changed ledger cheaply: an unchanged epoch
+# means a cached full-ledger read is still EXACTLY consistent with the DB.
+_sim_trades_epoch = 0
+
 IST = timezone(timedelta(hours=5, minutes=30))
 
 SNAPSHOT_COLS = [
@@ -375,16 +380,23 @@ def _row_to_trade(r):
     return t
 
 
+def sim_trades_epoch():
+    """Current sim_trades write epoch (see _sim_trades_epoch). Cheap lock-free read."""
+    return _sim_trades_epoch
+
+
 def sim_insert_trades(trades):
     """Insert or update (by id) a batch of trade dicts."""
     if not trades:
         return 0
+    global _sim_trades_epoch
     with _write_lock, _conn() as c:
         c.executemany(
             f"INSERT OR REPLACE INTO sim_trades ({','.join(SIM_TRADE_COLS)}) "
             f"VALUES ({','.join('?' * len(SIM_TRADE_COLS))})",
             [_trade_to_row(t) for t in trades],
         )
+        _sim_trades_epoch += 1
     return len(trades)
 
 
@@ -435,11 +447,13 @@ def sim_trade_count(book=None):
 
 
 def sim_clear(book=None):
+    global _sim_trades_epoch
     with _write_lock, _conn() as c:
         if book is None:
             c.execute("DELETE FROM sim_trades")
         else:
             c.execute("DELETE FROM sim_trades WHERE book=?", (book,))
+        _sim_trades_epoch += 1
 
 
 # ----------------------------------------------------------------------------

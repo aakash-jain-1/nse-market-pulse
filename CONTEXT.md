@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-tests/               Unit tests — 845 across 38 suites; import `from nse_pulse.<sub> import <mod>`
+tests/               Unit tests — 846 across 38 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -513,6 +513,23 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-27 — Fix: SIM-tab endpoints share one ledger read (suite 845 → 846)
+- **Why:** every SIM/F&O tab poll fans out to 5 endpoints (`summary` / `daily` / `leaderboard` / `performance` /
+  `analytics`) that EACH called `db.sim_all_trades(book)` — a full `sim_trades` scan + per-row `json.loads`. Run
+  concurrently and CPU-bound under the GIL they piled into a **~1.9s** tab load (each ~1.3–1.9s in the access
+  log). `strategy_of_day` / `current_regime` were already instant (earlier SWR); `daily_matrix` only reads the
+  small state file.
+- **What:** epoch-keyed, single-flight cache. `db.py` bumps a monotonic `_sim_trades_epoch` in its ONLY two
+  `sim_trades` writers (`sim_insert_trades`, `sim_clear`) and exposes `sim_trades_epoch()`.
+  `sim._all_trades_cached(book)` memoises the read per book and serves it while the epoch is unchanged
+  (rebuilds under a lock, so N cold callers do ONE scan). All 5 read-only aggregations — plus `day_trades` and
+  the `regime_leaderboard` / `equity_curves` fallbacks — call it. Because any trade write bumps the epoch, the
+  cache is ALWAYS exactly consistent with the DB (reprice / buy / sell / reset invalidate instantly); it only
+  ever shares reads across a poll-burst between writes. No response-shape change.
+- **Tests:** `+test_all_trades_cached_shares_within_epoch_and_invalidates_on_write` (same object within an
+  epoch, fresh list after a write, empty after clear); the `_temp_sim` fixture now resets the ledger cache per
+  test. **845 → 846**, all green.
 
 ### 2026-07-27 — Fix: `/api/health` no longer blocks on the NSE pacer lock (suite 844 → 845)
 - **Why:** the access log showed `/api/health` spiking to **15s** (28s in the older log) despite doing no heavy
