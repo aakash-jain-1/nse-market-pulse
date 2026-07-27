@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-tests/               Unit tests — 844 across 38 suites; import `from nse_pulse.<sub> import <mod>`
+tests/               Unit tests — 845 across 38 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -513,6 +513,21 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-27 — Fix: `/api/health` no longer blocks on the NSE pacer lock (suite 844 → 845)
+- **Why:** the access log showed `/api/health` spiking to **15s** (28s in the older log) despite doing no heavy
+  work. Root cause: `_pace()` held `_pace_lock` ACROSS its `time.sleep()` — the min-gap and, critically, the
+  soft-RPM ceiling wait (up to ~60s). `pacer_stats()` (the /api/health payload) grabs the SAME lock just to read
+  `reqLastMin`, so whenever a background NSE burst (scanner fan-out / the futures sweep) filled the 120/min
+  window, the liveness probe blocked behind a worker sleeping in-lock.
+- **What:** reworked `_pace()` to RESERVE the next start slot under the lock (compute the allowed start time,
+  advance `_last_start`, append it to the window) and then `time.sleep()` AFTER releasing. Spacing/soft-ceiling
+  semantics are identical (each thread reserves a distinct, properly-spaced slot), but the lock is now held only
+  microseconds so `pacer_stats()` / `/api/health` never wait on it again. Bonus: the ≤4 workers now sleep toward
+  their slots concurrently instead of serializing the sleeps.
+- **Tests:** `+test_pace_does_not_hold_lock_during_sleep` (forces the soft-RPM wait, then probes from inside the
+  sleep — the non-reentrant `_pace_lock` must be free); the min-gap / soft-RPM / below-ceiling assertions are
+  unchanged. **844 → 845**, all green.
 
 ### 2026-07-22 — `/api/futures/all` non-blocking (SWR) (suite 844, unchanged)
 - **Why:** the access log's worst offender — `/api/futures/all` at up to **507s** (~8.5 min) cold. It sweeps

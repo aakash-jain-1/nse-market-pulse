@@ -127,6 +127,30 @@ def test_pace_no_rpm_wait_below_ceiling():
         assert all(s < 1.0 for s in clk.sleeps)    # only the min-gap, no 60s wait
 
 
+def test_pace_does_not_hold_lock_during_sleep():
+    """Regression: _pace() must sleep OUTSIDE _pace_lock. Holding it across the
+    (up to ~60s) soft-RPM wait blocked pacer_stats() behind /api/health — the 15-28s
+    health stalls. We force that long wait, then probe from inside the sleep: because
+    _pace_lock is non-reentrant, a successful acquire proves the lock was already
+    released (fixed); the buggy sleep-in-lock version would fail to acquire."""
+    clk = _Clock(t=1000.0)
+    lock_free_during_sleep = []
+    real_sleep = clk.sleep
+    def probing_sleep(s):
+        got = nse._pace_lock.acquire(blocking=False)
+        lock_free_during_sleep.append(got)
+        if got:
+            nse._pace_lock.release()
+        real_sleep(s)
+    with _fresh_pace(clk):
+        for _ in range(nse._NSE_SOFT_RPM):          # fill the window → force the soft-RPM wait
+            nse._req_calls.append(1000.0)
+        nse._last_start = 1000.0
+        clk.sleep = probing_sleep
+        nse._pace()
+    assert lock_free_during_sleep == [True]         # slept once, lock was free the whole time
+
+
 # --- pacer: bounded in-flight concurrency ----------------------------------
 
 def test_paced_session_caps_concurrency():

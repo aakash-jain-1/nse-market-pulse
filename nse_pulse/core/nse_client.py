@@ -260,26 +260,30 @@ def _pace():
     per-minute ceiling, then a min-gap (+jitter) between starts. Serialized by
     _pace_lock so the spacing is global across all worker threads; records the
     start timestamp in the sliding window. Does NOT touch _NSE_GATE (that bounds
-    concurrency around the actual network wait, separately)."""
+    concurrency around the actual network wait, separately).
+
+    The lock is held ONLY to *reserve* this request's start slot (compute the next
+    allowed start time, advance _last_start, record it) — never across the actual
+    time.sleep(). Holding it across the sleep meant a soft-RPM wait (up to ~60s)
+    stalled every other lock user, including the read-only pacer_stats() behind
+    /api/health (observed 15-28s health probes during background sweeps). Sleeping
+    AFTER releasing keeps the spacing identical (each thread reserves a distinct,
+    properly-spaced slot) while letting workers wait toward their slots concurrently."""
     global _last_start
     with _pace_lock:
         now = time.time()
         while _req_calls and now - _req_calls[0] > 60:   # drop starts out of the window
             _req_calls.popleft()
-        if len(_req_calls) >= _NSE_SOFT_RPM:             # per-minute: wait for room
-            wait = 60 - (now - _req_calls[0]) + 0.05
-            if wait > 0:
-                time.sleep(wait)
-            now = time.time()
-            while _req_calls and now - _req_calls[0] > 60:
-                _req_calls.popleft()
-        gap = now - _last_start                          # per-start: min gap + jitter
+        start = now
+        if len(_req_calls) >= _NSE_SOFT_RPM:             # per-minute: wait for window room
+            start = max(start, _req_calls[0] + 60 + 0.05)
         need = _NSE_MIN_GAP + random.uniform(0, _NSE_JITTER)
-        if gap < need:
-            time.sleep(need - gap)
-            now = time.time()
-        _last_start = now
-        _req_calls.append(now)
+        start = max(start, _last_start + need)           # per-start: min gap + jitter
+        _last_start = start
+        _req_calls.append(start)                         # reserve the slot at its start time
+    delay = start - time.time()
+    if delay > 0:
+        time.sleep(delay)                                # honor the reservation OUTSIDE the lock
 
 
 # --- Per-endpoint request budget ------------------------------------------

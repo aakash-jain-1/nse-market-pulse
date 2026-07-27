@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 844 unit tests across 38 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 845 unit tests across 38 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +142,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 844 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 845 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -589,6 +589,11 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **Fix: `/api/health` never blocks on the pacer lock** — `_pace()` used to hold `_pace_lock` across its
+  `time.sleep()` (incl. the up-to-60s soft-RPM wait), so `pacer_stats()` behind `/api/health` stalled 15-28s
+  during background NSE bursts. Now it reserves the start slot under the lock and sleeps after releasing (same
+  spacing; workers also sleep concurrently now). Suite 844 → 845.
 
 - **`/api/futures/all` non-blocking (SWR)** — the access log's worst endpoint (up to ~507s / 8.5-min cold
   full-universe futures sweep, which blocked the caller and starved the shared pacer) now serves the last
