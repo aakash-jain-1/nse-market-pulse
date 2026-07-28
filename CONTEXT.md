@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-tests/               Unit tests — 846 across 38 suites; import `from nse_pulse.<sub> import <mod>`
+tests/               Unit tests — 848 across 38 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -513,6 +513,20 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-28 — Ideas + manual Sim Take gated to market hours (suite 846 → 848)
+- **Why:** the Ideas engine (`/api/recommendations`) and a manual Sim **Take** produced "recommendations" at any hour.
+  Off-hours the underlying live signals are just last-close snapshots, so those ideas — and any trade taken from them —
+  are stale/meaningless. (The sim's AUTO-take was already gated by the capture loop's `is_market_hours()`.)
+- **What:** `get_recommendations()` now returns an empty set flagged `marketClosed:true` and SKIPS the scanner sweep
+  outside 09:15–15:30 IST (Mon–Fri) — via a thin, patchable `nse._is_market_open()` that lazy-imports
+  `snapshot_logger.is_market_hours` (dodging the snapshot_logger↔nse_client import cycle). That covers BOTH callers (the
+  Ideas tab + the always-on desktop-notify idea poll) and spares NSE the off-hours sweeps. `POST /api/sim/take` returns
+  `{added:{}, marketClosed:true}` off-hours without opening any trade. Frontend: `renderRecos` shows a "Market closed —
+  ideas resume at the next open" note and the Take button flashes "Market closed". Historical/analysis views
+  (sim summary/daily/leaderboard/performance/analytics, strategy-of-day, the EOD conviction board) stay live off-hours.
+- **Tests:** `+test_get_recommendations_gated_outside_market_hours` (empty + `marketClosed`, scanner never runs) and
+  `+test_sim_take_gated_off_hours` (take never called); the existing reco/take tests now force market-open. **846 → 848**, all green.
 
 ### 2026-07-27 — Fix: SIM-tab endpoints share one ledger read (suite 845 → 846)
 - **Why:** every SIM/F&O tab poll fans out to 5 endpoints (`summary` / `daily` / `leaderboard` / `performance` /

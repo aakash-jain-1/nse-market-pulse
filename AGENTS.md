@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 846 unit tests across 38 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 848 unit tests across 38 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +142,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 846 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 848 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -589,6 +589,11 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **Ideas + manual Sim Take gated to market hours** — `get_recommendations()` (the 💡 Ideas tab + the desktop-notify
+  idea poll) now recommends nothing off-hours (empty, flagged `marketClosed`, scanner skipped) via a patchable
+  `nse._is_market_open()`; `POST /api/sim/take` takes nothing outside 09:15–15:30 IST. Auto-take was already loop-gated;
+  historical/analysis views (summary/daily/leaderboard/performance/analytics, strategy-of-day, EOD board) stay live. Suite 846 → 848.
 
 - **Fix: SIM-tab shares one ledger read** — the 5 `/api/sim/*` endpoints each re-scanned the whole
   `sim_trades` ledger concurrently (~1.9s tab load under the GIL). Added an epoch-keyed single-flight cache

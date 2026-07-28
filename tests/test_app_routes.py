@@ -420,6 +420,7 @@ def test_sim_write_endpoints():
     from nse_pulse.sim import sim
     seen = {}
     with _patches(
+        (webapp.snaplog, "is_market_hours", lambda dt=None: True),   # take is gated to market hours
         (sim, "take", lambda strategy_ids=None, book="cash": seen.update(ids=strategy_ids, take_book=book) or 3),
         (sim, "summary", lambda strategy_id=None, book="cash": {"book": book, "strategy": strategy_id}),
         (sim, "set_auto", lambda on: bool(on)),
@@ -433,6 +434,22 @@ def test_sim_write_endpoints():
         assert client.post("/api/sim/mode", json={"entryMode": "open"}).get_json() == {"entryMode": "open"}
         client.post("/api/sim/reset", json={"book": "fno"})
         assert seen["reset_book"] == "fno"
+
+
+def test_sim_take_gated_off_hours():
+    """Outside market hours a manual Take enters nothing (auto is separately gated)."""
+    from nse_pulse.sim import sim
+
+    def _boom(*a, **k):
+        raise AssertionError("take must not run outside market hours")
+
+    with _patches(
+        (webapp.snaplog, "is_market_hours", lambda dt=None: False),
+        (sim, "take", _boom),
+        (sim, "summary", lambda strategy_id=None, book="cash": {"book": book}),
+    ):
+        j = client.post("/api/sim/take", json={"book": "cash"}).get_json()
+    assert j["marketClosed"] is True and j["added"] == {}
 
 
 def test_sim_backtest_arg_parsing():

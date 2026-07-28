@@ -166,6 +166,7 @@ def test_get_recommendations_split_filter_limit():
         {"symbol": "C", "direction": "LONG", "conviction": 90, "fno": False},
     ]
     with _reset_caches(), \
+         _patch(nse, "_is_market_open", lambda: True), \
          _patch(nse, "get_scanner", lambda limit=250: list(rows)), \
          _patch(nse, "_build_idea", lambda e: dict(e)), \
          _patch(nse, "get_price_map", lambda: {}), \
@@ -194,7 +195,8 @@ def test_get_recommendations_swr_serves_stale_then_refreshes():
             ts=_t.time() - (nse._RECO_TTL + 5))
         nse._reco_running = False
         new_rows = [{"symbol": "NEW", "direction": "LONG", "conviction": 90, "fno": True}]
-        with _patch(nse, "get_scanner", lambda limit=250: (_t.sleep(0.1), list(new_rows))[1]), \
+        with _patch(nse, "_is_market_open", lambda: True), \
+             _patch(nse, "get_scanner", lambda limit=250: (_t.sleep(0.1), list(new_rows))[1]), \
              _patch(nse, "_build_idea", lambda e: dict(e)), \
              _patch(nse, "get_price_map", lambda: {}), \
              _patch(ideas_journal, "enrich", lambda longs, shorts, price_fn=None: (longs, shorts)):
@@ -206,6 +208,20 @@ def test_get_recommendations_swr_serves_stale_then_refreshes():
                 _t.sleep(0.02)
             assert [i["symbol"] for i in nse._reco_cache["data"]["longs"]] == ["NEW"]
         nse._reco_running = False
+
+
+def test_get_recommendations_gated_outside_market_hours():
+    """Off-hours it recommends nothing (flagged marketClosed) and never sweeps —
+    the live signals ideas derive from are only meaningful while NSE is open."""
+    def _boom(*a, **k):
+        raise AssertionError("scanner must not run outside market hours")
+
+    with _reset_caches(), \
+         _patch(nse, "_is_market_open", lambda: False), \
+         _patch(nse, "get_scanner", _boom):
+        out = nse.get_recommendations()
+    assert out == {"longs": [], "shorts": [], "count": 0,
+                   "generatedAt": None, "marketClosed": True}
 
 
 # ---------------------------------------------------------------------------

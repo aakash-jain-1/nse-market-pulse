@@ -1305,6 +1305,14 @@ def _maybe_refresh_reco():
     threading.Thread(target=_run, name="reco-refresh", daemon=True).start()
 
 
+def _is_market_open():
+    """True during NSE cash hours (Mon-Fri 09:15-15:30 IST). Thin, patchable
+    indirection over snapshot_logger.is_market_hours, lazy-imported to dodge the
+    snapshot_logger<->nse_client import cycle at module load."""
+    from nse_pulse.core import snapshot_logger
+    return snapshot_logger.is_market_hours()
+
+
 def get_recommendations(fno_only=False, limit=None):
     """
     Ranked LONG / SHORT trade ideas derived from the live signal aggregate.
@@ -1319,7 +1327,15 @@ def get_recommendations(fno_only=False, limit=None):
 
     `limit` (per side) is applied only to the returned view; the journal always
     records the full qualifying set. Default None = return everything.
+
+    Gated to market hours: outside 09:15-15:30 IST (Mon-Fri) it recommends nothing
+    (an empty set flagged ``marketClosed``) and skips the scanner sweep — the live
+    signals these ideas are derived from are only meaningful while NSE is open, and
+    this also spares NSE the off-hours sweeps.
     """
+    if not _is_market_open():
+        return {"longs": [], "shorts": [], "count": 0,
+                "generatedAt": None, "marketClosed": True}
     _maybe_refresh_reco()
     d = _reco_cache["data"] or {"longs": [], "shorts": [], "generatedAt": None}
     longs, shorts = d["longs"], d["shorts"]
@@ -1333,6 +1349,7 @@ def get_recommendations(fno_only=False, limit=None):
         "shorts": shorts,
         "count": len(longs) + len(shorts),
         "generatedAt": d["generatedAt"],
+        "marketClosed": False,
     }
 
 

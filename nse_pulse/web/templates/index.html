@@ -2417,6 +2417,9 @@
     }
 
     function renderRecos(data) {
+      if (data.marketClosed) {
+        return `<div class="panel-lite"><div class="chart-note" style="margin:2px 0">🕒 Market closed — live trade ideas run only during market hours (Mon–Fri 09:15–15:30 IST). They resume at the next open.</div></div>`;
+      }
       const longs = data.longs || [], shorts = data.shorts || [];
       const colHtml = (items, kind, title) => {
         const inner = items.length
@@ -5318,6 +5321,12 @@
           body: JSON.stringify({ book: window._simBook || "cash" }),
         });
         const d = await r.json();
+        if (d.marketClosed) {
+          btn.textContent = "Market closed";
+          setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 1600);
+          load();
+          return;
+        }
         const total = Object.values(d.added || {}).reduce((a, b) => a + b, 0);
         btn.textContent = `+${total} taken`;
         setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 1400);

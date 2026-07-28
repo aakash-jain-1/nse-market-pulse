@@ -984,6 +984,15 @@ def api_sim_take():
     book = "fno" if (body.get("book") or "cash").lower() == "fno" else "cash"
     strat = body.get("strategy")
     ids = [strat] if strat else None
+    # Only take fresh trades while NSE is open: off-hours the ideas are derived from
+    # stale (last-close) data, so a manual Take then would enter meaningless
+    # positions. (Auto-take is already gated by the capture loop.) The summary/history
+    # views stay live so the tab still refreshes.
+    if not snaplog.is_market_hours():
+        out = sim.summary(strategy_id=strat, book=book)
+        out["added"] = {}
+        out["marketClosed"] = True
+        return jsonify(out)
     added = sim.take(strategy_ids=ids, book=book)
     out = sim.summary(strategy_id=strat, book=book)
     out["added"] = added
