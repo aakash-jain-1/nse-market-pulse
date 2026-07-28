@@ -1310,7 +1310,16 @@ def main():
             # only (no live NSE), so it's safe to warm anytime, off the request path.
             try:
                 from nse_pulse.eod import eod_conviction
-                eod_conviction.warm_board()
+                # Prime the EXACT SWR key the dashboard opens with (its default conviction
+                # filters — see convQuery() / the convBar inputs: >=3 signals, min price 30,
+                # min value 2cr, show 25, deals/options/rollover on) so the FIRST view is a
+                # real board, not a 'warming' placeholder. Warming any key also primes the
+                # shared pillar caches, so later filter combos still build in ~300ms.
+                eod_conviction.warm_board(
+                    limit=25, min_price=30.0, min_value_cr=2.0, min_pillars=3,
+                    fno_only=False, with_deals=True, with_options=True,
+                    with_rollover=True, adaptive=False,
+                )
             except Exception:
                 log.warning("conviction board pre-warm failed", exc_info=True)
 

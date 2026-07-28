@@ -652,6 +652,29 @@ def test_eod_conviction_arg_parsing():
         assert seen["adaptive"] is False
 
 
+def test_eod_conviction_default_query_matches_startup_prewarm():
+    """The dashboard opens the Conviction tab with these exact filters (convQuery()
+    defaults in index.html: >=3 signals, min price 30, min value 2cr, show 25, with
+    deals/options/rollover ON and fno/adaptive OFF). app.main()'s _warm_eod() must
+    pre-warm this EXACT board_cached() key, or the first open falls back to the slow
+    'warming' placeholder. Pin the contract so a default tweak on either side is caught."""
+    from nse_pulse.eod import eod_conviction
+    seen = {}
+
+    def fake(**kw):
+        seen.clear()
+        seen.update(kw)
+        return {"date": "2026-07-15", "longs": [], "shorts": [], "count": 0}
+
+    # Exactly what _warm_eod() passes to eod_conviction.warm_board(...).
+    prewarm = {"limit": 25, "min_price": 30.0, "min_value_cr": 2.0, "min_pillars": 3,
+               "fno_only": False, "with_deals": True, "with_options": True,
+               "with_rollover": True, "adaptive": False}
+    with _patch(eod_conviction, "board_cached", fake):
+        _json("/api/eod/conviction?minPillars=3&minPrice=30&minValueCr=2&limit=25")
+    assert seen == prewarm
+
+
 def test_eod_conviction_save_and_digest():
     from nse_pulse.eod import eod_conviction
     from nse_pulse.web import notify

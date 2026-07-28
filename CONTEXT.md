@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-tests/               Unit tests — 848 across 38 suites; import `from nse_pulse.<sub> import <mod>`
+tests/               Unit tests — 849 across 38 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -513,6 +513,22 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-07-28 — Fix: Conviction tab no longer sits on "Building…" for minutes (suite 848 → 849)
+- **Why:** the board endpoint is non-blocking (SWR) — a cold/expired filter key returns a "Building the conviction
+  board…" placeholder instantly and builds in the background. But three things made that placeholder linger:
+  (a) the dashboard's DEFAULT filters (`minPillars=3, minPrice=30`) never matched the startup pre-warm (`board()`
+  defaults `min_pillars=2, min_price=20`), so the very first open was ALWAYS a cold key; (b) the frontend rendered the
+  placeholder ONCE and never re-polled; (c) the only thing that re-fetched was the global auto-refresh, floored to
+  ≥5 min off-hours (or Off) — and Conviction is an off-hours tool. Net: a board actually ready in ~300ms–1s showed
+  "Building…" for up to 5 minutes (or until a manual reload), and every Apply / Adaptive / F&O toggle repeated it.
+- **What:** (1) the Conviction tab now POLLS every 1.5s while the response is `warming` (try budget resets whenever the
+  filter query changes; capped ~90s so a stuck/failing build can't re-kick the heavy work forever), so the real board
+  swaps in ~1–2s after it's computed — for the first load AND every filter combo. (2) `_warm_eod()` pre-warms the EXACT
+  default-UI key (`limit=25, min_price=30, min_value_cr=2, min_pillars=3`, deals/options/rollover on), so the first open
+  is usually already fresh; warming any key also primes the shared pillar caches, so other combos still build in ~300ms.
+- **Tests:** `+test_eod_conviction_default_query_matches_startup_prewarm` pins "route default-query key == startup
+  pre-warm key" so a default tweak on either side can't silently reintroduce the lag. **848 → 849**, all green.
 
 ### 2026-07-28 — Ideas + manual Sim Take gated to market hours (suite 846 → 848)
 - **Why:** the Ideas engine (`/api/recommendations`) and a manual Sim **Take** produced "recommendations" at any hour.

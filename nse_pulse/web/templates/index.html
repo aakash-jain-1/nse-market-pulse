@@ -4366,6 +4366,16 @@
     // fetches until the browser's ~6-connection limit is saturated and even
     // /api/health goes pending. We skip an auto-tick while one is in flight.
     let _loadInFlight = false;
+    // Conviction board builds in the background on a cold/expired SWR key (any new
+    // filter combo) — the endpoint returns a 'warming' placeholder immediately. Poll
+    // fast until the real board lands instead of waiting for the slow global refresh
+    // (floored to >=5 min off-hours, or Off). The try budget resets whenever the filter
+    // query changes, and caps a same-query rebuild so a stuck/failing build can't poll
+    // forever (each poll would otherwise re-kick the heavy background build).
+    const CONV_WARM_MS = 1500;
+    const CONV_WARM_MAX_TRIES = 60;   // ~90s ceiling (a cold first build can take ~30-40s)
+    let _convWarmTimer = null;
+    let _convWarmTries = 0;
     async function load() {
       _loadInFlight = true;
       try {
@@ -4452,7 +4462,10 @@
           return;
         }
         if (current === "conviction") {
-          const data = await fetch("/api/eod/conviction" + convQuery()).then(r => r.json());
+          clearTimeout(_convWarmTimer); _convWarmTimer = null;
+          const q = convQuery();
+          if (q !== window._convLastQuery) { window._convLastQuery = q; _convWarmTries = 0; }
+          const data = await fetch("/api/eod/conviction" + q).then(r => r.json());
           if (data.error) throw new Error(data.error);
           window._convBoard = data;
           window._lastRows = (data.longs || []).concat(data.shorts || []);
@@ -4465,6 +4478,12 @@
           document.getElementById("updated").textContent =
             "Updated " + new Date().toLocaleTimeString("en-IN");
           dot.style.background = "var(--green)";
+          if (data.warming && _convWarmTries < CONV_WARM_MAX_TRIES) {
+            _convWarmTries++;                         // still building — re-poll soon
+            _convWarmTimer = setTimeout(() => { if (current === "conviction") load(); }, CONV_WARM_MS);
+          } else if (!data.warming) {
+            _convWarmTries = 0;                       // real board in hand; reset for any later rebuild
+          }
           return;
         }
         if (current === "sectors") {
