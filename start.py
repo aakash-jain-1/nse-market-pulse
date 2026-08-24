@@ -12,15 +12,21 @@ Does the startup hygiene that a bare ``python app.py`` doesn't:
    is actually free again, ensure ``data/`` exists, and sanity-check core deps import.
 3. **Launch** — start ``app.py`` in the foreground so the banner + access log stream
    to your terminal (Ctrl+C stops it). ``--background`` detaches instead.
+4. **Supervise** (foreground) — keep the server up. Werkzeug's reloader only restarts
+   on its own "file changed" exit code, so an error raised while *importing* kills the
+   parent too and the server stays down — showing a traceback and then nothing. This
+   relaunches it: a crash before it finished starting waits for you to fix the file,
+   a crash after it had been serving backs off and retries.
 
 Usage:
-    python start.py                     # port 5055 (or $PORT), foreground
+    python start.py                     # port 5055 (or $PORT), foreground, supervised
     python start.py --port 5060
     PORT=5060 python start.py
     python start.py --dry-run           # show what it WOULD kill/preflight; don't touch anything
     python start.py --kill-only         # kill stale instances and exit (no launch)
     python start.py --no-kill           # skip the kill step
-    python start.py --background        # detach; print the child PID and exit
+    python start.py --no-supervise      # don't relaunch on a crash
+    python start.py --background        # detach; print the child PID and exit (unsupervised)
 
 Any extra args after ``--`` are forwarded to app.py's process environment untouched.
 """
@@ -159,6 +165,129 @@ def deps_ok(python):
 
 
 # ---------------------------------------------------------------------------
+# supervisor
+#
+# Werkzeug's reloader only survives crashes that happen *after* the app imports.
+# Its parent loop restarts the child solely on exit code 3 (its "file changed"
+# signal); any other non-zero exit is returned, so the parent exits too. An error
+# raised while importing — a typo, or a half-finished save, e.g. a module-level SQL
+# constant referenced by db.init() after being cut from one place but not yet pasted
+# in another — therefore takes the whole server down and it STAYS down. The terminal
+# shows a traceback and nothing more, which is easy to miss when detached.
+#
+# So: relaunch it. But blindly retrying an import error just spins, because nothing
+# has changed. The runtime before the crash tells the two cases apart — a startup
+# error dies almost instantly, whereas a crash after minutes of serving is a runtime
+# fault worth retrying — so a fast death waits for the source to be edited (exactly
+# what the reloader would have done had it survived) and a late one backs off.
+# ---------------------------------------------------------------------------
+_FAST_CRASH_SEC = 5.0     # died this fast => it never finished starting up
+_MAX_RETRIES = 5          # consecutive late crashes before giving up
+_POLL_SEC = 0.5
+
+# Files whose edit should trigger a relaunch: the app's own code, plus the template
+# (harmless to include — it's re-read per request, so a change there just costs a
+# no-op restart, whereas MISSING a .py would leave the server down).
+_WATCH_EXT = (".py", ".html")
+
+
+def source_snapshot(root, exts=_WATCH_EXT):
+    """{path: mtime} for the app's source, for change detection while it's down."""
+    snap = {}
+    for base, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs
+                   if d not in {".git", "__pycache__", "data", "logs", ".pytest_cache",
+                                "node_modules", ".venv", "venv"}]
+        for f in files:
+            if f.endswith(exts):
+                p = os.path.join(base, f)
+                try:
+                    snap[p] = os.stat(p).st_mtime
+                except OSError:
+                    pass
+    return snap
+
+
+def plan_restart(returncode, ran_secs, consecutive, max_retries=_MAX_RETRIES,
+                 fast_crash_sec=_FAST_CRASH_SEC):
+    """What to do after the server process exits (pure; unit-tested).
+
+    Returns ``(action, why)`` where action is ``stop`` | ``wait`` | ``retry``:
+      * ``stop``  — it exited cleanly (or we're out of retries); leave it alone.
+      * ``wait``  — it died before it could start serving, so the code is broken:
+                    wait for an edit rather than spinning on the same failure.
+      * ``retry`` — it served for a while then fell over; back off and relaunch.
+    """
+    if returncode == 0:
+        return "stop", "exited cleanly"
+    if ran_secs < fast_crash_sec:
+        return "wait", (f"crashed after {ran_secs:.1f}s (exit {returncode}) - it never "
+                        f"finished starting, so this is a code error")
+    if consecutive >= max_retries:
+        return "stop", (f"crashed {consecutive}x in a row (exit {returncode}); "
+                        f"giving up - fix the error and relaunch")
+    return "retry", f"crashed after {ran_secs:.0f}s (exit {returncode})"
+
+
+def wait_for_source_change(root, before, poll=_POLL_SEC, timeout=None):
+    """Block until any watched source file is added/removed/modified.
+
+    Returns the changed path, or None on timeout. Compares against a `before`
+    snapshot so an edit made *while the process was dying* is not missed.
+    """
+    waited = 0.0
+    while timeout is None or waited < timeout:
+        now = source_snapshot(root)
+        for p, m in now.items():
+            if before.get(p) != m:
+                return p
+        for p in before:
+            if p not in now:
+                return p
+        time.sleep(poll)
+        waited += poll
+    return None
+
+
+def supervise(cmd, cwd, env, root, max_retries=_MAX_RETRIES):
+    """Run the server, relaunching it if it dies. Returns the final exit code.
+
+    Ctrl+C stops for good (that's the user talking, not a fault).
+    """
+    consecutive = 0
+    while True:
+        before = source_snapshot(root)
+        started = time.time()
+        try:
+            rc = subprocess.run(cmd, cwd=cwd, env=env).returncode
+        except KeyboardInterrupt:
+            return 0
+        ran = time.time() - started
+        action, why = plan_restart(rc, ran, consecutive, max_retries=max_retries)
+        if action == "stop":
+            if rc:
+                log(f"server {why}")
+            return rc
+        log(f"server {why}")
+        if action == "wait":
+            log("waiting for a source edit to relaunch... (Ctrl+C to quit)")
+            try:
+                changed = wait_for_source_change(root, before)
+            except KeyboardInterrupt:
+                return rc
+            log(f"detected change in {os.path.relpath(changed, root)} - relaunching")
+            consecutive = 0          # a human intervened; the clock resets
+        else:
+            backoff = min(2 ** consecutive, 30)
+            consecutive += 1
+            log(f"relaunching in {backoff}s (attempt {consecutive}/{max_retries})")
+            try:
+                time.sleep(backoff)
+            except KeyboardInterrupt:
+                return rc
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 def main(argv=None):
@@ -173,6 +302,8 @@ def main(argv=None):
                     help="report what would be killed/preflighted; change nothing")
     ap.add_argument("--background", action="store_true",
                     help="detach the server (print child PID and exit)")
+    ap.add_argument("--no-supervise", action="store_true",
+                    help="don't relaunch the server if it crashes (foreground only)")
     args = ap.parse_args(argv)
 
     python = sys.executable or "python"
@@ -234,12 +365,15 @@ def main(argv=None):
                subprocess.Popen([python, app], cwd=ROOT, env=env,
                                 start_new_session=True)
         log(f"detached - child PID {proc.pid}. Stop it with: python start.py --kill-only --port {port}")
+        log("note: detached runs are NOT supervised - a bad save can leave it down")
         return 0
 
-    try:
-        return subprocess.run([python, app], cwd=ROOT, env=env).returncode
-    except KeyboardInterrupt:
-        return 0
+    if args.no_supervise:
+        try:
+            return subprocess.run([python, app], cwd=ROOT, env=env).returncode
+        except KeyboardInterrupt:
+            return 0
+    return supervise([python, app], ROOT, env, ROOT)
 
 
 if __name__ == "__main__":

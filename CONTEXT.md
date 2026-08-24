@@ -51,7 +51,7 @@ optional live broker feed, and off-screen alerts. Data from NSE India's public
 ## How to run
 
 ```bash
-python start.py          # RECOMMENDED: kill stale instances + preflight, then launch app.py
+python start.py          # RECOMMENDED: kill stale instances + preflight, then launch+supervise app.py
 python app.py            # dashboard at http://127.0.0.1:5055 (binds 0.0.0.0 for LAN)
 python nse_demand.py     # CLI scanner (gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # read-only SQLite peek (overview / <table> [N] / sql "...")
@@ -60,6 +60,11 @@ python -m pytest -q      # full unit-test suite
 
 - App **auto-reloads** on `.py` changes; re-reads `templates/index.html` per
   request (no restart for UI edits). Changing `HOST`/`PORT` needs a full restart.
+- **The reloader does NOT survive an import-time error** (it only self-restarts on
+  its own exit code 3), so a half-finished save takes the whole server down and it
+  stays down. Foreground `start.py` supervises the child and relaunches: a crash
+  within ~5s = a code error, so it waits for a `.py`/`.html` edit; a later crash is
+  retried with backoff. `--no-supervise` opts out; `--background` is unsupervised.
 - Env knobs: `FLASK_DEBUG=1` (debugger, OFF by default — RCE surface),
   `FLASK_RELOAD=0`, `HOST=127.0.0.1` (loopback), `PORT=xxxx`, `NSE_TOKEN=<secret>`
   (require token; open once with `?token=<secret>`). Health: `GET /api/health`.
@@ -78,7 +83,7 @@ python -m pytest -q      # full unit-test suite
 ## File map
 
 ```
-start.py             Clean-slate launcher: kill stale instances (port + app.py) + preflight, then app.py
+start.py             Clean-slate launcher: kill stale instances (port + app.py) + preflight, then supervise app.py
 app.py               Root shim → nse_pulse.web.app:main (python app.py unchanged)
 nse_demand.py        Root shim → nse_pulse.cli.nse_demand:main
 pyproject.toml       Packaging + pytest config (pythonpath=["."], testpaths=["tests"])
@@ -124,7 +129,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-  tests/               Unit tests — 911 across 39 suites; import `from nse_pulse.<sub> import <mod>`
+  tests/               Unit tests — 919 across 39 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -357,7 +362,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **911 tests** across 39 suites (grow it with every change;
+- `python -m pytest -q` — **919 tests** across 39 suites (grow it with every change;
   never shrink it).
 - **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
   committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
@@ -536,6 +541,46 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 🛟 `start.py` supervises the server: a bad save no longer leaves it dead (suite 911 → 919)
+
+- **The incident (real, this session):** mid-session the app went down and *stayed* down with only a traceback
+  in the terminal. Cause: a module-level constant in `db.py` was referenced by `db.init()` while a save was
+  half-applied, so the app raised **during import**.
+- **Why the reloader didn't save us — the actual mechanic, worth remembering:** Werkzeug's reloader is a
+  parent/child pair, and **the parent only relaunches the child on exit code 3**, its private "a file changed"
+  signal. Every other non-zero exit is simply *returned* by the parent, which then exits too. So the reloader
+  covers exceptions raised *while serving a request* but **not** exceptions raised while importing the app —
+  precisely the failure a typo or an interrupted save produces. Nothing in the output says "I have given up",
+  which is why it reads like a normal traceback you can ignore.
+- **Fix:** foreground `start.py` now wraps the child in `supervise()` (`start.py`).
+- **The one real design question — when NOT to retry.** Blind restarting is worse than useless for an import
+  error: nothing has changed, so it fails identically, forever, at whatever rate you retry. There's no exit
+  code that distinguishes the cases (both are `1`), so the signal used is **how long the process lived**:
+  - died in < `_FAST_CRASH_SEC` (**5s**) ⇒ it never finished starting ⇒ a **code** error ⇒ block on
+    `wait_for_source_change()` and relaunch the moment a `.py`/`.html` is saved. This is exactly what the
+    reloader would have done had it survived, so the felt behavior is "the reloader kept working".
+  - crashed after serving for a while ⇒ a **runtime** fault (a bad response, an exhausted socket) ⇒ retry with
+    **exponential backoff**, bounded by `_MAX_RETRIES` (5) so it can't spin forever.
+  - exit 0 or `Ctrl+C` ⇒ **stop**. That's the user talking, not a failure.
+- **Two subtleties that would otherwise bite:**
+  1. `source_snapshot()` is taken **before** the run, not after the crash — you are usually *already* mid-fix
+     when it dies, so an edit landing during the death throes must still count as a change (otherwise the
+     supervisor waits for a second, redundant save). Covered by a dedicated test.
+  2. The watch set is `.py` **+ `.html`** and skips `.git`/`__pycache__`/`data`/`logs`/venvs. Including the
+     template is deliberately asymmetric: it's re-read per request so a change there only costs a **no-op
+     restart**, whereas *missing* a `.py` would leave the server down — the exact failure being fixed.
+- **Shape:** `plan_restart()` is a **pure** function of `(returncode, ran_secs, consecutive)` → `stop|wait|retry`
+  + a human `why`, so all the policy is unit-testable without spawning or sleeping; `supervise()` is the thin
+  I/O loop around it. `--no-supervise` opts out. `--background` stays unsupervised (nothing is watching the
+  terminal there anyway) and now says so in its output.
+- **Verified end-to-end** with a real child process that NameErrors at import (in a temp dir, never touching
+  project files): supervisor read it as a code error at 1.3s, waited instead of spinning, relaunched on the
+  edit, child ran clean, supervisor exited 0. Live app re-verified afterwards (`/api/health` 200 in 16ms,
+  `leaked: 0`).
+- **Tests:** +8 in `tests/test_start.py` — `plan_restart` classification + its `why` text, `source_snapshot`
+  inclusion/exclusion, `wait_for_source_change` on edit/add/delete **and** the edit-during-death race, plus
+  three `supervise()` end-to-end cases (relaunch-after-edit, bounded give-up, `Ctrl+C`). Suite **911 → 919**.
 
 ### 2026-08-24 — 🗓 `closedDay` NULLs: derived at the write choke point + legacy backfill (suite 909 → 911)
 - **How it surfaced:** the phantom guard's date filter *had* to key on `closedAt` because so many rows had a NULL

@@ -38,7 +38,7 @@ intraday momentum and unusual activity. It pulls data from NSE India's public
 
 ```
 NSE/
-├── start.py           # Clean-slate launcher: kill stale instances (port + app.py) + preflight, then app.py
+├── start.py           # Clean-slate launcher: kill stale instances (port + app.py) + preflight, then app.py (supervised: relaunches if it crashes)
 ├── app.py             # Thin shim → nse_pulse.web.app:main (so `python app.py` still works)
 ├── nse_demand.py      # Thin shim → nse_pulse.cli.nse_demand:main (CLI scanner)
 ├── pyproject.toml     # Packaging + pytest config (pythonpath=["."], testpaths=["tests"])
@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 911 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 919 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -138,11 +138,11 @@ NSE/
 ## How to run
 
 ```bash
-python start.py          # RECOMMENDED: kill stale instances + preflight, then launch app.py (--dry-run/--kill-only/--no-kill/--background/--port)
+python start.py          # RECOMMENDED: kill stale instances + preflight, then launch+SUPERVISE app.py (--dry-run/--kill-only/--no-kill/--no-supervise/--background/--port)
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 911 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 919 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -650,6 +650,21 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **🛟 `start.py` now supervises the server (a bad save no longer leaves it dead)** — hit this for real mid-session:
+ **Werkzeug's reloader only restarts on its own exit code 3** ("file changed"); any other non-zero exit is returned
+ by the parent, so an error raised while *importing* kills the reloader too. The terminal shows a traceback and then
+ nothing, and (detached especially) it's easy to assume it recovered — it doesn't. Foreground `start.py` now wraps the
+ child in `supervise()`. The interesting part is **not** retrying blindly: an import error would fail identically
+ forever, so `plan_restart()` (pure) uses the **runtime before the crash** to tell the cases apart — died in
+ <`_FAST_CRASH_SEC` (5s) ⇒ it never finished starting, so **wait for a source edit** and relaunch then (what the
+ reloader would have done had it lived); crashed after serving a while ⇒ **exponential backoff retry**, capped at
+ `_MAX_RETRIES`; exit 0 / Ctrl+C ⇒ stop, since that's the user talking. `source_snapshot()` watches `.py` + `.html`
+ (skipping `.git`/`__pycache__`/`data`/`logs`/venvs) and the snapshot is taken **before** the run so an edit made
+ while the process was dying still counts — the likely race, since you're usually already fixing it. Opt out with
+ `--no-supervise`; `--background` stays unsupervised and now says so. Verified end-to-end with a real child process
+ that NameErrors at import: classified as a code error, waited, relaunched on the edit, exited clean. Suite
+ **911 → 919**.
 
 - **🗓 `closedDay` can no longer go NULL (write-path derivation + one-time backfill)** — found while building the guard
  below: its date filter had to key on `closedAt` because **2,131 of 15,711 closed trades (13.6%) had a NULL

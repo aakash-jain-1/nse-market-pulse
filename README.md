@@ -722,6 +722,15 @@ python start.py     # recommended: clears stale instances + preflights, then lau
 
 Then open **http://127.0.0.1:5055**.
 
+`start.py` also **supervises** the server. Flask's auto-reloader recovers from a
+crash *after* startup, but an error raised while importing (a typo, a half-finished
+save) kills the reloader itself — leaving a traceback and a dead app that's easy to
+mistake for a working one. The supervisor relaunches instead: if the process died
+within ~5s it never finished starting, so it waits for you to edit a `.py`/`.html`
+file and then restarts; a crash after it had been serving is retried with backoff.
+`Ctrl+C` always stops it. Use `--no-supervise` to opt out (`--background` is
+unsupervised).
+
 ### 📱 Open it on your phone (same Wi-Fi)
 
 The server binds all interfaces by default, so on startup it prints a **Network**
@@ -843,7 +852,7 @@ python nse_demand.py losers     # top losers
 
 ```
 nse-market-pulse/
-├── start.py                # Clean-slate launcher: kills stale instances + preflight, then app.py
+├── start.py                # Clean-slate launcher: kills stale instances + preflight, then supervises app.py
 ├── app.py                  # Thin shim → nse_pulse.web.app:main (python app.py still works)
 ├── nse_demand.py           # Thin shim → nse_pulse.cli.nse_demand:main
 ├── pyproject.toml          # Packaging + pytest config (pythonpath=["."], testpaths=["tests"])
