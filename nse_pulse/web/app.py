@@ -998,7 +998,9 @@ def api_sim_portfolio():
     """Portfolio-level backtest: replay the daily-backtest trades through a REAL book
     (finite capital, a cap on concurrent positions, risk/equal sizing) to get an
     equity curve + CAGR / max-drawdown / Sharpe — not just per-trade R. `source=eod`
-    runs the whole ingested bhavcopy universe (off-hours)."""
+    runs the whole ingested bhavcopy universe (off-hours). Real transaction costs are
+    charged by default (this is the only engine reporting absolute returns);
+    `costs=0` gives the gross book for comparison."""
     from nse_pulse.backtest import portfolio_backtest as pbk
     from nse_pulse.backtest import backtest_daily as btd
     source = "eod" if request.args.get("source") == "eod" else "live"
@@ -1024,7 +1026,22 @@ def api_sim_portfolio():
         per_strategy=request.args.get("perStrategy") != "0",
         min_price=fnum("minPrice", btd.EOD_MIN_PRICE) if source == "eod" else None,
         min_value_cr=fnum("minValueCr", btd.EOD_MIN_VALUE_CR) if source == "eod" else None,
+        costs=_pf_costs(),
     ))
+
+
+def _pf_costs():
+    """`costs` for the portfolio backtest: on by default, `costs=0` for a gross run,
+    and `slippage=<pct>` to try a different market-impact assumption."""
+    if request.args.get("costs") == "0":
+        return False
+    slip = request.args.get("slippage")
+    if slip not in (None, ""):
+        try:
+            return {"slippagePctPerSide": max(0.0, min(2.0, float(slip)))}
+        except ValueError:
+            pass
+    return True
 
 
 @app.route("/api/sim/take", methods=["POST"])

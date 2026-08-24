@@ -586,8 +586,22 @@ flowchart LR
   change flips the same-slots EOD book from **−2.5% to +2.2%** (Sharpe −0.98 → +0.76) —
   *which* signals you take matters more than the raw per-signal edge. Open positions are
   **marked to market** on daily closes, so the drawdown is the real intra-trade heat (not
-  the flattered cost-basis figure). *(Shorts model margin as full notional; same daily-bar
-  fidelity caveats as the daily backtest.)*
+  the flattered cost-basis figure).
+  It is also the **only** backtest here that charges **real transaction costs** — and it
+  has to be, because it's the only one quoting absolute returns. Every fill is slipped
+  against you and pays the actual NSE delivery stack (brokerage, STT on both legs,
+  exchange + SEBI fees, stamp duty, GST, depository fee), which runs about **0.35% of a
+  position, round trip**. That is not a rounding error on a strategy that turns capital
+  over every few days: on 90 sessions of the EOD universe the same book goes from
+  **+7.6% gross to +1.1% net** (CAGR 34.6% → 4.7%, Sharpe 2.15 → 0.39, ₹718 a trade).
+  It also changes *which strategy wins*, because costs scale with how often each one
+  trades — the volatility-squeeze rule drops from marginally positive to **last** once it
+  pays for its own churn. The **Costs** selector switches between the real schedule, a
+  wider-slippage stress case, and a gross run, and net is always shown beside gross so
+  the friction is visible rather than assumed. Per-trade **R** everywhere else in the app
+  stays *gross* on purpose, so those leaderboards remain comparable to their own history.
+  *(Shorts model margin as full notional; a bar that gaps past your stop still exits at
+  the stop; same daily-bar fidelity caveats as the daily backtest.)*
 - **Per-trade replay** (▶ on any sim trade): the trade's minute candles with
   entry/target/stop/exit overlaid, plus MFE/MAE and time-to-exit.
 - **🗄 EOD data resilience & full-market coverage** (`bhavcopy.py`, `/api/eod/*`,
@@ -856,7 +870,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/sim/walkforward[?days=120&universe=60&folds=4&maxHold=5]` | Walk-forward out-of-sample validation: per-strategy in-sample vs OOS expectancy + overfit verdict, plus the regime-adaptive-selection test (does it beat a fixed strategy OOS?) |
 | `GET /api/sim/backtest[?entryMode=&maxSessions=&days=&resolve=intrabar\|ltp]` | Offline strategy backtest (intrabar OHLCV exits) |
 | `GET /api/sim/backtest_daily[?days=&universe=&maxHold=&refresh=1&resolve=daily\|intrabar&source=live\|eod&minPrice=&minValueCr=]` | Daily-bar historical backtest, 9 strategies; `source=live` (curated NSE, SQLite-cached, `refresh=1` re-pulls, `resolve=intrabar` re-resolves on 1-min candles) or `source=eod` (whole bhavcopy universe from SQLite, off-hours, thousands of trades) |
-| `GET /api/sim/portfolio[?capital=&maxPositions=&sizing=risk\|equal&riskPct=&maxAllocPct=&days=&universe=&source=live\|eod&minPrice=&minValueCr=]` | Portfolio-level backtest: replays the daily-backtest trades through a real book (finite capital, concurrent-position cap, risk/equal sizing) → equity curve + CAGR / max-drawdown / Sharpe / profit-factor, overall + per strategy |
+| `GET /api/sim/portfolio[?capital=&maxPositions=&sizing=risk\|equal&riskPct=&maxAllocPct=&days=&universe=&source=live\|eod&minPrice=&minValueCr=&costs=0&slippage=]` | Portfolio-level backtest: replays the daily-backtest trades through a real book (finite capital, concurrent-position cap, risk/equal sizing) → equity curve + CAGR / max-drawdown / Sharpe / profit-factor, overall + per strategy. Charges real transaction costs by default (`costs=0` for the gross book, `slippage=<pct>` to vary market impact) |
 | `POST /api/sim/take · /auto · /mode · /reset` | Sim controls (`take`/`reset` accept `{book}` — reset a specific book, or omit to wipe everything) |
 | `GET /api/paper/portfolio` · `POST /api/paper/order · /option_order · /futures_order · /reset` | Paper trading |
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
@@ -912,7 +926,7 @@ nse-market-pulse/
 │   │   ├── backtest_daily.py       # Daily-bar historical backtest — source live (curated) or eod (universe)
 │   │   ├── backtest_strategies.py  # Offline backtester (replays archived context, OHLCV exits)
 │   │   ├── walkforward.py          # Walk-forward out-of-sample / overfit validation
-│   │   └── portfolio_backtest.py   # Portfolio-level backtest → equity curve + CAGR/DD/Sharpe
+│   │   └── portfolio_backtest.py   # Portfolio-level backtest (real costs) → equity curve + CAGR/DD/Sharpe
 │   ├── web/
 │   │   ├── app.py              # Flask server + JSON API (thin routes) + main() — port 5055
 │   │   ├── observability.py    # Terminal access log (entry→exit/timing) + opt-in OpenTelemetry (OTLP)
@@ -922,7 +936,7 @@ nse-market-pulse/
 │   └── cli/
 │       ├── nse_demand.py       # Standalone CLI scanner
 │       └── db_inspect.py       # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── tests/                  # 937 unit tests, 40 suites (import from nse_pulse.<sub>)
+├── tests/                  # 951 unit tests, 40 suites (import from nse_pulse.<sub>)
 ├── docs/                   # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/                   # (gitignored) market.db + any legacy CSVs
 ├── *.example.json          # Config templates (angel/dhan/notify) → copy to gitignored real files

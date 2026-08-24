@@ -600,6 +600,13 @@
         <label title="Risk per trade as a % of current equity (only used for Risk % sizing)">Risk %
           <input type="number" id="pfRisk" min="0.1" max="10" step="0.25" value="1" style="width:56px">
         </label>
+        <label title="Transaction costs. Real = brokerage + STT + exchange/SEBI fees + stamp duty + GST + depository fee, plus 0.05% market impact on every fill (an NSE delivery round trip runs ~0.35% of the position). Gross shows the same book with no costs, so you can see exactly what the friction eats. Only this backtest charges costs — the per-trade R leaderboards stay gross so they remain comparable.">Costs
+          <select id="pfCosts">
+            <option value="on" selected>Real (delivery)</option>
+            <option value="0.15">Real + wide slip</option>
+            <option value="off">None (gross)</option>
+          </select>
+        </label>
         <button id="simPortfolio" style="padding:6px 12px" title="Replay the daily-backtest trades through a REAL book: finite capital, a cap on concurrent positions, and position sizing off current equity. Turns 'this signal has +0.3R' into an actual equity curve with CAGR, max drawdown and Sharpe — and shows which strategy compounds capital, not just which has the best per-trade R.">📈 Portfolio backtest</button>
         <button id="eodRefresh" style="padding:6px 12px" title="Download NSE's End-of-Day bhavcopy (whole cash market + full F&O universe) from the static archive and load it into the local history cache. Broadens the daily-backtest universe to every listed name and gives ANY symbol a resilient EOD price — works off-hours and even when NSE's live API is down.">⬇ Load EOD (whole market)</button>
         <span id="eodStatus" style="color:var(--muted);font-size:11px"></span>
@@ -3468,6 +3475,7 @@
         <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.04em">${k}</div>
         <div class="${c || ''}" style="font-size:15px;font-weight:700;margin-top:2px">${v}</div></div>`;
       const pf2 = o.profitFactor == null ? (o.winRate === 100 ? "∞" : "—") : o.profitFactor;
+      const cst = o.costs || {};
       const metrics = [
         stat("End capital", pfMoney(o.endCapital), cls(o.totalReturnPct)),
         stat("Total return", pc(o.totalReturnPct), cls(o.totalReturnPct)),
@@ -3481,10 +3489,12 @@
         stat("Max concurrent", `${o.maxConcurrent}/${p.maxPositions}`),
         stat("Avg exposure", o.avgExposurePct == null ? "—" : o.avgExposurePct + "%"),
         stat("Avg hold", o.avgHoldDays == null ? "—" : o.avgHoldDays + "d"),
+        stat("Costs", cst.enabled ? pfMoney(cst.total) : "off", cst.total > 0 ? "neg" : ""),
       ].join("");
       const psRows = (pf.perStrategy || []).map(r => `<tr>
         <td class="sym">${r.name || r.id}</td>
         <td class="${cls(r.totalReturnPct)}">${pc(r.totalReturnPct)}</td>
+        <td style="color:var(--muted)">${r.grossTotalReturnPct == null ? "—" : pc(r.grossTotalReturnPct)}</td>
         <td class="${cls(r.cagrPct)}">${r.cagrPct == null ? "—" : r.cagrPct + "%"}</td>
         <td class="neg">${r.maxDrawdownPct == null ? "—" : "-" + r.maxDrawdownPct + "%"}</td>
         <td>${r.sharpe == null ? "—" : r.sharpe}</td>
@@ -3492,8 +3502,19 @@
         <td>${fmtNum(r.tradesTaken)}</td>
         <td>${pfMoney(r.endCapital)}</td></tr>`).join("");
       const psTable = psRows ? `<div style="overflow-x:auto;margin-top:8px"><table class="tbl" style="min-width:560px">
-        <thead><tr><th>Strategy</th><th title="Total return over the window on this strategy alone">Return</th><th>CAGR</th><th title="Max peak-to-trough equity drop">Max DD</th><th>Sharpe</th><th>Win%</th><th title="Trades actually taken by the book">Taken</th><th>End cap</th></tr></thead>
+        <thead><tr><th>Strategy</th><th title="Total return over the window on this strategy alone, AFTER transaction costs">Return</th><th title="The same return before costs. The gap is that strategy's own friction — a high-turnover rule gives up far more than a patient one, so costs can genuinely re-order this table.">Gross</th><th>CAGR</th><th title="Max peak-to-trough equity drop">Max DD</th><th>Sharpe</th><th>Win%</th><th title="Trades actually taken by the book">Taken</th><th>End cap</th></tr></thead>
         <tbody>${psRows}</tbody></table></div>` : "";
+      // Where the friction went, biggest line item first. On a delivery round trip STT
+      // and market impact dominate; brokerage is almost a rounding error.
+      const COST_LBL = {stt: "STT", slippage: "market impact", brokerage: "brokerage",
+                        stamp: "stamp duty", gst: "GST", exchange: "exchange fees",
+                        dp: "depository", sebi: "SEBI fees"};
+      const bdLine = Object.entries(cst.breakdown || {}).filter(([, v]) => v > 0)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${COST_LBL[k] || k} ${pfMoney(v)}`).join(" · ");
+      const costLine = !cst.enabled
+        ? `<div class="chart-note" style="margin-top:6px">💸 Costs are <b>off</b> — this is the gross book. Set <b>Costs</b> to “Real (delivery)” to see what brokerage, STT and market impact actually leave you.</div>`
+        : (cst.total > 0 ? `<div class="chart-note" style="margin-top:6px">💸 <b>Transaction costs took ${pfMoney(cst.total)}</b> — ${cst.pctOfStart}% of starting capital, ${pfMoney(cst.perTrade)} per trade, ${cst.pctOfTurnover == null ? "—" : cst.pctOfTurnover + "%"} of the ${pfMoney(cst.turnover)} transacted. Gross <b class="${cls(cst.grossTotalReturnPct)}">${pc(cst.grossTotalReturnPct)}</b> → net <b class="${cls(o.totalReturnPct)}">${pc(o.totalReturnPct)}</b>.${bdLine ? ` Where it went: ${bdLine}.` : ""}</div>` : "");
       const w = pf.window || {};
       const uni = eod ? `${fmtNum(w.universeWithData)} names` : `top ${w.universeWithData || "?"}`;
       const sizing = p.sizing === "equal" ? "equal-weight" : `${p.riskPct}% risk/trade`;
@@ -3504,8 +3525,9 @@
         </div>
         ${pfEquitySvg(o.equityCurve, o.startCapital)}
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${metrics}</div>
+        ${costLine}
         ${psTable}
-        <div class="chart-note" style="margin-top:8px">Realistic book: capital is finite and tied up while a position is open, and only ${p.maxPositions} can be held at once — when more signals fire, the highest-<b>conviction</b> ones win the slots and the rest are <b>skipped</b> (that's the ${fmtNum(o.tradesSkippedSlot)} slot + ${fmtNum(o.tradesSkippedCapital)} capital skips above). Open positions are <b>marked to market</b> on daily closes, so the drawdown is the real intra-trade heat. Same daily-bar caveats as the daily backtest; shorts model margin as full notional. Educational — not advice.</div>
+        <div class="chart-note" style="margin-top:8px">Realistic book: capital is finite and tied up while a position is open, and only ${p.maxPositions} can be held at once — when more signals fire, the highest-<b>conviction</b> ones win the slots and the rest are <b>skipped</b> (that's the ${fmtNum(o.tradesSkippedSlot)} slot + ${fmtNum(o.tradesSkippedCapital)} capital skips above). Open positions are <b>marked to market</b> on daily closes, so the drawdown is the real intra-trade heat. This is the <b>only</b> backtest that charges transaction costs — the per-trade R leaderboards stay gross so they remain comparable across the app. Still not modelled: a bar that <b>gaps past</b> your stop still exits at the stop, so bad days are flattered. Same daily-bar caveats as the daily backtest; shorts model margin as full notional. Educational — not advice.</div>
       </div>`;
     }
 
@@ -5727,8 +5749,10 @@
       const maxPos = document.getElementById("pfMaxPos").value || "5";
       const sizing = document.getElementById("pfSizing").value || "risk";
       const risk = document.getElementById("pfRisk").value || "1";
+      const costs = (document.getElementById("pfCosts") || {}).value || "on";
       btn.disabled = true; btn.textContent = "⏳ Simulating the book…";
-      const q = `capital=${cap}&maxPositions=${maxPos}&sizing=${sizing}&riskPct=${risk}`;
+      const costQ = costs === "off" ? "&costs=0" : (costs === "on" ? "" : `&slippage=${costs}`);
+      const q = `capital=${cap}&maxPositions=${maxPos}&sizing=${sizing}&riskPct=${risk}${costQ}`;
       const url = source === "eod"
         ? `/api/sim/portfolio?days=90&source=eod&${q}`
         : `/api/sim/portfolio?days=90&universe=${uni}&${q}`;

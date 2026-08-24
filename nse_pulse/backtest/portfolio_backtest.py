@@ -29,6 +29,11 @@ DESIGN
   is conservative). Closing returns `reserve + pnl`. Equity is marked at COST while a
   position is open (it steps on closes), so the curve is exact at every close; intraday
   marking-to-market would need per-day prices and is a future refinement.
+- **Transaction costs** (see `COSTS`): because this is the one engine reporting
+  *absolute* returns, fills are slipped against you and every leg pays real Indian
+  cash-segment charges. The result carries both the net numbers and the gross ones,
+  so the drag is visible rather than assumed away. Nothing outside this module is
+  affected — per-trade R stays gross on purpose.
 - Same-day signal contention: when more signals fire than free slots/capital, they're
   taken in a deterministic order (by `rank_key` desc if the trades carry one, else a
   stable strategy/symbol order) — never by outcome, so there's no look-ahead bias.
@@ -138,34 +143,170 @@ def _size(sizing, equity, cash, entry, stop, max_positions, max_alloc_pct, risk_
 
 
 # ---------------------------------------------------------------------------
+# transaction costs (pure)
+# ---------------------------------------------------------------------------
+# Indian equity CASH-segment charges on a DELIVERY (CNC) round trip, as levied in
+# 2026, for a discount broker of the kind this project already assumes elsewhere
+# (Angel/Dhan: flat Rs 20 an order). Percentages are of that fill's turnover.
+#
+# WHY THIS LIVES HERE AND NOWHERE ELSE: `docs/AUDIT2.md` N3 declined a cost model
+# because the drag "hits all strategies alike, so the relative ranking stays valid"
+# — true, and still true, for the per-trade **R** leaderboards in `backtest_daily`.
+# But this module reports **absolute** CAGR / equity / max-DD, where that argument
+# does not hold: a rule turning capital over every few days can look profitable
+# gross and lose money net. So costs are charged inside `simulate()` only, leaving
+# every R number in the app untouched and comparable to its own history.
+COSTS = {
+    "brokerageFlatPerOrder": 20.0,   # Rs per executed order
+    "brokeragePctPerSide": 0.0,      # ... or a % of turnover; when both are set the
+                                     #     lower one wins (how discount plans read)
+    "sttBuyPct": 0.10,               # securities transaction tax — delivery pays both sides
+    "sttSellPct": 0.10,
+    "exchangePctPerSide": 0.00297,   # NSE transaction charge
+    "sebiPctPerSide": 0.0001,        # SEBI turnover fee (Rs 10 per crore)
+    "stampBuyPct": 0.015,            # stamp duty — buy side only
+    "gstPct": 18.0,                  # on brokerage + exchange + SEBI (not on STT/stamp)
+    "dpFeePerSell": 15.93,           # depository fee per scrip on a delivery sell (13.5 + GST)
+    "slippagePctPerSide": 0.05,      # market impact: fills are worse than the printed price
+}
+
+_COST_KEYS = ("brokerage", "stt", "exchange", "sebi", "stamp", "gst", "dp", "slippage")
+
+
+def cost_schedule(costs=True):
+    """Normalize the `costs` argument into a full schedule.
+
+    `True` → the default schedule; `False`/`None` → every rate zeroed (a gross,
+    pre-cost run); a dict → the default with those keys overridden. Zeroing rather
+    than branching means the cost-free path runs the exact same arithmetic, so
+    "costs off" can't drift away from "costs on" as this code changes.
+    """
+    if costs is True:
+        return dict(COSTS)
+    if not costs:
+        return {k: 0.0 for k in COSTS}
+    return {**COSTS, **{k: float(v) for k, v in costs.items() if k in COSTS}}
+
+
+def _brokerage(notional, cs):
+    pct = cs["brokeragePctPerSide"] / 100.0 * notional
+    flat = cs["brokerageFlatPerOrder"]
+    return min(flat, pct) if (flat > 0 and pct > 0) else (flat or pct)
+
+
+def charges(notional, side, cs):
+    """Statutory + broker charges on ONE fill, broken down by component.
+
+    `side` is the real market side ("buy"/"sell"), not open/close — a short's
+    OPENING fill is a sell, so it pays sell-side STT and the depository fee, and
+    its closing buy pays the stamp duty. Callers sum the values; keeping the
+    components apart is what lets the report say where the money actually went.
+    """
+    if notional <= 0:
+        return {}
+    buy = side == "buy"
+    brk = _brokerage(notional, cs)
+    exch = cs["exchangePctPerSide"] / 100.0 * notional
+    sebi = cs["sebiPctPerSide"] / 100.0 * notional
+    return {
+        "brokerage": brk,
+        "stt": (cs["sttBuyPct"] if buy else cs["sttSellPct"]) / 100.0 * notional,
+        "exchange": exch,
+        "sebi": sebi,
+        "stamp": (cs["stampBuyPct"] / 100.0 * notional) if buy else 0.0,
+        "gst": cs["gstPct"] / 100.0 * (brk + exch + sebi),
+        "dp": 0.0 if buy else cs["dpFeePerSell"],
+    }
+
+
+def slipped(price, side, cs):
+    """The realistic fill for a printed price: you buy a shade higher and sell a
+    shade lower. Charged on BOTH legs, so a round trip pays it twice."""
+    s = cs["slippagePctPerSide"] / 100.0
+    return price * (1 + s) if side == "buy" else price * (1 - s)
+
+
+def _sides(direction):
+    """(opening side, closing side) in real market terms."""
+    return ("sell", "buy") if direction == "SHORT" else ("buy", "sell")
+
+
+def _accrue(agg, ch):
+    for k, v in ch.items():
+        agg[k] = agg.get(k, 0.0) + v
+
+
+def _entry_cost(qty, fill_entry, side, cs):
+    """(capital reserved, charge breakdown) for an opening fill of `qty` shares."""
+    reserve = qty * fill_entry
+    return reserve, charges(reserve, side, cs)
+
+
+def _cost_report(agg, gross_pnl, taken, start_capital, end_capital, cs, enabled,
+                 turnover=0.0):
+    """What the costs did, in the terms a trader would ask.
+
+    Slippage never shows up as a fee — it's baked into the fills — so it's recovered
+    as the gap between what the same picks made at printed prices and what they made
+    at realistic ones. That makes `total` exactly `gross - net`, which the tests pin.
+    """
+    gross_end = start_capital + gross_pnl
+    slip = gross_end - end_capital - sum(agg.values())
+    breakdown = {k: round(agg.get(k, 0.0), 2) for k in _COST_KEYS if k != "slippage"}
+    breakdown["slippage"] = round(slip, 2)
+    total = gross_end - end_capital
+    return {
+        "enabled": bool(enabled),
+        "total": round(total, 2),
+        "pctOfStart": round(total / start_capital * 100, 2) if start_capital > 0 else 0.0,
+        "perTrade": round(total / taken, 2) if taken else 0.0,
+        "breakdown": breakdown,
+        "turnover": round(turnover, 2),
+        "pctOfTurnover": round(total / turnover * 100, 3) if turnover > 0 else None,
+        "grossEndCapital": round(gross_end, 2),
+        "grossTotalReturnPct": round((gross_end / start_capital - 1) * 100, 2)
+        if start_capital > 0 else 0.0,
+        "schedule": dict(cs) if enabled else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # the simulator (pure)
 # ---------------------------------------------------------------------------
 def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
              sizing="risk", max_alloc_pct=25.0, rank_key=None, periods_per_year=252,
-             closes=None):
+             closes=None, costs=True):
     """Replay `trades` through a book with finite capital + a concurrent-position cap.
 
     `closes` (optional `{symbol: {date_iso: close}}`) marks open positions **to market**
     each day for a true intra-trade equity curve / drawdown; without it, positions are
     held at cost (equity steps on exits).
 
+    `costs` charges realistic Indian-equity transaction costs (see `COSTS`): fills are
+    slipped against you and every leg pays brokerage/STT/exchange/SEBI/stamp/GST/DP.
+    `True` = the default schedule, `False` = a gross run, a dict = overrides. This is
+    the ONLY engine that charges costs — per-trade R elsewhere stays gross by design.
+
     Returns {startCapital, endCapital, totalReturnPct, cagrPct, maxDrawdownPct,
     sharpe, winRate, profitFactor, avgWinPct, avgLossPct, tradesTaken,
     tradesSkippedSlot, tradesSkippedCapital, tradesUsable, tradesTotal, avgHoldDays,
     maxConcurrent, avgExposurePct, start, end, days, equityCurve[], closedTrades,
-    params, note}.
+    costs{}, params, note}.
     """
     start_capital = float(start_capital) if start_capital and start_capital > 0 else 1_000_000.0
     max_positions = int(_clip(int(max_positions or 1), 1, 50))
     risk_pct = float(_clip(risk_pct or 1.0, 0.05, 20.0))
     max_alloc_pct = float(_clip(max_alloc_pct or 25.0, 1.0, 100.0))
     sizing = "equal" if str(sizing).lower() == "equal" else "risk"
+    cs = cost_schedule(costs)
+    costs_on = any(v for v in cs.values())
 
     total = len(trades)
     usable = [t for t in trades if _usable(t)]
 
     params = {"startCapital": start_capital, "maxPositions": max_positions,
-              "riskPct": risk_pct, "sizing": sizing, "maxAllocPct": max_alloc_pct}
+              "riskPct": risk_pct, "sizing": sizing, "maxAllocPct": max_alloc_pct,
+              "costs": costs_on}
     if not usable:
         return {"startCapital": start_capital, "endCapital": start_capital,
                 "totalReturnPct": 0.0, "cagrPct": 0.0, "maxDrawdownPct": 0.0,
@@ -175,6 +316,8 @@ def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
                 "tradesUsable": 0, "tradesTotal": total, "avgHoldDays": None,
                 "maxConcurrent": 0, "avgExposurePct": 0.0, "start": None,
                 "end": None, "days": 0, "equityCurve": [], "closedTrades": 0,
+                "costs": _cost_report({}, 0.0, 0, start_capital, start_capital,
+                                      cs, costs_on),
                 "params": params,
                 "note": "No closeable trades to simulate — run a daily backtest first "
                         "(or widen the window / lower the liquidity filters)."}
@@ -208,14 +351,23 @@ def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
     equities = [start_capital]    # for drawdown/sharpe (day 0 = start)
     exposures = []                # deployed / equity each day
     max_concurrent = 0
+    cost_agg = {}                 # charge component -> rupees, over every leg
+    turnover = 0.0                # rupees transacted (both legs) — the churn costs ride on
+    gross_pnl = 0.0               # P&L the same picks would have made at printed prices
 
     for day in dates:
-        # 1) close everything exiting today (frees capital before we re-deploy)
+        # 1) close everything exiting today (frees capital before we re-deploy).
+        # The exit leg pays its own charges out of the proceeds.
         still = []
         for p in open_pos:
             if p["close_d"] == day:
                 pnl = _pnl(p["direction"], p["entry"], p["exit_px"], p["qty"])
-                cash += p["reserve"] + pnl
+                ch = charges(p["qty"] * p["exit_px"], p["close_side"], cs)
+                fees = sum(ch.values())
+                cash += p["reserve"] + pnl - fees
+                _accrue(cost_agg, ch)
+                turnover += p["qty"] * p["exit_px"]
+                gross_pnl += _pnl(p["direction"], p["rawEntry"], p["rawExit"], p["qty"])
                 closed.append({**p, "pnl": pnl,
                                "movePct": _move_pct(p["direction"], p["entry"], p["exit_px"])})
             else:
@@ -230,14 +382,29 @@ def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
             if len(open_pos) >= max_positions:
                 skip_slot += 1
                 continue
-            qty = _size(sizing, equity_now, cash, t["entry"], t["stop"],
+            open_side, close_side = _sides(t["direction"])
+            # Size off the price we'd actually get filled at, not the printed one.
+            fill_entry = slipped(t["entry"], open_side, cs)
+            qty = _size(sizing, equity_now, cash, fill_entry, t["stop"],
                         max_positions, max_alloc_pct, risk_pct)
-            if qty <= 0:
+            # The entry leg's charges come out of the same cash as the reserve, so a
+            # position that only just fit gross may not fit net — shrink it to what
+            # cash covers, then skip if even that doesn't clear.
+            reserve, entry_ch = _entry_cost(qty, fill_entry, open_side, cs)
+            if reserve + sum(entry_ch.values()) > cash:
+                qty = int(qty * cash / (reserve + sum(entry_ch.values())))
+                reserve, entry_ch = _entry_cost(qty, fill_entry, open_side, cs)
+            fees = sum(entry_ch.values())
+            if qty <= 0 or reserve + fees > cash:
                 skip_cap += 1
                 continue
-            reserve = qty * t["entry"]
-            cash -= reserve
-            open_pos.append({"qty": qty, "entry": t["entry"], "exit_px": t["exitPrice"],
+            cash -= reserve + fees
+            _accrue(cost_agg, entry_ch)
+            turnover += reserve
+            open_pos.append({"qty": qty, "entry": fill_entry,
+                             "exit_px": slipped(t["exitPrice"], close_side, cs),
+                             "rawEntry": t["entry"], "rawExit": t["exitPrice"],
+                             "close_side": close_side,
                              "close_d": _d(t["closedDate"]), "direction": t["direction"],
                              "reserve": reserve, "symbol": t.get("symbol"),
                              "strategy": t.get("strategy"), "open_d": day,
@@ -295,6 +462,8 @@ def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
         "days": span_days,
         "equityCurve": curve,
         "closedTrades": len(closed),
+        "costs": _cost_report(cost_agg, gross_pnl, taken, start_capital, end_capital,
+                              cs, costs_on, turnover=turnover),
         "params": params,
         "note": None,
     }
@@ -305,10 +474,13 @@ def simulate(trades, start_capital=1_000_000.0, max_positions=5, risk_pct=1.0,
 # ---------------------------------------------------------------------------
 def run(days=60, universe_size=40, source="live", start_capital=1_000_000.0,
         max_positions=5, risk_pct=1.0, sizing="risk", max_alloc_pct=25.0,
-        max_hold=5, per_strategy=True, min_price=None, min_value_cr=None):
+        max_hold=5, per_strategy=True, min_price=None, min_value_cr=None,
+        costs=True):
     """Run a daily backtest, then replay its trades through the book. Returns the
     overall portfolio result + (optionally) a per-strategy comparison so you can see
     which strategy actually compounds capital, not just which has the best per-trade R.
+
+    `costs=False` gives the gross (pre-cost) book for comparison.
     """
     kw = dict(days=days, universe_size=universe_size, source=source,
               max_hold=max_hold, resolve="daily", _collect=True)
@@ -324,7 +496,7 @@ def run(days=60, universe_size=40, source="live", start_capital=1_000_000.0,
     # `closes` (traded symbols' daily closes) marks open positions to market each day.
     sim_kw = dict(start_capital=start_capital, max_positions=max_positions,
                   risk_pct=risk_pct, sizing=sizing, max_alloc_pct=max_alloc_pct,
-                  rank_key="score", closes=bt.get("closes"))
+                  rank_key="score", closes=bt.get("closes"), costs=costs)
     overall = simulate(trades, **sim_kw)
 
     out = {
@@ -346,11 +518,16 @@ def run(days=60, universe_size=40, source="live", start_capital=1_000_000.0,
         rows = []
         for sid, ts in by_strat.items():
             r = simulate(ts, **sim_kw)
+            rc = r.get("costs") or {}
             rows.append({"id": sid, "name": (bd.STRAT_MAP.get(sid) or {}).get("name", sid),
                          "totalReturnPct": r["totalReturnPct"], "cagrPct": r["cagrPct"],
                          "maxDrawdownPct": r["maxDrawdownPct"], "sharpe": r["sharpe"],
                          "winRate": r["winRate"], "profitFactor": r["profitFactor"],
-                         "tradesTaken": r["tradesTaken"], "endCapital": r["endCapital"]})
+                         "tradesTaken": r["tradesTaken"], "endCapital": r["endCapital"],
+                         # gross alongside net: turnover differs per strategy, so costs
+                         # can genuinely re-order this table
+                         "grossTotalReturnPct": rc.get("grossTotalReturnPct"),
+                         "costsTotal": rc.get("total")})
         rows.sort(key=lambda x: (x["totalReturnPct"] if x["totalReturnPct"] is not None
                                  else -1e9), reverse=True)
         out["perStrategy"] = rows

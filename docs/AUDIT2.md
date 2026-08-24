@@ -15,8 +15,9 @@ is **sound**. Round 1's security posture is intact. This round found **1 Medium*
 (a lock held across network I/O, same anti-pattern as R1's M3) and a handful of
 **Low** hygiene/robustness/consistency items plus one product caveat. The Medium
 (N1) and every Low (N2/N4/N5/N6/N7) are now **fixed/noted** (see §4); **N3** (a
-cost/slippage model) was reviewed and **accepted as a documented caveat** — all
-findings closed.
+cost/slippage model) was first accepted as a documented caveat and then **fixed on
+2026-08-24** for the portfolio backtest, once that engine started reporting absolute
+returns and the caveat's premise stopped holding — all findings closed.
 
 ---
 
@@ -82,7 +83,7 @@ pass could actually run. The authoritative race-safe throttle still lives inside
 `resolve_outcomes_intrabar()`, so a benign unlocked-read race at worst spawns one
 extra thread that then loses that throttle.
 
-### N3 — No transaction costs / slippage / gap fills · **Low** (correctness caveat, by design) · ✅ ACCEPTED (won't-fix)
+### N3 — No transaction costs / slippage / gap fills · **Low** (correctness caveat, by design) · ✅ FIXED where it matters (2026-08-24)
 **Where:** every engine (`paper.py`, `sim._refresh_trade`, `backtest_daily`,
 `backtest_strategies`) fills at the exact close/stop/target. No brokerage, STT,
 slippage, or gap-through (a bar that gaps past the stop still exits *at* the stop).
@@ -97,6 +98,25 @@ fill gap-through exits at the bar open, not the level.
 tool exists to *rank* strategies by regime, and this bias hits every strategy
 alike so the ranking stays valid; only absolute P&L reads optimistic. Revisit if
 absolute-return realism ever becomes a goal.
+
+**Revisited (2026-08-24) — the premise expired.** `portfolio_backtest.py` was built
+*after* this decision and reports **absolute** CAGR / equity curve / max-DD, so
+"only the ranking matters" no longer covers the whole app. Worse, the assumption
+that the bias "hits all strategies alike" is **false at the portfolio level**:
+strategies differ in *turnover*, so costs scale with how often each one trades.
+Measured on the 90-session EOD universe, charging real costs re-ordered the
+per-strategy table — `squeeze` went from marginally positive (+0.54%) to **last**
+(−5.34%) and `gap` flipped **+5.80% → −4.33%**, while low-turnover rules barely
+moved. Overall the book went gross **+7.61% → net +1.13%** (CAGR 34.6% → 4.7%,
+Sharpe 2.15 → 0.39).
+
+So costs are now charged **inside `simulate()` only** (`COSTS`: brokerage, STT,
+exchange + SEBI fees, stamp duty, GST, depository fee, and slippage on both legs).
+Every per-trade **R** number in the app stays gross and therefore comparable to its
+own history, which is exactly what the original decision was protecting. Gross is
+one dropdown away and shown inline next to net, so the friction is visible rather
+than assumed. **Still open by choice:** gap-through fills (a bar gapping past the
+stop still exits *at* the stop) — noted in the UI caveat.
 
 ### N4 — `place_futures_order` reads `pos["margin"]` directly · **Low** (robustness) · ✅ FIXED
 **Where:** `paper.py:276` (`margin_freed = pos["margin"] * …`). A futures position
@@ -148,8 +168,8 @@ copy, never the returned object). Staleness left as-is — within tolerance.
   finding with a real runtime effect. ✅ done
 - **Quick hygiene (bundle):** **N4, N5, N6** — a few lines each, zero risk. ✅ done
 - **Consider (product):** **N3** cost/slippage model if you ever want the
-  *absolute* P&L to be trustworthy, not just the ranking. ✅ accepted as caveat
-  (won't-fix for now)
+  *absolute* P&L to be trustworthy, not just the ranking. ✅ done 2026-08-24 for
+  `portfolio_backtest` — which is precisely where absolute P&L became a goal
 - **N2, N7:** nice-to-have / note-only. ✅ done
 
 Nothing here blocks anything. The instrument is trustworthy for its stated job
@@ -164,7 +184,7 @@ periodic few-second latency blip, not about silently wrong results.
 |----|-----|--------|-------|
 | N1 | Medium | ✅ Fixed | `update()` fetches prices + candles lock-free; `_intrabar_catchup` split into `_intrabar_fetch`/`_intrabar_apply`; lock now guards only in-memory reprice + DB write. |
 | N2 | Low | ✅ Fixed | `_intrabar_due()` gate — `enrich()` only spawns the resolver thread when a pass is actually due. |
-| N3 | Low | ✅ Accepted (won't-fix) | Cost/slippage model declined — bias hits all strategies alike, so the relative ranking (the tool's purpose) stays valid. |
+| N3 | Low | ✅ Fixed 2026-08-24 (was accepted) | Costs charged inside `portfolio_backtest.simulate()` — the one engine reporting *absolute* returns. The "hits all strategies alike" premise proved false there (turnover differs, so the table re-orders); per-trade R stays gross by design. Gap-through fills still open. |
 | N4 | Low | ✅ Fixed | `pos.get("margin", 0.0)` for the one direct access in `place_futures_order`. |
 | N5 | Low | ✅ Fixed | `paper._now()` stamps IST. |
 | N6 | Low | ✅ Fixed | Coarse `_refresh_trade` closes now set `closedDay`. |
@@ -173,4 +193,4 @@ periodic few-second latency blip, not about silently wrong results.
 Full suite green after the changes: **62 passed**. N1's new split is exercised
 live (`update()` resolved 533 open trades' prices + candles outside the lock).
 **All findings are now closed** — N1/N2/N4/N5/N6 fixed, N7 documented, N3
-accepted as a caveat (won't-fix).
+accepted as a caveat and later (2026-08-24) implemented for the portfolio view.

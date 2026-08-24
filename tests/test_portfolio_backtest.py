@@ -11,6 +11,7 @@ Run: python test_portfolio_backtest.py   (also works under pytest)
 """
 
 import contextlib
+import copy
 import math
 
 from nse_pulse.backtest import portfolio_backtest as pb
@@ -96,8 +97,11 @@ def test_simulate_empty():
 
 
 def test_simulate_single_winner_compounds():
+    # costs=False throughout this block: these pin the exact sizing/compounding
+    # arithmetic, which is clearest against clean fills. Costs get their own tests.
     r = pb.simulate([_t(entry=100, stop=95, exit_px=110)],
-                    start_capital=1_000_000, max_positions=5, risk_pct=1.0)
+                    start_capital=1_000_000, max_positions=5, risk_pct=1.0,
+                    costs=False)
     # 2,000 shares * (110-100) = +20,000
     assert r["tradesTaken"] == 1 and r["closedTrades"] == 1
     assert r["endCapital"] == 1_020_000.0
@@ -110,7 +114,7 @@ def test_simulate_single_winner_compounds():
 
 def test_simulate_single_loser_and_drawdown():
     r = pb.simulate([_t(entry=100, stop=95, exit_px=95, status="STOP")],
-                    start_capital=1_000_000, risk_pct=1.0)
+                    start_capital=1_000_000, risk_pct=1.0, costs=False)
     # 2,000 * (95-100) = -10,000  → exactly the 1% risk we sized for
     assert r["endCapital"] == 990_000.0
     assert r["totalReturnPct"] == -1.0
@@ -135,7 +139,7 @@ def test_simulate_capital_gating():
 
 def test_simulate_short_profits_on_drop():
     r = pb.simulate([_t(direction="SHORT", entry=100, stop=105, exit_px=90, status="TARGET")],
-                    risk_pct=1.0)
+                    risk_pct=1.0, costs=False)
     # risk 1% with a 5-pt stop → 2,000 sh; short gains (100-90)*2000 = +20,000
     assert r["endCapital"] == 1_020_000.0 and r["winRate"] == 100.0
     assert r["avgWinPct"] > 0
@@ -159,8 +163,10 @@ def test_simulate_mark_to_market_shows_intratrade_drawdown():
                opened="2026-07-01", closed="2026-07-05")
     closes = {"ACME": {"2026-07-01": 100, "2026-07-02": 95, "2026-07-03": 92,
                        "2026-07-04": 105}}
-    mtm = pb.simulate([trade], start_capital=1_000_000, risk_pct=1.0, closes=closes)
-    cost = pb.simulate([trade], start_capital=1_000_000, risk_pct=1.0)      # no closes
+    mtm = pb.simulate([trade], start_capital=1_000_000, risk_pct=1.0, closes=closes,
+                      costs=False)
+    cost = pb.simulate([trade], start_capital=1_000_000, risk_pct=1.0,      # no closes
+                       costs=False)
     # Same realized outcome either way (qty 1,000 × +10 = +10,000)…
     assert mtm["endCapital"] == cost["endCapital"] == 1_010_000.0
     # …but only MTM exposes the -8% mark on 2026-07-03 (92 vs 100 entry, 1,000 sh).
@@ -233,6 +239,142 @@ def test_run_handles_no_trades():
     assert out["overall"]["tradesTaken"] == 0
     assert out["perStrategy"] == []
     assert out["message"]
+
+
+# ---------------------------------------------------------------------------
+# transaction costs
+# ---------------------------------------------------------------------------
+def test_cost_schedule_true_false_and_override():
+    assert pb.cost_schedule(True) == pb.COSTS
+    off = pb.cost_schedule(False)
+    assert set(off) == set(pb.COSTS) and not any(off.values())
+    assert pb.cost_schedule(None) == off                      # None also means gross
+    ov = pb.cost_schedule({"slippagePctPerSide": 0.5, "bogus": 9})
+    assert ov["slippagePctPerSide"] == 0.5                    # overridden
+    assert ov["sttBuyPct"] == pb.COSTS["sttBuyPct"]           # the rest defaulted
+    assert "bogus" not in ov                                  # unknown keys ignored
+
+
+def test_charges_are_side_aware():
+    cs = pb.cost_schedule(True)
+    buy = pb.charges(100_000.0, "buy", cs)
+    sell = pb.charges(100_000.0, "sell", cs)
+    # stamp duty is a buy-side levy; the depository fee is charged on delivery sells
+    assert buy["stamp"] > 0 and buy["dp"] == 0.0
+    assert sell["dp"] > 0 and sell["stamp"] == 0.0
+    # delivery STT hits both legs at the same rate
+    assert round(buy["stt"], 2) == round(sell["stt"], 2) == 100.0
+    # GST rides on brokerage + exchange + SEBI only (never on STT/stamp)
+    assert round(buy["gst"], 2) == round(
+        0.18 * (buy["brokerage"] + buy["exchange"] + buy["sebi"]), 2)
+    assert pb.charges(0.0, "buy", cs) == {}                   # nothing traded, nothing owed
+
+
+def test_brokerage_takes_the_cheaper_of_flat_and_pct():
+    # "Rs 20 an order or 0.03%, whichever is lower" — the usual discount plan
+    cs = pb.cost_schedule({"brokeragePctPerSide": 0.03})
+    assert round(pb._brokerage(10_000.0, cs), 2) == 3.0       # 0.03% is cheaper
+    assert round(pb._brokerage(10_000_000.0, cs), 2) == 20.0  # flat caps it
+    flat_only = pb.cost_schedule(True)                        # pct = 0 in the default
+    assert pb._brokerage(10_000.0, flat_only) == 20.0
+    free = pb.cost_schedule({"brokerageFlatPerOrder": 0.0, "brokeragePctPerSide": 0.03})
+    assert round(pb._brokerage(10_000.0, free), 2) == 3.0     # no flat fee to compare
+
+
+def test_slippage_always_works_against_you():
+    cs = pb.cost_schedule({"slippagePctPerSide": 1.0})
+    assert pb.slipped(100.0, "buy", cs) == 101.0              # you buy higher
+    assert pb.slipped(100.0, "sell", cs) == 99.0              # and sell lower
+    assert pb._sides("LONG") == ("buy", "sell")
+    assert pb._sides("SHORT") == ("sell", "buy")              # a short opens by selling
+
+
+def test_costs_reduce_the_return_and_reconcile_exactly():
+    trades = [_t()]
+    net, gross = pb.simulate(trades), pb.simulate(trades, costs=False)
+    c = net["costs"]
+    assert net["totalReturnPct"] < gross["totalReturnPct"]     # the whole point
+    # `total` is exactly what the same executed positions gave up
+    assert round(c["total"], 2) == round(c["grossEndCapital"] - net["endCapital"], 2)
+    assert round(sum(c["breakdown"].values()), 2) == round(c["total"], 2)
+    assert c["enabled"] and c["schedule"] and c["turnover"] > 0
+    # delivery STT is the single biggest line item, and slippage is charged twice
+    assert c["breakdown"]["stt"] == max(c["breakdown"].values())
+    assert c["breakdown"]["slippage"] > 0
+
+
+def test_costs_off_is_a_true_gross_run():
+    g = pb.simulate([_t()], costs=False)["costs"]
+    assert g["total"] == 0.0 and g["enabled"] is False and g["schedule"] is None
+    assert not any(g["breakdown"].values())
+    assert g["grossTotalReturnPct"] == pb.simulate([_t()], costs=False)["totalReturnPct"]
+
+
+def test_costs_can_turn_a_thin_winner_into_a_loser():
+    """The reason this exists: a rule whose edge is smaller than its costs looks
+    profitable gross and loses money net."""
+    thin = [_t(sym=f"S{i}", entry=100.0, stop=99.0, exit_px=100.10,
+               opened=f"2026-07-{i+1:02d}", closed=f"2026-07-{i+2:02d}")
+            for i in range(8)]
+    gross, net = pb.simulate(thin, costs=False), pb.simulate(thin)
+    assert gross["totalReturnPct"] > 0                         # edge exists on paper
+    assert net["totalReturnPct"] < 0                           # and is eaten by costs
+    assert net["costs"]["perTrade"] > 0
+
+
+def test_short_pays_sell_side_costs_on_the_way_in():
+    """A short opens by selling, so the depository fee lands on the OPENING leg and
+    the stamp duty on the closing buy — the mirror of a long."""
+    s = pb.simulate([_t(direction="SHORT", entry=100.0, stop=105.0, exit_px=90.0)])
+    b = s["costs"]["breakdown"]
+    assert b["dp"] > 0 and b["stamp"] > 0
+    assert s["endCapital"] > s["startCapital"]                 # still a profitable short
+    assert s["totalReturnPct"] < pb.simulate(
+        [_t(direction="SHORT", entry=100.0, stop=105.0, exit_px=90.0)],
+        costs=False)["totalReturnPct"]
+
+
+def test_entry_costs_cannot_overdraw_cash():
+    """Sizing fills the book to the last rupee, so the entry charges have to be paid
+    out of something — the position is shrunk (or skipped), never funded on credit."""
+    r = pb.simulate([_t(entry=100.0, stop=1.0, exit_px=101.0)],   # stop so wide the
+                    start_capital=10_000.0, max_alloc_pct=100.0)  # cap is all the cash
+    assert r["tradesTaken"] + r["tradesSkippedCapital"] == 1
+    for pt in r["equityCurve"]:
+        assert pt["equity"] > 0                                # never went negative
+
+
+def test_costs_reported_even_with_nothing_to_simulate():
+    c = pb.simulate([_t(status="OPEN")])["costs"]
+    assert c["total"] == 0.0 and c["perTrade"] == 0.0 and c["pctOfTurnover"] is None
+
+
+def test_params_records_whether_costs_were_charged():
+    assert pb.simulate([_t()])["params"]["costs"] is True
+    assert pb.simulate([_t()], costs=False)["params"]["costs"] is False
+
+
+def test_simulate_never_mutates_the_trades_it_is_given():
+    """The guard that keeps costs OUT of the R leaderboards: `backtest_daily` hands the
+    same trade dicts to its own scorecards, so slipping fills here must not write back."""
+    trades = [_t(sym="A"), _t(sym="B", direction="SHORT", stop=105, exit_px=90)]
+    before = copy.deepcopy(trades)
+    pb.simulate(trades)
+    assert trades == before
+
+
+def test_run_threads_costs_and_reports_gross_per_strategy():
+    fake = {"days": 30, "universeWithData": 2, "universeAvailable": 2, "range": {},
+            "trades": [_t(sym="A", strat="momentum", exit_px=110)]}
+    with _patch(pb.bd, "run", lambda **k: fake):
+        net = pb.run(days=30)
+        gross = pb.run(days=30, costs=False)
+    assert net["overall"]["totalReturnPct"] < gross["overall"]["totalReturnPct"]
+    row = net["perStrategy"][0]
+    # turnover differs per strategy, so the table carries both to stay honest
+    assert row["grossTotalReturnPct"] > row["totalReturnPct"]
+    assert row["costsTotal"] > 0
+    assert gross["perStrategy"][0]["costsTotal"] == 0.0
 
 
 if __name__ == "__main__":

@@ -120,7 +120,7 @@ nse_pulse/backtest/
   backtest_daily.py  Daily-bar historical backtest — source="live" (curated NSE) OR "eod" (whole universe)
   backtest_strategies.py  Offline backtester: replays archived context, resolves on OHLCV
   walkforward.py     Walk-forward out-of-sample / overfit validation (pure over trades)
-  portfolio_backtest.py  Portfolio-level backtest — replay through a real book → equity curve + CAGR/DD/Sharpe
+  portfolio_backtest.py  Portfolio-level backtest — replay through a real book (real transaction costs) → equity curve + CAGR/DD/Sharpe
 nse_pulse/web/
   app.py             Flask routes (thin) + startup wiring (main()) + security guard/headers
   observability.py   Per-request access log (entry→exit/timing) + opt-in OpenTelemetry (OTLP)
@@ -130,7 +130,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-  tests/               Unit tests — 937 across 40 suites; import `from nse_pulse.<sub> import <mod>`
+  tests/               Unit tests — 951 across 40 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -363,7 +363,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **937 tests** across 40 suites (grow it with every change;
+- `python -m pytest -q` — **951 tests** across 40 suites (grow it with every change;
   never shrink it).
 - **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
   committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
@@ -419,25 +419,22 @@ stays useful instead of becoming a wall of checkmarks.
 
 Ranked by expected value (full detail in `AGENTS.md` -> "Roadmap / ideas (not yet built)"):
 
-1. **Transaction costs / slippage — re-open for the portfolio view only.** AUDIT2 N3
-   declined it because the bias preserves the relative *ranking*; `portfolio_backtest.py`
-   postdates that decision and reports **absolute** CAGR / equity / max-DD, where the
-   argument doesn't hold. Charge costs only in the portfolio sim; leave per-trade R alone.
-2. **Out-of-sample validation for the conviction board's adaptive pillar weights.**
+1. **Out-of-sample validation for the conviction board's adaptive pillar weights.**
    `pillar_weights()` learns from all resolved history and applies it to today with no
    holdout — the one learned component not policed the way `walkforward.py` polices the
    daily strategies.
-3. **Optional deploy on a real WSGI server** (`waitress`) — still on Werkzeug's dev
+2. **Optional deploy on a real WSGI server** (`waitress`) — still on Werkzeug's dev
    server while binding `0.0.0.0` for phone/LAN and holding long-lived SSE streams.
    Keep the reloader + `start.py` supervisor for dev.
-4. **Joint regime x vol selection** — deferred pending sample depth; the full-universe
+3. **Joint regime x vol selection** — deferred pending sample depth; the full-universe
    EOD backtest (~5k trades, ~280/cell) may now suffice. Measure per-cell depth first.
-5. **Multi-leg option strategies in paper trading** — spreads/straddles as one position.
+4. **Multi-leg option strategies in paper trading** — spreads/straddles as one position.
    Futures side: **calendar spreads** (rollover data already there) + basis/carry alerts.
 
-**Reversed decision:** transaction costs were previously "explicitly NOT doing" (AUDIT2
-N3). That still holds for the per-trade R leaderboards, but not for the absolute
-portfolio numbers built later — hence item 1 above.
+**Reversed decision (now shipped):** transaction costs were "explicitly NOT doing"
+(AUDIT2 N3). That still holds for the per-trade R leaderboards, but not for the absolute
+portfolio numbers built later — costs now ride inside `portfolio_backtest.simulate()`
+only (2026-08-24, see the findings log).
 
 ## Known limitations
 
@@ -475,6 +472,79 @@ portfolio numbers built later — hence item 1 above.
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 💸 BUILT: transaction costs in the portfolio backtest (AUDIT2 N3 reversed)
+
+**Why now.** Roadmap item 1. `docs/AUDIT2.md` N3 declined a cost model in July on a
+reasonable argument: the drag "hits all strategies alike, so the relative **ranking**
+stays valid", and ranking was all the app did. `portfolio_backtest.py` was built *after*
+that decision and reports **absolute** CAGR / equity curve / max-DD — the most
+user-facing number in the app — so the caveat's premise had quietly expired.
+
+**The premise turned out to be wrong too, not just outdated.** At portfolio level costs
+scale with **turnover**, and strategies differ enormously in how often they trade. So
+costs do NOT hit them alike, and charging them **re-orders the per-strategy table**:
+`squeeze` went +0.54% → **−5.34%** (best-of-the-rest to last) and `gap` flipped
+**+5.80% → −4.33%**, while low-turnover rules barely moved. That makes this a
+correctness fix, not just a realism nicety.
+
+**Design.** `COSTS` is the real NSE cash-delivery stack — brokerage `min(flat, pct)`,
+STT on **both** legs (delivery), exchange + SEBI fees, stamp duty on the buy, GST on
+brokerage+exchange+SEBI (not on STT/stamp), depository fee on the sell, plus market
+impact on every fill. Decisions worth remembering:
+- **Side-aware, not open/close-aware.** `charges(notional, side, cs)` takes the real
+  market side, so a SHORT pays the DP fee on its **opening sell** and stamp duty on its
+  **closing buy** — the mirror of a long. Getting this wrong would flatter shorts.
+- **Zero the rates, don't branch.** `cost_schedule(False)` returns an all-zero schedule
+  so the gross path runs the *identical* arithmetic. "Costs off" therefore can't drift
+  away from "costs on" as this code evolves.
+- **Slippage is a price effect, not a fee** — fills are slipped, and the rupee cost is
+  recovered as `gross − net`. That makes `costs.total` reconcile exactly to
+  `grossEndCapital − endCapital`, which a test pins.
+- **Gross means "these same positions at printed prices"**, NOT a separate `costs=False`
+  run — that run sizes differently (more cash ⇒ more shares), so it isn't comparable.
+- **Entry charges are paid from the same cash as the reserve**, so a position that fits
+  gross may not fit net: it is shrunk once, then skipped. Never funded on credit.
+- **`simulate()` must not mutate its input** — `backtest_daily` hands it the same trade
+  dicts its own R scorecards use, so a write-back would leak costs into the R
+  leaderboards. Pinned by `test_simulate_never_mutates_the_trades_it_is_given`.
+
+**Scope is the whole point.** Costs live in `simulate()` and nowhere else. Every
+per-trade **R** number stays gross, so those leaderboards remain comparable to their own
+history — which is exactly what N3's original decision was protecting.
+
+**Measured (90 sessions, EOD universe, ₹10L, 5 slots, 1% risk).** These columns are two
+FULL runs (`costs=False` vs default), which is why the gross figure here (+7.61%) differs
+slightly from the `costs.grossTotalReturnPct` the UI shows inline (+7.45%): the cost-free
+run has more cash and so buys a few more shares, while the inline figure holds quantity
+fixed. Both are honest; don't "fix" one to match the other.
+
+| | universe=60 | universe=2500 |
+|---|---|---|
+| total return | +7.61% → **+1.13%** | +21.85% → **+11.93%** |
+| CAGR | 34.64% → **4.65%** | 122.89% → **57.92%** |
+| Sharpe | 2.15 → **0.39** | 3.84 → **2.24** |
+| max drawdown | 4.34% → **5.37%** | 5.32% → **6.83%** |
+| costs | ₹63,221 (6.3% of capital, ₹718/trade) | ₹87,319 (8.7%, ₹677/trade) |
+
+Costs land at **~0.177% of two-leg turnover** (≈0.35% of a position, round trip), and the
+ordering of line items is worth internalising: **STT dominates**, then slippage, then
+brokerage — the flat ₹20 is nearly a rounding error, so *turnover* is the thing to
+optimise, not the brokerage plan. Verified live through
+`/api/sim/portfolio` for all three modes (default, `?costs=0`, `?slippage=0.15`), and
+`bd.run`'s expectancy R confirmed byte-identical before/after a costed portfolio run.
+
+**Still deliberately not modelled:** gap-through fills (a bar that gaps past the stop
+still exits *at* the stop, so bad days remain flattered). Called out in the UI caveat.
+
+**Tests +14 (937 → 951):** schedule normalization (True/False/dict, unknown keys
+dropped), side-aware charge components, `min(flat, pct)` brokerage, slippage direction,
+the exact `total == gross − net` reconciliation, breakdown summing to total, a thin edge
+turning negative once costs are charged, short-side costs, the no-overdraw guard, the
+empty-book path, `params.costs`, `run()` threading + per-strategy gross, the non-mutation
+guard, and route parsing of `costs=0` / `slippage=` (incl. clamping and garbage input);
+`test_index_renders` also asserts the Costs selector. Four pre-existing tests that pin
+exact gross arithmetic were made explicitly `costs=False` — their numbers are unchanged.
 
 ### 2026-08-24 — 🗄 Contiguous EOD backfill closes the corporate-action gap (data op, no code change)
 

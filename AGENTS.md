@@ -89,7 +89,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 937 unit tests across 40 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 951 unit tests across 40 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -143,7 +143,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 937 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/corporateactions/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 951 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/corporateactions/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -633,37 +633,46 @@ and the calibration→adaptive-weighting loop all landed. `docs/AUDIT.md` and
 
 Ranked by expected value, highest first:
 
-1. **💸 Re-open transaction costs / slippage for the *portfolio* view only.**
-   `AUDIT2` N3 declined a cost model on the grounds that the bias "hits all strategies
-   alike, so the relative **ranking** stays valid" — sound then, but
-   `portfolio_backtest.py` was built afterwards and reports **absolute** CAGR /
-   equity curve / max-DD, where that argument does not hold. A flat per-trade
-   brokerage+STT+impact charge applied *only* in the portfolio simulation would keep
-   the per-trade R leaderboards untouched (and comparable to history) while making the
-   headline compounding numbers honest. Scoped, cheap, and it removes the one caveat
-   that undercuts the most user-facing number in the app.
-2. **🧪 Out-of-sample validation for the conviction board's adaptive weights.**
+1. **🧪 Out-of-sample validation for the conviction board's adaptive weights.**
    `conviction_calibration.pillar_weights()` learns each pillar's edge from **all**
    resolved history and applies it to today with no holdout — precisely the
    curve-fitting risk `walkforward.py` exists to police for the daily strategies. The
    weighting is currently the only learned component in the engine that isn't
    OOS-checked. Reuse `walkforward`'s holdout/anchored-fold machinery over the saved
    conviction ideas.
-3. **🚀 Optional deploy on a real WSGI server (was on the original roadmap).** The app
+2. **🚀 Optional deploy on a real WSGI server (was on the original roadmap).** The app
    still serves from Werkzeug's dev server while binding `0.0.0.0` for phone/LAN access
    and holding long-lived SSE connections. `waitress` fits (pure Python, Windows-clean,
    properly threaded); keep the reloader + `start.py` supervisor for local dev.
-4. **🌊 Joint regime×vol selection.** Selection blends the two **marginal**
+3. **🌊 Joint regime×vol selection.** Selection blends the two **marginal**
    leaderboards (`blendedR = 0.6·regimeR + 0.4·volR`) because a joint bucket would have
    starved sample sizes on the old curated ~40-name universe. The full-universe EOD
    backtest now yields ~5k trades (6 regimes × 3 vol states ≈ 280/cell on average), so
    **measure the per-cell depth first** and only build the joint view if it holds up.
-5. **⛓ Multi-leg option strategies in paper trading.** The engine handles long *and*
+4. **⛓ Multi-leg option strategies in paper trading.** The engine handles long *and*
    written single legs with correct margin, but not spreads / straddles / strangles as
    one position — the natural next step now that writing works, and the piece a
    premium-selling playbook would need.
 
 ## Done recently
+
+- **💸 Transaction costs in the portfolio backtest (`portfolio_backtest.COSTS`)** — was roadmap item 1, and it
+ **reverses `docs/AUDIT2.md` N3**. That finding declined a cost model because the drag "hits all strategies alike,
+ so the relative ranking stays valid" — true for per-trade **R**, but `portfolio_backtest.py` was built *afterwards*
+ and reports **absolute** CAGR / equity / max-DD. Measuring it also broke the premise: at portfolio level costs
+ scale with **turnover**, so they do NOT hit strategies alike. `simulate(costs=…)` now slips both fills against you
+ and charges the real NSE delivery stack (brokerage `min(flat, pct)`, STT both legs, exchange + SEBI, stamp on the
+ buy, GST on brokerage+exchange+SEBI, depository fee on the sell) — all **side-aware**, so a SHORT pays the DP fee
+ on its opening sell and stamp on its closing buy. `cost_schedule()` maps `True`/`False`/dict onto one schedule and
+ **zeroes rates rather than branching**, so the gross path runs identical arithmetic. Entry charges are paid out of
+ the same cash as the reserve, so a position that fits gross but not net is **shrunk, then skipped** — never funded
+ on credit. Slippage is recovered as `gross − net` so `costs.total` reconciles exactly, and `simulate()` is proven
+ **non-mutating** (a test pins that, since `backtest_daily` hands it the same dicts its R scorecards use).
+ Measured on 90 sessions of the EOD universe: overall gross **+7.61% → net +1.13%** (CAGR 34.6% → 4.7%, Sharpe
+ 2.15 → 0.39, ~0.18% of turnover, ₹718/trade, STT then slippage the biggest lines) — and the per-strategy table
+ **re-ordered**: `squeeze` +0.54% → **−5.34%** (last), `gap` +5.80% → **−4.33%**. `?costs=0` / `?slippage=<pct>` on
+ `/api/sim/portfolio`; a **Costs** selector (Real · Real+wide slip · None) plus a Gross column and a
+ where-it-went line in the UI. Per-trade R everywhere else stays gross **on purpose**. Suite **937 → 951**.
 
 - **📐 Corporate-action (split / bonus / demerger) adjustment — `core/corporate_actions.py`** — closes the sharpest
  known correctness gap (was roadmap item 1). NSE serves **raw traded prices** on every path we ingest, so a split

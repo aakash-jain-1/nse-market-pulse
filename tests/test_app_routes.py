@@ -626,6 +626,24 @@ def test_sim_portfolio_arg_parsing():
     assert seen2["sizing"] == "risk"                        # default sizing
 
 
+def test_sim_portfolio_cost_arg_parsing():
+    """Transaction costs are ON by default here (the only engine quoting absolute
+    returns); `costs=0` asks for the gross book and `slippage=` varies market impact."""
+    from nse_pulse.backtest import portfolio_backtest as pbk
+    seen = {}
+    with _patch(pbk, "run", lambda **k: seen.update(k) or {"overall": {}}):
+        _json("/api/sim/portfolio")
+        assert seen["costs"] is True                        # default: charge them
+        _json("/api/sim/portfolio?costs=0")
+        assert seen["costs"] is False                       # explicit gross run
+        _json("/api/sim/portfolio?slippage=0.25")
+        assert seen["costs"] == {"slippagePctPerSide": 0.25}
+        _json("/api/sim/portfolio?slippage=99")             # clamped, not trusted
+        assert seen["costs"] == {"slippagePctPerSide": 2.0}
+        _json("/api/sim/portfolio?slippage=abc")            # garbage → default schedule
+        assert seen["costs"] is True
+
+
 # ---------------------------------------------------------------------------
 # EOD bhavcopy endpoints
 # ---------------------------------------------------------------------------
@@ -1020,6 +1038,10 @@ def test_index_renders():
     for el in (b'id="liveFnoBox"', b'id="liveFnoUnd"', b'id="liveFnoExp"',
                b'id="liveFnoStrike"', b'data-leg="ce"', b'data-leg="fut"'):
         assert el in r.data, el
+    # Portfolio backtest is the one engine charging transaction costs, so it needs the
+    # Costs selector + the gross-vs-net line that makes the drag visible.
+    assert b'id="pfCosts"' in r.data
+    assert b"costLine" in r.data and b"COST_LBL" in r.data
 
 
 def test_force_utf8_stdio_is_idempotent_and_safe():
