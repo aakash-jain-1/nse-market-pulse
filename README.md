@@ -150,6 +150,13 @@ flowchart LR
   an idle out-of-hours socket never storms the broker's connection limit. The
   broker's **scrip master** is cached to resolve `symbol → token` (~2400 NSE names;
   the tokens are NSE's standard ids, so RELIANCE → `2885` either way).
+- **Indices stream too** (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, NIFTYNXT50, INDIA
+  VIX + the rest of the 57 Angel publishes) — they live on the **same segment as
+  cash**, so they ride the same socket and subscription. A one-click chip row in the
+  watchlist adds the majors. An index is a *computed level*, not a traded instrument,
+  so it has **no volume, OI, VWAP or order book**; the broker sends placeholder zeros
+  (and a `-0.01 / -1` sentinel book) which we deliberately **drop**, and the UI shows
+  `index` in place of a volume figure. F&O legs aren't wired into the tab yet.
 - Every packet updates an in-memory `LATEST[token]` record (LTP, day OHLC, volume,
   OI, best-5 depth) and folds the LTP into a **forming 1-minute candle** whose
   timestamp uses the **same IST-baked-as-UTC epoch** as `/api/ohlc`, so the live bar
@@ -160,7 +167,8 @@ flowchart LR
   depth ladder and the quote header in realtime. The chart instance **persists**
   across the dashboard's poll timer (it isn't rebuilt every refresh).
 - The **watchlist** (localStorage-persisted) sets what's subscribed via
-  `POST /api/live/watch`; click a row to focus its chart; add/remove symbols.
+  `POST /api/live/watch`; click a row to focus its chart; add/remove symbols, or use
+  the index chips. Symbols with spaces (`INDIA VIX`) are accepted.
 
 **Setup (one-time)** — the tab shows provider-aware steps until configured.
 
@@ -999,8 +1007,11 @@ retry after cooldown. One gentle daily pass is the safe pattern (the WAF trips o
 - The **Live tab** is **optional** and needs your own broker credentials. **Angel
   One SmartAPI is free** and the default (auto TOTP login — no manual token step);
   **Dhan** works too but its Data API is a paid ₹499+GST/mo subscription. Ticks only
-  flow during market hours. It streams **NSE cash equities** (the scrip-master slice
-  we resolve); index/F&O instruments aren't wired into the tab yet.
+  flow during market hours. It streams **NSE cash equities + the NSE indices**
+  (NIFTY / BANKNIFTY / FINNIFTY / MIDCPNIFTY / NIFTYNXT50 / INDIA VIX and the rest of
+  the 57 the broker publishes). An index is a computed level, so it has **no volume,
+  OI or order book** — the UI shows those as absent rather than as a misleading `0`.
+  **F&O legs** (options/futures contracts) aren't wired into the tab yet.
 - The core app needs **no API key**; **no secrets in the repo** (`.gitignore`
   covers `.env`, `*.db`, state JSON, CSVs, `logs/`, and the broker configs
   `angel_config.json` / `dhan_config.json`).

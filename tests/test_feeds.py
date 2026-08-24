@@ -85,7 +85,10 @@ def _cfg(mod, json_obj=None):
 @contextlib.contextmanager
 def _feed_state(mod):
     """Snapshot & clear the in-memory feed store so a test starts blank."""
-    dicts = ["_watch", "_latest", "_bars", "_sym2sec", "_sec2sym"]
+    # _sec2trad / _index_tokens exist on the angel adapter only (dhan indexes cash
+    # equities only), so take whichever the module actually carries.
+    dicts = [k for k in ("_watch", "_latest", "_bars", "_sym2sec", "_sec2sym",
+                         "_sec2trad", "_index_tokens") if hasattr(mod, k)]
     saved = {k: (dict(getattr(mod, k)) if isinstance(getattr(mod, k), dict)
                  else set(getattr(mod, k))) for k in dicts}
     saved_scalars = {"_scrip_at": mod._scrip_at, "_focus": mod._focus}
@@ -244,6 +247,185 @@ def test_angel_set_watch_snapshot():
 
 def test_angel_update_bar():
     _check_update_bar(angel_feed)
+
+
+# ---------------------------------------------------------------------------
+# angel instrument master — NSE cash equities AND indices (same segment, so the
+# indices are streamable through the very same subscription)
+# ---------------------------------------------------------------------------
+SCRIP_ROWS = [
+    {"token": "2885", "symbol": "RELIANCE-EQ", "name": "RELIANCE",
+     "exch_seg": "NSE", "instrumenttype": ""},
+    {"token": "99926000", "symbol": "Nifty 50", "name": "NIFTY",
+     "exch_seg": "NSE", "instrumenttype": "AMXIDX"},
+    {"token": "99926009", "symbol": "Nifty Bank", "name": "BANKNIFTY",
+     "exch_seg": "NSE", "instrumenttype": "AMXIDX"},
+    {"token": "99926017", "symbol": "India VIX", "name": "INDIA VIX",
+     "exch_seg": "NSE", "instrumenttype": "AMXIDX"},
+    # noise that must NOT be indexed: another segment, and a non-EQ NSE series
+    {"token": "44444", "symbol": "RELIANCE25AUGFUT", "name": "RELIANCE",
+     "exch_seg": "NFO", "instrumenttype": "FUTSTK"},
+    {"token": "55555", "symbol": "SOMECO-BE", "name": "SOMECO",
+     "exch_seg": "NSE", "instrumenttype": ""},
+]
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+@contextlib.contextmanager
+def _scrip(rows):
+    """Load a fake Angel scrip master into a blank feed state."""
+    class _Req:
+        @staticmethod
+        def get(url, timeout=None):
+            return _FakeResp(rows)
+    with _feed_state(angel_feed), _patch(angel_feed, "requests", _Req):
+        angel_feed._load_scrip(force=True)
+        yield
+
+
+def test_angel_scrip_master_indexes_equities_and_indices():
+    with _scrip(SCRIP_ROWS):
+        assert angel_feed.resolve("reliance") == "2885"
+        assert angel_feed.resolve("NIFTY") == "99926000"
+        assert angel_feed.resolve("BANKNIFTY") == "99926009"
+        assert angel_feed.resolve("INDIA VIX") == "99926017"
+        # other segments + non-EQ series stay out
+        assert angel_feed.resolve("RELIANCE25AUGFUT") is None
+        assert angel_feed.resolve("SOMECO") is None
+        # the exchange tradingsymbol is kept verbatim — an index has no -EQ series
+        assert angel_feed._sec2trad["2885"] == "RELIANCE-EQ"
+        assert angel_feed._sec2trad["99926009"] == "Nifty Bank"
+
+
+def test_angel_resolve_accepts_index_aliases():
+    with _scrip(SCRIP_ROWS):
+        for alias in ("NIFTY 50", "nifty50", "Nifty 50"):
+            assert angel_feed.resolve(alias) == "99926000", alias
+        for alias in ("NIFTY BANK", "bank nifty", "Nifty Bank"):
+            assert angel_feed.resolve(alias) == "99926009", alias
+        for alias in ("INDIAVIX", "vix", "India VIX"):
+            assert angel_feed.resolve(alias) == "99926017", alias
+
+
+def test_angel_equity_wins_a_name_collision_with_an_index():
+    """A tradable stock must never be shadowed by a same-named index."""
+    rows = SCRIP_ROWS + [{"token": "99926099", "symbol": "RELIANCE",
+                          "name": "RELIANCE", "exch_seg": "NSE",
+                          "instrumenttype": "AMXIDX"}]
+    with _scrip(rows):
+        assert angel_feed.resolve("RELIANCE") == "2885"
+        assert angel_feed.is_index("RELIANCE") is False
+
+
+def test_angel_is_index_and_index_symbols():
+    with _scrip(SCRIP_ROWS):
+        assert angel_feed.is_index("BANKNIFTY") is True
+        assert angel_feed.is_index("nifty 50") is True     # via an alias
+        assert angel_feed.is_index("99926017") is True     # via the raw token
+        assert angel_feed.is_index("RELIANCE") is False
+        assert angel_feed.is_index("") is False
+        assert angel_feed.is_index(None) is False
+        assert angel_feed.index_symbols() == ["BANKNIFTY", "INDIA VIX", "NIFTY"]
+
+
+def test_angel_snapshot_flags_index_records():
+    """An index has no volume/OI/order book — the payload must say so, so the UI
+    renders '—' instead of a misleading 0 and an empty depth ladder."""
+    with _scrip(SCRIP_ROWS):
+        angel_feed.set_watch(["RELIANCE", "BANKNIFTY"])
+        snap = angel_feed.snapshot()
+        assert snap["BANKNIFTY"]["isIndex"] is True
+        assert "isIndex" not in snap["RELIANCE"]
+        assert "BANKNIFTY" in angel_feed.public_status()["indices"]
+
+
+#: A real SNAP_QUOTE packet for an index, as observed live on 2026-08-24. Angel
+#: fills the traded-instrument fields anyway — volume/ATP zero and a SENTINEL book
+#: of price -0.01 / qty -1 — so the handler has to drop them rather than pass off
+#: junk as a real order book.
+INDEX_TICK = {
+    "token": "99926009", "last_traded_price": 5512345,      # paise
+    "open_price_of_the_day": 5500000, "high_price_of_the_day": 5520000,
+    "low_price_of_the_day": 5495000, "closed_price": 5498000,
+    "volume_trade_for_the_day": 0, "average_traded_price": 0, "open_interest": 0,
+    "best_5_buy_data": [{"price": -1, "quantity": -1}] * 5,
+    "best_5_sell_data": [],
+}
+
+
+def test_angel_index_tick_keeps_the_level_and_drops_the_fake_book():
+    with _scrip(SCRIP_ROWS):
+        angel_feed._on_data(None, dict(INDEX_TICK))
+        rec = angel_feed.snapshot(["BANKNIFTY"])["BANKNIFTY"]
+    assert rec["ltp"] == 55123.45 and rec["prevClose"] == 54980.0
+    assert rec["open"] == 55000.0 and rec["high"] == 55200.0
+    assert rec["isIndex"] is True
+    # no volume / OI / VWAP / depth is recorded for an index — not even as zeros
+    for k in ("volume", "oi", "atp", "depth"):
+        assert k not in rec, k
+    # ...but the level still folds into the forming 1-min candle
+    assert rec["bar"]["c"] == 55123.45 and rec["bar"]["v"] == 0
+
+
+def test_angel_equity_tick_still_records_volume_and_depth():
+    """The index guard must not touch the cash-equity path."""
+    tick = dict(INDEX_TICK, token="2885",
+                best_5_buy_data=[{"price": 130590, "quantity": 3092}],
+                best_5_sell_data=[{"price": 130600, "quantity": 846}],
+                volume_trade_for_the_day=2226917, average_traded_price=131276,
+                open_interest=267781000)
+    with _scrip(SCRIP_ROWS):
+        angel_feed._on_data(None, tick)
+        rec = angel_feed.snapshot(["RELIANCE"])["RELIANCE"]
+    assert rec["volume"] == 2226917 and rec["oi"] == 267781000
+    assert rec["atp"] == 1312.76
+    assert rec["depth"]["bids"][0] == {"price": 1305.9, "qty": 3092}
+    assert "isIndex" not in rec
+
+
+def test_angel_rest_quote_uses_the_master_tradingsymbol_for_an_index():
+    """An index tradingsymbol ("Nifty Bank") can't be rebuilt by appending -EQ."""
+    asked = {}
+
+    class _Ltp:
+        def ltpData(self, exch, tsym, tok):
+            asked.update(exch=exch, tsym=tsym, tok=tok)
+            return {"data": {"ltp": 55123.45, "close": 54980.0}}
+
+    with _scrip(SCRIP_ROWS), _patch(angel_feed, "_smart", _Ltp()):
+        q = angel_feed.rest_quote("banknifty")
+    assert asked == {"exch": "NSE", "tsym": "Nifty Bank", "tok": "99926009"}
+    assert q["ltp"] == 55123.45 and q["symbol"] == "BANKNIFTY"
+
+
+def test_angel_rest_quote_blanks_traded_only_fields_for_an_index():
+    """getMarketData reports 0 volume and a zeroed book for an index — report those
+    as absent instead, matching the streaming path (this feeds the Live poll)."""
+    class _Full:
+        def getMarketData(self, mode, tokens):
+            return {"data": {"fetched": [{
+                "ltp": 55123.45, "close": 54980.0, "open": 55000.0,
+                "high": 55200.0, "low": 54950.0, "tradeVolume": 0, "avgPrice": 0,
+                "depth": {"buy": [{"price": 0, "quantity": 0}], "sell": []}}]}}
+
+    with _scrip(SCRIP_ROWS), _patch(angel_feed, "_smart", _Full()):
+        idx = angel_feed.rest_quote("BANKNIFTY")
+        eq = angel_feed.rest_quote("RELIANCE")
+    assert idx["isIndex"] is True and idx["ltp"] == 55123.45
+    assert idx["volume"] is None and idx["vwap"] is None
+    assert idx["depth"]["bids"][0] == {"price": None, "qty": None}
+    # the same payload on an equity token keeps whatever the broker reported
+    assert "isIndex" not in eq and eq["volume"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +701,15 @@ def test_dhan_rest_stubs_return_none():
     assert dhan_feed.rest_quote("RELIANCE") is None
     assert dhan_feed.rest_chart("RELIANCE") is None
     assert dhan_feed.rest_ohlc("RELIANCE") is None
+
+
+def test_dhan_index_stubs():
+    """Both adapters must expose the same interface — this one indexes cash
+    equities only, so nothing is ever an index."""
+    assert dhan_feed.is_index("NIFTY") is False
+    assert dhan_feed.index_symbols() == []
+    with _env(DHAN_KEYS), _cfg(dhan_feed, None), _feed_state(dhan_feed):
+        assert dhan_feed.public_status()["indices"] == []
 
 
 def _main():

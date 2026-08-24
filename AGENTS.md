@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 849 unit tests across 38 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 860 unit tests across 38 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +142,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 849 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 860 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -315,8 +315,14 @@ with no creds the app is unchanged.
   → jwt + feed token; the daily refresh is automatic (we hold the TOTP *secret*, not
   a fixed token). `SmartWebSocketV2` streams **SNAP_QUOTE** (mode 3, exchangeType
   1=NSE cash): LTP + day OHLC/volume + OI + **best-5 depth**. Prices arrive in
-  **paise (×100)** — divide by 100. Scrip master `OpenAPIScripMaster.json` filtered
-  to NSE `-EQ` → `resolve → token` (RELIANCE → `2885`, same NSE ids as Dhan). The
+  **paise (×100)** — divide by 100, indices included. Scrip master
+  `OpenAPIScripMaster.json` filtered to NSE `-EQ` **plus** the 57 NSE indices
+  (`instrumenttype == "AMXIDX"`, tokens `9992…`) → `resolve → token` (RELIANCE →
+  `2885`, same NSE ids as Dhan; BANKNIFTY → `99926009`). Equities are indexed FIRST
+  and index keys use `setdefault`, so a stock always wins a name collision;
+  `INDEX_ALIASES` accepts `NIFTY 50`/`INDIAVIX`/`VIX`-style spellings, `_sec2trad`
+  keeps each token's real tradingsymbol (an index has no `-EQ` to append), and
+  `is_index()` / `index_symbols()` expose the split. The
   SDK spews per-tick INFO to `./logs/<date>/app.log`; `_quiet_logs()` mutes logzero
   to WARNING. (NSE's Apr-2026 static-IP rule is for *order* APIs; **market data has
   no such requirement** and we only stream data.)
@@ -337,9 +343,12 @@ with no creds the app is unchanged.
   1-min candle** (`_bars`) whose `t` uses the **same IST-baked-as-UTC epoch ms** as
   `get_ohlc`, so live bars align with seeded ones. Finished minutes are written to
   `db.min_bars` — the Live feed thus **warms the backtester's minute cache** for free.
+  **Index records omit volume/oi/atp/depth entirely** (Angel sends zeros + a
+  `-0.01/-1` sentinel book for one) and `snapshot()` stamps them `isIndex: true`.
 - **Endpoints (all under `/api/live/`):**
-  - `GET config` — `public_status()`: configured/connected/marketOpen + watchlist
-    (never returns secrets).
+  - `GET config` — `public_status()`: configured/connected/marketOpen + watchlist +
+    `indices` (the streamable index names, read off the already-loaded master so this
+    never blocks on the download) — never returns secrets.
   - `POST watch` — `{symbols:[…], focus}` → subscribe/unsubscribe the delta.
   - `GET seed/<sym>?interval=1|5|15|D` — historical candles to seed the chart
     (reuses `nse_quote.get_ohlc`).
@@ -352,7 +361,10 @@ with no creds the app is unchanged.
   epoch ms → `Math.floor(t/1000)` for Lightweight Charts (UTC render == IST, same
   trick as `istTime()`). The status chip reads **● LIVE** only when connected AND
   market-open; the setup card (`liveSetupCard`) is provider-aware. Watchlist persists
-  in `localStorage` (`nseLiveWatch.v1`).
+  in `localStorage` (`nseLiveWatch.v1`). A chip row (`liveRenderIndexPicks`, fed by
+  `config.indices` and refreshed from the SSE status when the master lands late) adds
+  the six index majors in one click; `liveIsIndex()` drives the ` idx` row tag, the
+  `index` header label instead of `Vol 0`, and the "no order book" depth message.
   The lib loads from CDN; `static/vendor/lightweight-charts.standalone.production.js`
   is an offline fallback (browser `onerror`).
 - **NSE polled fallback (no/again-offline broker):** the Live tab is no longer
@@ -549,17 +561,21 @@ with no creds the app is unchanged.
 - Data only meaningful during NSE market hours (Mon–Fri, 09:15–15:30 IST).
 - The Live tab is optional and needs the user's own broker credentials. **Angel One
   SmartAPI is the free default** (auto TOTP login, no manual token step); **Dhan** is
-  an alternative but its Data API is a paid ₹499+GST/mo subscription. Either way it
-  currently streams **NSE cash equities only**.
+  an alternative but its Data API is a paid ₹499+GST/mo subscription. It streams
+  **NSE cash equities + the NSE indices** (Angel); **F&O legs are not wired yet**
+  (they need the `NFO` segment + expiry/strike handling). Dhan stays cash-only.
+- An **index has no volume, OI, VWAP or order book** — it's a computed level. Angel
+  sends placeholder zeros and a **sentinel book (`price -0.01, qty -1`)** for one; we
+  drop those rather than pass them on, so don't "fix" a missing index volume field.
 
 ## Roadmap / ideas (not yet built)
 
 - **Real-time broker feed** — ✅ **done for charts/quotes/depth** via a
   provider-agnostic adapter: **Angel One SmartAPI (free, default)** or **Dhan (paid
   data plan)** — `angel_feed.py` / `dhan_feed.py`, 📈 Live tab; see the live-feed
-  architecture note. Still open: route paper-trading fills/`get_price` through the
-  broker feed too, and extend the Live tab to index/F&O instruments (currently NSE
-  cash equities only).
+  architecture note. ✅ *(done — see below)* the Live tab now also streams the **NSE
+  indices**. Still open: route paper-trading fills/`get_price` through the broker feed,
+  and extend the Live tab to **F&O legs** (needs the `NFO` segment + expiry/strike UI).
 - Phone/LAN access + optional deploy.
 - ✅ *(done — see below)* `jugaad-data`/`nsefeed`-style fallback for the flaky bits:
   implemented natively as `bhavcopy.py` (EOD UDiFF ingest), no third-party dep.
@@ -589,6 +605,33 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **🚨 Fix: the access log had silently killed ALL SSE streaming** — found while live-verifying the index work below.
+ `/api/live/stream` never returned even its HTTP headers, so the Live tab's realtime path was dead (the browser just
+ fell back to the 12s NSE poll and looked slow, not broken). Cause: `observability._obs_capture` measured every
+ response with `resp.calculate_content_length()`, which on a **streamed** body calls Werkzeug's `make_sequence()` and
+ **materializes the iterator** — on an endless SSE generator that never returns, hanging the request inside
+ `after_request`. Fixed with a `if resp.is_streamed:` short-circuit (size logged as `-`, body untouched). Verified
+ live: headers now in 0.00s with real events. **Rule for future hooks: an `after_request` hook must only touch
+ headers/status, never the body.** Suite 859 → 860.
+
+- **📈 Live tab streams NSE INDICES** (roadmap item) — indices sit on the **same segment as cash**
+ (`exchangeType 1`), so this needed no new socket, subscription type or route: `angel_feed._load_scrip()` was just
+ **discarding them** at the `-EQ` filter. It now also indexes NSE rows with `instrumenttype == "AMXIDX"` (57 of them);
+ their `name` already matches our naming (`NIFTY`/`BANKNIFTY`/`INDIA VIX`/…) so only an `INDEX_ALIASES` map for other
+ spellings (`NIFTY 50`, `INDIAVIX`, `VIX`) was needed. **Equities register first + index keys use `setdefault`, so a
+ stock is never shadowed by a same-named index.** Added `_index_tokens` + `is_index()`/`index_symbols()`, and
+ `_sec2trad` (token → the master's tradingsymbol) because an index has no `-EQ` series and `rest_quote` hardcoded
+ `trad + "-EQ"`. **Honesty:** Angel fills the traded fields for an index anyway — live-observed **volume/ATP 0 and a
+ sentinel book (`price -0.01, qty -1`)** — so `_on_data` skips volume/OI/ATP/depth for index tokens and `rest_quote`
+ nulls them + stamps `isIndex`; `snapshot()` stamps `isIndex` from `_index_tokens`. UI: `indices` on
+ `/api/live/config` + the SSE status (read off the loaded master, never triggers the download) drives a one-click
+ **chip row** of the six majors, the symbol sanitiser now allows **spaces** (`INDIA VIX`), index rows get an ` idx`
+ tag + no book stripe, the header shows `index` instead of `Vol 0`, and the depth panel explains an index has no book.
+ **Live-verified 2026-08-24 (market open):** 57 indices indexed, all six majors resolved, ticks at correct paise÷100
+ scale (NIFTY 24200.50, INDIA VIX 11.60) folding into 1-min bars, ~220 real Angel 5-min candles per index from
+ `/api/live/seed`, and index records carrying only `ltp/open/high/low/prevClose/isIndex`. Dhan keeps `is_index()`
+ → `False` / `index_symbols()` → `[]` stubs so both adapters share one interface. Suite **849 → 859**.
 
 - **Fix: Conviction tab no longer stalls on "Building…"** — its SWR board returns a warming placeholder on a cold
   filter key, but the UI rendered it once and only the ≥5-min off-hours refresh re-fetched, so a board ready in ~1s

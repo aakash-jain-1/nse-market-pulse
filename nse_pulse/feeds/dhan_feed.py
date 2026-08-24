@@ -142,6 +142,17 @@ def scrip_count():
     return len(_sym2sec)
 
 
+def is_index(symbol_or_token):
+    """Part of the shared feed interface. This adapter only indexes NSE cash
+    equities (segment E / series EQ), so nothing here is ever an index."""
+    return False
+
+
+def index_symbols():
+    """Streamable NSE indices — none on this adapter (see is_index)."""
+    return []
+
+
 # ---------------------------------------------------------------------------
 # In-memory live store
 # ---------------------------------------------------------------------------
@@ -503,5 +514,6 @@ def public_status():
         "error": _coarse_error(_status["error"]),
         "errorAt": _status["errorAt"],
         "instruments": scrip_count(),
+        "indices": index_symbols(),
         "watching": watching,
     }

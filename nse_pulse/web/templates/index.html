@@ -3881,6 +3881,7 @@
         <div class="live-col">
           <h4>Watchlist</h4>
           <input id="liveAdd" class="live-add" placeholder="Add symbol (e.g. INFY) ↵" autocomplete="off">
+          <div id="liveIndexPicks" class="oc-index-picks" style="margin-bottom:10px"></div>
           <div id="liveWatchList"></div>
         </div>
         <div class="live-main">
@@ -3906,9 +3907,36 @@
       </div>`;
     }
 
+    // Indices stream on the same segment as cash equities, so the broker feed can
+    // carry them; the chips are whatever the provider actually indexed (empty in
+    // NSE-polled mode, where NSE's per-stock quote API has no index coverage).
+    function liveRenderIndexPicks() {
+      const el = document.getElementById("liveIndexPicks");
+      if (!el) return;
+      const idx = ((window._liveCfg || {}).indices || []).filter(s => LIVE_INDEX_PICKS.includes(s));
+      if (!idx.length) { el.innerHTML = ""; return; }
+      el.innerHTML = idx.map(s => `<button data-idx="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join("");
+      el.querySelectorAll("button").forEach(b =>
+        b.onclick = () => liveAddSymbol(b.getAttribute("data-idx")));
+    }
+
+    // The majors, in the order traders scan them — the master carries ~57 NSE
+    // indices, which is far too many for a one-click row.
+    const LIVE_INDEX_PICKS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "INDIA VIX"];
+
+    // An index has no traded volume or order book. The feed says so per-record
+    // (isIndex); the name list keeps rendering sane before the first tick lands.
+    function liveIsIndex(sym, rec) {
+      if (rec && rec.isIndex) return true;
+      const known = (window._liveCfg || {}).indices;
+      return Array.isArray(known) && known.length
+        ? known.includes(sym) : LIVE_INDEX_PICKS.includes(sym);
+    }
+
     function wireLiveShell() {
       const add = document.getElementById("liveAdd");
       if (add) add.onkeydown = (e) => { if (e.key === "Enter") liveAddSymbol(); };
+      liveRenderIndexPicks();
       document.querySelectorAll("#liveIvs .ivbtn").forEach(b => {
         b.classList.toggle("on", b.dataset.iv === (window._liveIv || "1"));
         b.onclick = () => liveSetIv(b.dataset.iv);
@@ -4039,6 +4067,14 @@
       if (current !== "live" || !window._lwc) return;
       const st = payload.status || {};
 
+      // The instrument master downloads on a background thread at boot, so the index
+      // list can land after this tab opened — pick the chips up when it does.
+      if (Array.isArray(st.indices)
+          && st.indices.length !== (((window._liveCfg || {}).indices) || []).length) {
+        window._liveCfg = Object.assign(window._liveCfg || {}, { indices: st.indices });
+        liveRenderIndexPicks();
+      }
+
       // Broker configured but NOT actually streaming (market closed, token pending,
       // socket dropped)? Hand off to the NSE polled fallback so the tab still shows
       // quotes + depth. Once the broker connects it takes over and we stop the poll.
@@ -4074,7 +4110,7 @@
       liveRenderWatch();
       const rec = window._liveQuotes[window._liveFocus];
       liveHeader(rec);
-      if (rec) { liveRenderDepth(rec.depth); liveUpdateForming(rec); }
+      if (rec) { liveRenderDepth(rec.depth, liveIsIndex(window._liveFocus, rec)); liveUpdateForming(rec); }
     }
 
     // ---- NSE polled fallback (no broker feed) --------------------------------
@@ -4084,7 +4120,7 @@
       return {
         symbol: sym, ltp: q.ltp, open: q.open, high: q.dayHigh, low: q.dayLow,
         prevClose: q.prevClose, close: q.prevClose, volume: q.volume,
-        atp: q.vwap, depth: q.depth || null, source: q.source,
+        atp: q.vwap, depth: q.depth || null, source: q.source, isIndex: q.isIndex,
       };
     }
 
@@ -4141,7 +4177,7 @@
       liveRenderNote();
       liveRenderWatch();
       liveHeader(rec);
-      liveRenderDepth(rec ? rec.depth : null);
+      liveRenderDepth(rec ? rec.depth : null, liveIsIndex(window._liveFocus, rec));
       liveUpdateForming(rec);
     }
 
@@ -4165,11 +4201,12 @@
         const cls = chgPct == null ? "" : (chgPct >= 0 ? "pos" : "neg");
         const sel = sym === window._liveFocus ? " sel" : "";
         const esym = escapeHtml(sym);
-        const st = depthStats(rec.depth);
+        const idx = liveIsIndex(sym, rec);
+        const st = idx ? null : depthStats(rec.depth);
         const stripe = obiStripe(st);
         const obiTip = st ? ` · book ${st.imb >= 0 ? "+" : ""}${st.imb.toFixed(0)}% (${st.imb >= 0 ? "buy" : "sell"}-heavy)` : "";
-        return `<div class="lw-row${sel}" data-sym="${esym}"${stripe ? ` style="${stripe}"` : ""} title="${esym}${obiTip}">
-          <span class="lw-sym">${esym}</span>
+        return `<div class="lw-row${sel}" data-sym="${esym}"${stripe ? ` style="${stripe}"` : ""} title="${esym}${idx ? " · index (no volume or order book)" : ""}${obiTip}">
+          <span class="lw-sym">${esym}${idx ? `<span class="muted" style="font-weight:400"> idx</span>` : ""}</span>
           <span class="lw-ltp"><span class="${cls}">${rec.ltp != null ? fmtPrice(rec.ltp) : "—"}</span>${
             chgPct == null ? "" : `<span class="${cls}" style="font-size:11px"> ${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%</span>`}</span>
           <span class="lw-x" title="Remove">×</span>
@@ -4191,9 +4228,12 @@
         `<b class="${cls}">₹${fmtPrice(rec.ltp)}</b>` +
         (chgPct == null ? "" : `<span class="${cls}">${chg >= 0 ? "+" : ""}${fmtPrice(chg)} (${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%)</span>`) +
         `<span>O ${fmtPrice(rec.open)}</span><span>H ${fmtPrice(rec.high)}</span><span>L ${fmtPrice(rec.low)}</span>` +
-        `<span>Vol ${fmtNum(rec.volume)}</span>` +
-        (rec.oi ? `<span>OI ${fmtNum(rec.oi)}</span>` : "") +
-        (rec.atp ? `<span>VWAP ${fmtPrice(rec.atp)}</span>` : "");
+        // An index is a computed level, not a traded instrument — it has no volume,
+        // OI or VWAP, so showing "Vol 0" would be a lie rather than a gap.
+        (liveIsIndex(window._liveFocus, rec) ? `<span class="muted">index</span>`
+          : `<span>Vol ${fmtNum(rec.volume)}</span>` +
+            (rec.oi ? `<span>OI ${fmtNum(rec.oi)}</span>` : "") +
+            (rec.atp ? `<span>VWAP ${fmtPrice(rec.atp)}</span>` : ""));
     }
 
     // Order-book pressure from a {bids,asks} 5-level ladder. Returns null when the
@@ -4234,9 +4274,10 @@
       return `border-right-color:${c}`;
     }
 
-    function liveRenderDepth(depth) {
+    function liveRenderDepth(depth, isIndex) {
       const el = document.getElementById("liveDepth");
       if (!el) return;
+      if (isIndex) { el.innerHTML = `<div class="live-note">An index has no order book — depth is per-stock.</div>`; return; }
       if (!depth || !depth.bids) { el.innerHTML = `<div class="live-note">No depth (market may be closed).</div>`; return; }
       const bids = depth.bids, asks = depth.asks;
       const maxq = Math.max(1, ...bids.map(b => b.qty || 0), ...asks.map(a => a.qty || 0));
@@ -4292,13 +4333,15 @@
       if (window._liveNsePoll) liveNsePollOnce();
     }
 
-    async function liveAddSymbol() {
+    async function liveAddSymbol(raw) {
       const inp = document.getElementById("liveAdd");
-      // NSE tickers are letters/digits with the odd &, - or . (e.g. M&M, BAJAJ-AUTO).
-      // Strip anything else so no markup can enter the watch set (AUDIT.md M8).
-      const sym = (inp.value || "").toUpperCase().trim().replace(/[^A-Z0-9&.\-]/g, "");
+      // NSE tickers are letters/digits with the odd &, - or . (e.g. M&M, BAJAJ-AUTO);
+      // index names also carry spaces ("INDIA VIX"). Strip anything else so no markup
+      // can enter the watch set (AUDIT.md M8).
+      const sym = (raw != null ? raw : (inp ? inp.value : "") || "")
+        .toUpperCase().replace(/[^A-Z0-9&.\- ]/g, "").replace(/\s+/g, " ").trim();
       if (!sym) return;
-      inp.value = "";
+      if (inp && raw == null) inp.value = "";
       window._liveWatch = window._liveWatch || [];
       if (!window._liveWatch.includes(sym)) window._liveWatch.push(sym);
       liveWatchSave();
@@ -4307,7 +4350,7 @@
       await liveSyncWatch();
       const note = document.getElementById("liveNote");
       if (note && (window._liveUnresolved || []).includes(sym)) {
-        note.textContent = sym + " isn't a recognized NSE equity symbol.";
+        note.textContent = sym + " isn't a recognized NSE symbol.";
         return;
       }
       await liveSeed(sym);

@@ -51,9 +51,25 @@ SCRIP_TTL = 86400          # refresh the instrument master at most once a day
 
 # SmartWebSocketV2 constants (mirror the SDK): NSE cash = exchangeType 1, and the
 # SNAP_QUOTE mode (3) carries LTP + day OHLC/volume + OI + best-5 depth.
+# NSE indices live in this SAME segment (exchangeType 1) — only their instrumenttype
+# differs — so streaming them needs no new segment, just carrying them in the master.
 NSE_CM = 1
 SNAP_QUOTE = 3
 CORR_ID = "nsepulse01"      # 10-char tracking id echoed back on errors
+
+# Angel tags the 57 NSE indices with this instrumenttype (tokens 999260xx). Their
+# `name` field already matches the naming the rest of the app uses ("NIFTY",
+# "BANKNIFTY", "NIFTYNXT50", "FINNIFTY", "MIDCPNIFTY", "INDIA VIX"), so no
+# translation table is needed — only aliases for the spellings we accept elsewhere.
+INDEX_TYPE = "AMXIDX"
+INDEX_ALIASES = {          # alias a user/UI might send -> master `name`
+    "NIFTY 50": "NIFTY", "NIFTY50": "NIFTY",
+    "NIFTY BANK": "BANKNIFTY", "BANK NIFTY": "BANKNIFTY",
+    "NIFTY NEXT 50": "NIFTYNXT50",
+    "NIFTY FIN SERVICE": "FINNIFTY", "NIFTY FINANCIAL SERVICES": "FINNIFTY",
+    "NIFTY MID SELECT": "MIDCPNIFTY", "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
+    "INDIAVIX": "INDIA VIX", "VIX": "INDIA VIX",
+}
 
 # Angel streams prices as integers in paise (₹ × 100).
 PAISE = 100.0
@@ -117,13 +133,19 @@ def sdk_available():
 # Instrument master (symbol <-> token, NSE cash EQ)
 # ---------------------------------------------------------------------------
 _scrip_lock = threading.Lock()
-_sym2sec = {}      # "RELIANCE" -> "2885"
-_sec2sym = {}      # "2885"     -> "RELIANCE"
+_sym2sec = {}       # "RELIANCE" -> "2885" | "BANKNIFTY" -> "99926009"
+_sec2sym = {}       # "2885"     -> "RELIANCE"
+_sec2trad = {}      # "2885"     -> "RELIANCE-EQ" | "99926009" -> "Nifty Bank"
+_index_tokens = set()   # tokens that are indices (no volume/OI/depth on their ticks)
 _scrip_at = 0.0
 
 
 def _load_scrip(force=False):
-    """Download + cache the NSE-equity slice of Angel's scrip master."""
+    """Download + cache the NSE slice of Angel's scrip master: cash equities (-EQ)
+    AND the NSE indices (`instrumenttype` AMXIDX).
+
+    Equities are registered FIRST and every index key goes in with `setdefault`, so a
+    tradable stock always wins a name collision against an index."""
     global _scrip_at
     with _scrip_lock:
         if _sym2sec and not force and (time.time() - _scrip_at) < SCRIP_TTL:
@@ -134,33 +156,67 @@ def _load_scrip(force=False):
             rows = r.json()
         except Exception:
             return
-        m, rev = {}, {}
+
+        eq, idx = [], []
         for row in rows:
             if row.get("exch_seg") != "NSE":
                 continue
-            sym = (row.get("symbol") or "").upper().strip()
-            if not sym.endswith("-EQ"):        # cash equities carry the -EQ series
-                continue
             tok = str(row.get("token") or "").strip()
-            trad = sym[:-3]                     # "RELIANCE-EQ" -> "RELIANCE"
-            name = (row.get("name") or "").upper().strip()
-            if not tok:
+            disp = (row.get("symbol") or "").strip()
+            if not tok or not disp:
                 continue
+            name = (row.get("name") or "").upper().strip()
+            if disp.upper().endswith("-EQ"):     # cash equities carry the -EQ series
+                eq.append((tok, disp, disp.upper()[:-3], name))
+            elif row.get("instrumenttype") == INDEX_TYPE:
+                idx.append((tok, disp, name))
+
+        m, rev, trads, indices = {}, {}, {}, set()
+        for tok, disp, trad, name in eq:
             for key in (trad, name):
                 if key:
                     m.setdefault(key, tok)
             rev[tok] = trad or name
+            trads[tok] = disp                    # "RELIANCE-EQ" — what ltpData wants
+        for tok, disp, name in idx:
+            canon = name or disp.upper()
+            for key in (canon, disp.upper()):
+                m.setdefault(key, tok)
+            for alias, target in INDEX_ALIASES.items():
+                if target == canon:
+                    m.setdefault(alias, tok)
+            rev[tok] = canon
+            trads[tok] = disp                    # "Nifty Bank" — indices have no -EQ
+            indices.add(tok)
+
         if m:
             _sym2sec.clear(); _sym2sec.update(m)
             _sec2sym.clear(); _sec2sym.update(rev)
+            _sec2trad.clear(); _sec2trad.update(trads)
+            _index_tokens.clear(); _index_tokens.update(indices)
             _scrip_at = time.time()
 
 
 def resolve(symbol):
-    """Symbol -> NSE-equity token (str), or None."""
+    """Symbol -> NSE token (str) for a cash equity or an index, or None."""
     if not _sym2sec:
         _load_scrip()
     return _sym2sec.get((symbol or "").upper().strip())
+
+
+def is_index(symbol_or_token):
+    """True for an NSE index — its ticks carry no volume, OI or depth."""
+    s = str(symbol_or_token or "").strip()
+    if not s:
+        return False
+    return s in _index_tokens or _sym2sec.get(s.upper()) in _index_tokens
+
+
+def index_symbols():
+    """Canonical names of the streamable NSE indices (drives the Live tab chips)."""
+    if not _sym2sec:
+        _load_scrip()
+    return sorted(_sec2sym[t] for t in _index_tokens if t in _sec2sym)
 
 
 def scrip_count():
@@ -310,20 +366,27 @@ def _on_data(wsapp, msg):
             rec["symbol"] = _sec2sym.get(tok)
         if ltp is not None:
             rec["ltp"] = ltp
-        for src, dst in (("open_price_of_the_day", "open"),
-                         ("high_price_of_the_day", "high"),
-                         ("low_price_of_the_day", "low"),
-                         ("average_traded_price", "atp"),
-                         ("closed_price", "prevClose")):
+        idx = tok in _index_tokens
+        fields = [("open_price_of_the_day", "open"),
+                  ("high_price_of_the_day", "high"),
+                  ("low_price_of_the_day", "low"),
+                  ("closed_price", "prevClose")]
+        if not idx:
+            fields.append(("average_traded_price", "atp"))
+        for src, dst in fields:
             if src in msg:
                 rec[dst] = _px(msg.get(src))
-        if "volume_trade_for_the_day" in msg:
-            rec["volume"] = msg.get("volume_trade_for_the_day")
-        if msg.get("open_interest"):
-            rec["oi"] = msg.get("open_interest")
-        if "best_5_buy_data" in msg or "best_5_sell_data" in msg:
-            rec["depth"] = _norm_depth(msg.get("best_5_buy_data"),
-                                       msg.get("best_5_sell_data"))
+        # An index is a computed level, not a traded instrument. Angel still sends
+        # these fields for one, but as zeros and a sentinel book (price -0.01,
+        # qty -1) — recording that would ship numbers that look real and aren't.
+        if not idx:
+            if "volume_trade_for_the_day" in msg:
+                rec["volume"] = msg.get("volume_trade_for_the_day")
+            if msg.get("open_interest"):
+                rec["oi"] = msg.get("open_interest")
+            if "best_5_buy_data" in msg or "best_5_sell_data" in msg:
+                rec["depth"] = _norm_depth(msg.get("best_5_buy_data"),
+                                           msg.get("best_5_sell_data"))
         if ltp is not None:
             _update_bar(tok, now_ms, ltp, rec.get("volume"))
     _status["lastMsgAt"] = now_ms
@@ -420,6 +483,10 @@ def snapshot(symbols=None):
             if bar:
                 r["bar"] = {"t": bar["t"], "o": bar["o"], "h": bar["h"],
                             "l": bar["l"], "c": bar["c"], "v": bar["v"]}
+            if tok in _index_tokens:
+                # An index has no traded volume, OI or order book — say so, so the UI
+                # renders "—" instead of a misleading 0 / empty depth ladder.
+                r["isIndex"] = True
             out[sym] = r
         return out
 
@@ -493,20 +560,31 @@ def rest_quote(symbol):
     tok = resolve(sym)
     if not tok:
         return None
-    trad = _sec2sym.get(tok) or sym
+    # The exchange tradingsymbol as the master spells it ("RELIANCE-EQ", "Nifty Bank");
+    # an index has no -EQ series, so this can't be reconstructed from the name.
+    trad = _sec2trad.get(tok) or ((_sec2sym.get(tok) or sym) + "-EQ")
     try:
+        q = None
         if hasattr(smart, "getMarketData"):
             resp = smart.getMarketData("FULL", {"NSE": [tok]})
             fetched = (((resp or {}).get("data") or {}).get("fetched") or [])
             if fetched:
-                return _map_market_data(sym, fetched[0])
-        resp = smart.ltpData("NSE", trad + "-EQ", tok)
-        d = (resp or {}).get("data") or {}
-        if d.get("ltp") is not None:
-            return _map_ltp(sym, d)
+                q = _map_market_data(sym, fetched[0])
+        if q is None:
+            resp = smart.ltpData("NSE", trad, tok)
+            d = (resp or {}).get("data") or {}
+            if d.get("ltp") is not None:
+                q = _map_ltp(sym, d)
+        if q is not None and tok in _index_tokens:
+            # Same honesty as the streaming path: an index is a computed level, so
+            # report its traded-only fields as absent rather than as a real zero.
+            q["isIndex"] = True
+            q["volume"] = q["value"] = q["vwap"] = None
+            empty = [{"price": None, "qty": None}] * 5
+            q["depth"] = {"bids": list(empty), "asks": list(empty)}
+        return q
     except Exception:
         return None
-    return None
 
 
 # Angel's historical (getCandleData) API is rate-limited on THREE sliding windows —
@@ -847,5 +925,9 @@ def public_status():
         "error": _coarse_error(_status["error"]),
         "errorAt": _status["errorAt"],
         "instruments": scrip_count(),
+        # Read straight off the loaded master (never triggers the download — this
+        # runs on every /api/live/config poll). Empty until the feed has started,
+        # which is honest: indices are only streamable through the broker.
+        "indices": sorted(_sec2sym[t] for t in _index_tokens if t in _sec2sym),
         "watching": watching,
     }
