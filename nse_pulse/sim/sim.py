@@ -165,19 +165,57 @@ def _ensure_migrated():
 # the lock so N simultaneous cold callers do ONE read, not N. Callers treat the
 # returned list as read-only (verified across every aggregation that uses it).
 # ---------------------------------------------------------------------------
-_trades_cache = {}                    # book -> (epoch, list[trade])
+_trades_cache = {}                    # book -> (epoch, list[trade], suspect_count)
 _trades_cache_lock = threading.Lock()
+
+# A price of exactly 0 reaching the resolver produced an exact ±100% excursion:
+# _move_pct(dir, entry, 0) is -100 for a LONG and +100 for a SHORT. So a LONG that
+# "lost 100%" or a SHORT that "gained 100%" means the underlying printed zero — which
+# never happens to a listed stock — and the trade was closed by a hole in the data, not
+# by price. Both zero paths are guarded now (see intrabar._usable and _refresh_trade),
+# but 27 such trades were already written to the ledger before that, so the aggregate
+# views filter them out. Deliberately NOT deleted: the rows stay in SQLite, auditable,
+# and the excluded count is reported (see summary's `dataQuality`).
+#
+# The threshold is exact-value, not a band: measured on the real ledger the phantoms sit
+# at precisely ±100.0 while the nearest legitimate neighbours are at -98.x / +98.x, so
+# this cannot catch a real (if wild) trade.
+_SUSPECT_EPS = 1e-9
+
+
+def is_suspect(t):
+    """Was this trade closed by a zero price rather than by the market? (pure)"""
+    if t.get("direction") == "SHORT":
+        return (t.get("mfePct") or 0) >= 100.0 - _SUSPECT_EPS
+    return (t.get("maePct") or 0) <= -100.0 + _SUSPECT_EPS
 
 
 def _all_trades_cached(book="cash"):
+    """The whole ledger for a book, minus zero-price phantoms. Memoised per book on
+    db's write epoch, so it's shared across a tab's endpoint burst yet never stale."""
     epoch = db.sim_trades_epoch()
     with _trades_cache_lock:
         hit = _trades_cache.get(book)
         if hit is not None and hit[0] == epoch:
             return hit[1]
-        trades = db.sim_all_trades(book=book)
-        _trades_cache[book] = (epoch, trades)
+        raw = db.sim_all_trades(book=book)
+        trades = [t for t in raw if not is_suspect(t)]
+        _trades_cache[book] = (epoch, trades, len(raw) - len(trades))
         return trades
+
+
+def data_quality(book="cash"):
+    """How many ledger rows the views are excluding, and why — so a filtered scorecard
+    is visibly filtered rather than quietly different."""
+    _all_trades_cached(book)                     # ensure the count is populated
+    with _trades_cache_lock:
+        hit = _trades_cache.get(book)
+        excluded = hit[2] if hit and len(hit) > 2 else 0
+    return {
+        "excluded": excluded,
+        "reason": ("closed by a zero price (exact +/-100% excursion), not by the market"
+                   if excluded else None),
+    }
 
 
 def _price(symbol):
@@ -1219,6 +1257,7 @@ def summary(strategy_id=None, book="cash"):
         "regime": regime,
         "pick": strategy_of_the_day(regime.get("label"), lb=lb)["pick"],
         "strategies": cards,
+        "dataQuality": data_quality(book),
         "generatedAt": _now(),
     }
 

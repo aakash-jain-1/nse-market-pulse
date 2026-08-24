@@ -24,6 +24,13 @@ def _patch(attr, value):
     return lambda: setattr(sim, attr, orig)
 
 
+def _patch_attr(obj, attr, value):
+    """Same, on any object (e.g. the db module sim reads through)."""
+    orig = getattr(obj, attr)
+    setattr(obj, attr, value)
+    return lambda: setattr(obj, attr, orig)
+
+
 def _trade(direction="LONG", entry=100.0, stop=98.0, target=104.0, qty=1000.0,
            opened_date="2026-07-16", status="OPEN", ltp=100.0, risk=RISK):
     return {
@@ -176,6 +183,53 @@ def test_refresh_trade_no_price_within_horizon_stays_open():
     finally:
         restore2(); restore()
     assert t["status"] == "OPEN"            # no price, still within horizon -> untouched
+
+
+def test_is_suspect_flags_only_a_zero_price_exit():
+    """A price of exactly 0 yields an exact -100% (LONG) / +100% (SHORT) excursion. On
+    the real ledger the phantoms sit at precisely +/-100.0 while the nearest legitimate
+    neighbours are ~98%, so the predicate must be exact-valued, not a wide band."""
+    assert sim.is_suspect({"direction": "LONG", "maePct": -100.0, "mfePct": 0.0})
+    assert sim.is_suspect({"direction": "SHORT", "mfePct": 100.0, "maePct": -0.3})
+    # a real, merely violent trade is NOT suspect
+    assert not sim.is_suspect({"direction": "LONG", "maePct": -98.5, "mfePct": 0.0})
+    assert not sim.is_suspect({"direction": "SHORT", "mfePct": 98.5, "maePct": 0.0})
+    # the sign has to match the impossible direction for that side
+    assert not sim.is_suspect({"direction": "LONG", "mfePct": 100.0, "maePct": -1.0})
+    assert not sim.is_suspect({"direction": "SHORT", "maePct": -100.0, "mfePct": 1.0})
+    assert not sim.is_suspect({"direction": "LONG"})          # missing fields
+
+
+def test_views_exclude_zero_price_phantoms_but_keep_the_rows():
+    """The 27 phantoms already in the ledger must vanish from the scorecards without
+    being deleted — and the exclusion has to be reported, not silent."""
+    ledger = [
+        {"id": "1", "strategy": "meanrev", "direction": "LONG", "status": "STOP",
+         "maePct": -100.0, "mfePct": 0.0, "rMultiple": -1.0},       # phantom stop
+        {"id": "2", "strategy": "meanrev", "direction": "SHORT", "status": "TARGET",
+         "mfePct": 100.0, "maePct": -0.3, "rMultiple": 2.0},        # phantom win
+        {"id": "3", "strategy": "meanrev", "direction": "LONG", "status": "STOP",
+         "maePct": -2.1, "mfePct": 0.4, "rMultiple": -1.0},         # real
+    ]
+    calls = {"n": 0}
+
+    def _all(book="cash"):
+        calls["n"] += 1
+        return list(ledger)
+
+    r1 = _patch_attr(sim.db, "sim_all_trades", _all)
+    r2 = _patch_attr(sim.db, "sim_trades_epoch", lambda: 1)
+    sim._trades_cache.clear()
+    try:
+        kept = sim._all_trades_cached("cash")
+        assert [t["id"] for t in kept] == ["3"]          # both phantoms filtered
+        dq = sim.data_quality("cash")
+        assert dq["excluded"] == 2 and dq["reason"]
+        assert calls["n"] == 1                           # still one shared read
+        assert len(ledger) == 3                          # nothing deleted
+    finally:
+        sim._trades_cache.clear()
+        r2(); r1()
 
 
 def test_refresh_trade_reads_a_zero_price_as_no_price():

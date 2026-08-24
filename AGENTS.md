@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 902 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 904 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +142,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 902 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 904 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -647,6 +647,20 @@ with no creds the app is unchanged.
 
 ## Done recently
 
+- **🧯 Phantom trades excluded from the scorecards (flagged, not deleted)** — the sweep below fixed the *sources* of a
+ zero price, but 27 trades it had already closed were sitting in the ledger, poisoning every aggregate that reads it.
+ Scanning both books for the arithmetic signature of a ₹0 exit found **27 of 16,024 rows (0.17%), all in the cash book**
+ — and it corrected the earlier count: a zero is a −100% *loss* for a LONG but a +100% *gain* for a SHORT, so alongside
+ the **14 phantom STOPs** there were **13 phantom TARGETs** (fake wins, R ≈ +1.96) that the LONG-only scan had missed.
+ New `sim.is_suspect(t)` (pure) matches on the exact ±100.0 excursion — deliberately exact-valued, not a band: on the
+ real ledger the phantoms sit at precisely ±100.0 while the nearest legitimate neighbours are ~98%, so it cannot catch
+ a real trade. `sim._all_trades_cached()` filters them, which covers **every** sim view for free (summary, leaderboards,
+ daily matrix, performance, analytics) since they all read through that one cache. The rows are **kept in SQLite** —
+ auditable, and no migration to get wrong — and `sim.data_quality()` reports the count through `summary().dataQuality`
+ so the Sim tab says out loud that it's filtering. Measured effect: `meanrev`'s avg MAE −2.49% → **−1.74%** (a 30%
+ overstatement) and its win rate 53.37% → 53.78%; the `adaptive` track that follows the leaderboards was tainted too.
+ Suite **902 → 904**.
+
 - **🧯 Zero-price sweep — a "0" can no longer reach the financial math** — the broker-first work below caught one
  instance (NSE's quote returning `ltp: 0.0`); this is the systematic follow-up across every price entry point. **The
  worst one was real and measured, not theoretical:** NSE's live option chain reports `lastPrice: 0` for any leg that
@@ -661,10 +675,11 @@ with no creds the app is unchanged.
  skips unusable candles (non-positive, inverted, or missing) — an all-zero bar put the LOW at 0, tripping ANY long stop
  and writing a **phantom STOP at -100% MAE permanently into the ledger**, from where it poisons expectancy → the regime
  leaderboards → the adaptive strategy pick that reads them. Also guarded, defensively: `bhavcopy.eod_close`,
- `nse_client.get_price_map`, and `backtest_daily._features`. **Honest scope:** the two *data feeds* are clean in practice —
- 0 suspect bars in 8,134 sampled 1-min candles, 0 bad rows in 3,354 cash + 214 futures bhavcopy rows — so those guards
- protect against a rare but **irreversible** corruption; the option-chain zeros, by contrast, are routine and were
- actively wrong every day. Suite **894 → 902**.
+ `nse_client.get_price_map`, and `backtest_daily._features`. **Verified afterwards — and it corrected the write-up:**
+ sampling the *feeds* looked clean (0 suspect bars in 8,134 candles, 0 bad rows in 3,354 cash + 214 futures rows), but
+ scanning the **ledger** found **27 phantom exits in 16,024 trades (0.17%)** — all on thin names, which is why sampling
+ liquid symbols missed them. **Lesson: sample the accumulated ledger, not just today's feed.** Those pre-existing rows
+ are excluded from the scorecards by the data-quality filter above. Suite **894 → 902**.
 
 - **💰 Paper fills / `get_price` / sim MTM now price BROKER-FIRST** — closes the last open leg of the real-time-feed
  roadmap item. The broker socket already knew a live price for anything being watched, yet every paper fill and every

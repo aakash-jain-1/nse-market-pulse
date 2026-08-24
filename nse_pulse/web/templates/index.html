@@ -3386,7 +3386,15 @@
       const bookBadge = (sum.book === "fno")
         ? `<div class="chart-note" style="margin:0 0 8px"><span class="badge" style="background:var(--accent);color:#04121f;font-weight:700;padding:2px 8px">🎯 F&amp;O BOOK</span> Dedicated parallel book — F&amp;O-eligible names only, same strategies &amp; ₹${fmtNum(sum.riskPerTrade || 2000)}/trade sizing as the all-market Sim, so the two are directly comparable.</div>`
         : "";
-      const banner = bookBadge + renderSimBanner(sum.regime);
+      // A filtered scorecard must LOOK filtered — say so rather than quietly
+      // reporting different numbers than the raw ledger holds.
+      const dq = sum.dataQuality || {};
+      const dqNote = dq.excluded ? `<div class="chart-note" style="margin:0 0 8px">🧯 <b>${dq.excluded}</b>
+        historical trade(s) excluded from every scorecard below: they were ${escapeHtml(dq.reason || "")}
+        — a listed stock never prints ₹0, so those exits never happened. The rows stay in the
+        ledger (nothing was deleted); the source of the zero is fixed, so no new ones can be
+        written.</div>` : "";
+      const banner = bookBadge + dqNote + renderSimBanner(sum.regime);
       const pick = renderSimPick(sum.pick);
       const cards = renderSimCards(sum);
       const hint = anyTrades ? "" :

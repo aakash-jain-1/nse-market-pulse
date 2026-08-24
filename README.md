@@ -1040,7 +1040,9 @@ retry after cooldown. One gentle daily pass is the safe pattern (the WAF trips o
   or marked to a fake −100%, and a symbol nothing can price stays honestly blank. A
   genuine ₹0.10 minimum-tick premium still prices normally. The same rule guards the
   candle feed: a zero-priced or inverted bar is skipped rather than being read as a low
-  of ₹0 that trips every stop.
+  of ₹0 that trips every stop. **27 trades closed by a zero before those guards existed
+  are still in the ledger** — they're excluded from every Sim scorecard (which says so,
+  above the numbers) rather than deleted, so the raw history stays auditable.
 - The core app needs **no API key**; **no secrets in the repo** (`.gitignore`
   covers `.env`, `*.db`, state JSON, CSVs, `logs/`, and the broker configs
   `angel_config.json` / `dhan_config.json`).

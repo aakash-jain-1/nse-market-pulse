@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-tests/               Unit tests — 902 across 39 suites; import `from nse_pulse.<sub> import <mod>`
+  tests/               Unit tests — 904 across 39 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -357,7 +357,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **902 tests** across 39 suites (grow it with every change;
+- `python -m pytest -q` — **904 tests** across 39 suites (grow it with every change;
   never shrink it).
 - **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
   committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
@@ -537,6 +537,34 @@ a documented caveat).
 
 ## Findings & change log (newest first, IST)
 
+### 2026-08-24 — 🧯 Phantom trades excluded from the scorecards, flagged not deleted (suite 902 → 904)
+- **Why:** the sweep below plugged the *sources* of a zero price, but the trades those zeros had already closed were
+  still in `sim_trades`, and every aggregate view reads that ledger. Fixing the leak doesn't un-poison the history.
+- **The count was wrong, and verifying it fixed the write-up.** The sweep's scan looked for `maePct == -100`, which is
+  the LONG signature only. A zero is a −100% *loss* for a LONG but a **+100% *gain* for a SHORT**, so it also
+  manufactured **fake winners**. Scanning both signatures across both books: **27 of 16,024 rows (0.17%)** —
+  **14 phantom STOPs + 13 phantom TARGETs** (R ≈ **+1.96**, i.e. the corruption was inflating expectancy as well as
+  MAE), **all in the `cash` book, F&O clean (0 of 4,088)**. Sample the ledger for *both* directions of an impossible
+  move, not just the one you expect.
+- **Decision: flag, don't delete.** The rows stay in SQLite — auditable, and no destructive migration to get wrong —
+  and the views exclude them.
+- **How:** `sim.is_suspect(t)` (pure) matches the exact ±100.0 excursion for the trade's direction. **Deliberately
+  exact-valued, not a band:** measured on the real ledger the phantoms sit at precisely ±100.0 while the nearest
+  legitimate neighbours are at −98.x / +98.x, so it cannot swallow a real (if violent) trade. The filter goes in
+  **`sim._all_trades_cached()`** — the single epoch-keyed read every sim view shares — so summary, regime/vol
+  leaderboards, daily matrix, performance, analytics and the strategy pick are all covered by one change, with no
+  response-shape churn and no per-view drift.
+- **Made visible, not silent:** `sim.data_quality(book)` returns `{excluded, reason}`, surfaced as
+  `summary().dataQuality` and rendered as a note above the Sim scorecards. A filtered scorecard that doesn't say it's
+  filtered is just a different set of numbers.
+- **Measured effect** (cash book, 11,936 → 11,909 rows used): `meanrev` avg MAE **−2.49% → −1.74%** (a ~30%
+  overstatement removed), win rate 53.37% → **53.78%**, expectancy R 0.3576 → 0.3681; the **`adaptive`** track that
+  follows those leaderboards was tainted too (avg MAE −2.01% → −1.84%).
+- **Tests (+2, 902 → 904):** `is_suspect` accepting both phantom signatures while rejecting a real −98.5% / +98.5%
+  trade, the wrong-sign case, and missing fields; and the view-level filter — phantoms gone from
+  `_all_trades_cached`, `data_quality` reporting the count, still **one** shared DB read, and the source list
+  unmutated (nothing deleted).
+
 ### 2026-08-24 — 🧯 Zero-price sweep: a `0` can no longer reach the financial math (suite 894 → 902)
 - **Why:** the broker-first work below tripped over ONE instance of this (NSE's quote returning `ltp: 0.0` for a
   stale ticker). That smelled systemic, so this is the deliberate sweep of every price entry point. It found a
@@ -561,12 +589,23 @@ a documented caveat).
   `ideas_journal._move_pct` (a 0 no longer becomes a -100% move that writes a sticky STOP verdict and drags the
   Ideas hit-rate); `bhavcopy.eod_close`, `nse_client.get_price_map`'s `absorb`, and `backtest_daily._features`
   (defensive — same rule at the remaining sources).
-- **Honest scope — which of these were actually firing.** The option-chain zeros are routine and were wrong every
-  single day. The two *bar/archive* feeds, by contrast, measured **clean**: 0 suspect bars in **8,134** sampled 1-min
+- **Scope — and a correction found by verifying afterwards.** The option-chain zeros are routine and were wrong every
+  day. For the price/candle path I first sampled the *feeds* and found them clean — 0 suspect bars in **8,134** 1-min
   candles (8 symbols × 5 days: no None/0/negative, no low > high) and 0 bad rows in **3,354** cash + **214** futures
-  bhavcopy rows. Those guards are therefore insurance against a rare but **irreversible** corruption, not fixes for
-  an observed one — worth having precisely because a bad candle writes a permanent phantom trade, and worth labelling
-  honestly rather than overselling.
+  bhavcopy rows — and concluded the guard was mere insurance. **That conclusion was wrong.** Scanning the actual
+  `sim_trades` ledger found **14 phantom stops out of 16,024 trades**: every one **LONG**, every one **STOP**, exit
+  exactly == stop, **R exactly −1.0**, and **`maePct` exactly −100.0** — a −100% adverse excursion on a LONG is
+  definitionally a price of 0, so these were closed by a hole in the data, not by price. All are thin/low-priced
+  names (TAKE, ABAN, BILVYAPAR, RELINFRA, BURNPUR, FERMENTA, RAMCOSYS), which is why sampling liquid symbols missed
+  it. Lesson: sample the **ledger** (the accumulated outcome), not just today's feed. *(Follow-up: this count was
+  itself incomplete — the same zero reads as **+100%** on a SHORT, so there were 13 phantom **winners** too;
+  27 total. See the entry above.)*
+- **What the corruption cost:** on `meanrev` (10 of its 1,355 closed trades) expectancy R **0.3499 → 0.3599** and
+  avg MAE **−2.45% → −1.73%** with them excluded — so MAE was overstated by ~30% while expectancy moved modestly. It
+  also propagated into the **`adaptive`** track (2 trades mirroring meanrev's RELINFRA picks), i.e. into the very
+  leaderboards the strategy-of-the-day reads.
+- **Which zero path wrote them is not determinable after the fact** — `intrabar.resolve` (a zero bar) and
+  `sim._refresh_trade` (a zero LTP) leave an identical fingerprint. Both are now guarded.
 - **Gotcha to remember:** NSE's RELIANCE chain also carries a junk **`strike 0.0`** row. Don't assume chain strikes
   are sane.
 - **Tests (+8, 894 → 902):** an untraded leg reading as no-price (0 / 0.0 / negative / missing, with a real premium
