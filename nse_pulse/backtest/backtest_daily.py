@@ -42,6 +42,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+from nse_pulse.core import corporate_actions
 from nse_pulse.core import db
 from nse_pulse.core import intrabar
 from nse_pulse.core import nse_client as nse
@@ -924,6 +925,13 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
         if not hist:
             return {"message": "No history returned from NSE (rate-limited or "
                     "off-hours). Try again.", "source": source}
+    # Corporate-action adjust ONCE here, so both sources get it: everything downstream
+    # is pure over `hist`. Unadjusted, a split ex-date hands meanrev/gap/vol_breakout/
+    # rel_strength a phantom -80% signal and leaves hi20/lo20 straddling two price
+    # scales for 20+ sessions. See core/corporate_actions.py.
+    ca_stats = {}
+    hist = corporate_actions.adjust_grouped(hist, stats=ca_stats)
+
     expiry = meta.get("expiry")
     cache = meta.get("cache") or {"barsHit": 0, "barsFetched": 0}
 
@@ -1008,6 +1016,12 @@ def _run_impl(days=30, universe_size=40, max_hold=5, chunks=3, chunk_days=80,
         "oiNames": sum(1 for v in ois.values() if v),
         "cache": {**cache, "ttlHours": CACHE_TTL_HOURS, "minCache": min_cache,
                   "store": db.eod_stats()},
+        # How many names in THIS sample had a split/bonus rescaled out. Reported rather
+        # than silent: it's the difference between a real signal and a phantom one, so a
+        # reader can see whether the window contained any.
+        "corporateActions": {"symbols": ca_stats.get("adjusted", 0),
+                             "events": ca_stats.get("events", 0),
+                             "detail": (ca_stats.get("detail") or [])[:25]},
         "strategies": rows,
         "totals": _scorecard(all_trades),
         "regimeLeaderboard": regime_lb,

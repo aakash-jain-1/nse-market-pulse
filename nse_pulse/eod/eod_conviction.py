@@ -425,6 +425,7 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
     {date, longs, shorts, count, universe, scanned, filters, coverage,
     adaptive, adaptiveWeights, note}.
     """
+    from nse_pulse.core import corporate_actions as ca
     from nse_pulse.core import db
     try:
         limit = _clip(int(limit), 1, 100)
@@ -436,7 +437,9 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         min_pillars = 2
 
     latest = db.eod_latest_date()
-    grouped = db.eod_bars_all(since=_es._since(latest, lookback))
+    # Corporate-action adjusted: the board fuses breakout + trend + volume pillars, all
+    # of which an unadjusted split ex-date corrupts for 20+ sessions.
+    grouped = ca.bars_all(since=_es._since(latest, lookback))
     oi_all = db.eod_oi_all(since=_es._since(latest, lookback))
     deal_map = _es._deal_map(with_deals)
 

@@ -238,6 +238,7 @@ def scan(limit_sectors=None, names_per_sector=5, lead_sectors=4,
     sectors, leaders, laggards, universe, classified, scanned, coverage, note}.
     Needs no network — bars come from db.eod_bars.
     """
+    from nse_pulse.core import corporate_actions as ca
     from nse_pulse.core import db
     try:
         names_per_sector = _es._clip(int(names_per_sector), 1, 25)
@@ -249,7 +250,9 @@ def scan(limit_sectors=None, names_per_sector=5, lead_sectors=4,
         lead_sectors = 4
 
     latest = db.eod_latest_date()
-    grouped = db.eod_bars_all(since=_es._since(latest, lookback))
+    # Corporate-action adjusted — a split ex-date would otherwise show up as a huge
+    # negative blended return, i.e. a phantom laggard dragging its sector's median RS.
+    grouped = ca.bars_all(since=_es._since(latest, lookback))
 
     records, classified = _collect(grouped, min_price, min_value_cr, short, long)
     scanned = len(records)

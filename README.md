@@ -292,6 +292,7 @@ flowchart TB
         PP["paper.py<br/>• equity/futures/option fills<br/>• MTM P&L"]
         SL["snapshot_logger.py<br/>• market-hours loop (60s) + watchdog<br/>• snapshots + IV + context capture<br/>• health/heartbeat"]
         DBM["db.py<br/>• SQLite (WAL)<br/>• snapshots / iv_log / context_log"]
+        CA["corporate_actions.py<br/>• detect split/bonus/demerger<br/>• back-adjust bars ON READ<br/>• pure; db keeps NSE's raw prices"]
     end
 
     NSEAPI["🌐 NSE India"]
@@ -321,6 +322,8 @@ flowchart TB
     EO -.shared FO text.-> RO
     EO -.option pillar.-> CV
     RO -.rollover pillar.-> CV
+    DBM -.raw bars.-> CA
+    CA -.split-adjusted bars.-> ES & CV
 ```
 
 ---
@@ -599,6 +602,18 @@ flowchart LR
   **lot-size fallback** and can bulk-load the whole market into the local history
   cache to **broaden the daily-backtest universe**. Dependency-free (the small
   bhavcopy slice of `jugaad-data`, implemented in-house).
+- **📐 Split / bonus adjustment** (`corporate_actions.py`): NSE publishes **raw traded
+  prices**, so the day a stock splits 1:10 looks exactly like a **−90% crash** — and it
+  really is in our data (ANGELONE −90.1%, KOTAKBANK −80.3%, MCX −79.8%, and 10 more).
+  Left alone, that hands the strategies a huge fake signal on the ex-date, and then makes
+  the name look ~90% below its 20-day high for weeks afterwards, inventing breakdowns and
+  hiding real breakouts. Every history read now detects these (a big one-session move that
+  lands on a real split/bonus ratio, confirmed by the price staying on the new scale) and
+  **rescales the older bars onto today's price**, so the series is continuous and the
+  ex-date shows its true move — ANGELONE's −90.1% becomes **−1.0%**. Today's *prices are
+  never touched*, only history, and `data/market.db` keeps exactly what NSE published.
+  Measured on the backtest the app actually uses for strategy selection: **12 fake trades
+  removed and expectancy up from +0.02R to +0.04R**.
 
 ---
 
@@ -868,6 +883,7 @@ nse-market-pulse/
 │   │   ├── nse_quote.py        # Quote/chart/depth + option chain + Greeks + OHLCV candles
 │   │   ├── db.py               # SQLite store (time-series)
 │   │   ├── intrabar.py         # Minute-candle trade resolver (target/stop/MFE/MAE)
+│   │   ├── corporate_actions.py # Split/bonus/demerger detect + back-adjust daily bars on read
 │   │   ├── snapshot_logger.py  # Background logger (snapshots + IV + context + alerts) → SQLite
 │   │   └── paths.py            # Repo-root-anchored paths — data/, config, state, logs stay at root
 │   ├── feeds/
@@ -903,7 +919,7 @@ nse-market-pulse/
 │   └── cli/
 │       ├── nse_demand.py       # Standalone CLI scanner
 │       └── db_inspect.py       # Read-only SQLite inspector CLI (overview/tail/SQL)
-├── tests/                  # 826 unit tests, 36 suites (import from nse_pulse.<sub>)
+├── tests/                  # 937 unit tests, 40 suites (import from nse_pulse.<sub>)
 ├── docs/                   # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/                   # (gitignored) market.db + any legacy CSVs
 ├── *.example.json          # Config templates (angel/dhan/notify) → copy to gitignored real files

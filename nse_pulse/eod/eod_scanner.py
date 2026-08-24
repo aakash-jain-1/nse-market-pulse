@@ -386,6 +386,7 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
     a 🔄 badge (+ score bonus on the bull side). Returns {view, date, rows, universe,
     scanned, matched, coverage, note}. Needs no network for the bars (from db.eod_bars);
     deals/rollover add one tiny cached fetch each when enabled."""
+    from nse_pulse.core import corporate_actions as ca
     from nse_pulse.core import db
     view = view if view in _VIEW_SPEC else "setups"
     try:
@@ -395,7 +396,10 @@ def scan(view="setups", limit=50, min_price=20.0, min_value_cr=1.0,
     limit = _clip(limit, 1, 300)
 
     latest = db.eod_latest_date()
-    grouped = db.eod_bars_all(since=_since(latest, lookback))
+    # Corporate-action adjusted: an unadjusted split ex-date reads as a -80% breakdown
+    # and keeps the name pinned far below its 20-day high for weeks (see
+    # core/corporate_actions.py). The newest bars are untouched, so prices stay real.
+    grouped = ca.bars_all(since=_since(latest, lookback))
     deal_map = _deal_map(with_deals)
     smap = _sector_strength(grouped, min_price, min_value_cr)
     rmap = _rollover_map(with_rollover)

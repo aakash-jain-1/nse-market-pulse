@@ -52,6 +52,7 @@ NSE/
 │   │   ├── nse_quote.py       # Per-stock quote/chart/depth (NextApi) + OHLCV candles (charting)
 │   │   ├── db.py              # SQLite store (snapshots / IV / context / sim_trades + EOD & 1-min bar cache)
 │   │   ├── intrabar.py        # Minute-candle trade resolver (target/stop/MFE/MAE) — pure funcs
+│   │   ├── corporate_actions.py # Split/bonus/demerger detect + back-adjust daily bars on READ — pure funcs
 │   │   ├── snapshot_logger.py # Background logger (snapshots + IV + strategy-context + alerts) → SQLite
 │   │   ├── paths.py           # Repo-root-anchored paths — keeps data/, config, state, logs at the repo root
 │   │   └── swr.py             # Stale-while-revalidate cache — serve stale + single-flight bg refresh (non-blocking endpoints)
@@ -88,7 +89,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 919 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 937 unit tests across 40 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +143,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 919 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 937 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/corporateactions/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -596,10 +597,14 @@ with no creds the app is unchanged.
 - OI price-direction coverage is partial pre-market; improves during 09:15–15:30 IST.
 - All endpoints are unofficial and can change without notice.
 - Data only meaningful during NSE market hours (Mon–Fri, 09:15–15:30 IST).
-- **Daily bars carry NO corporate-action adjustment.** NSE serves raw traded prices, so a
-  split/bonus ex-date reads as a genuine ±50–90% move and contaminates the trailing
-  20-day features for weeks (see roadmap item 1 for the measured list and the fix).
-  Neither the zero-price guard nor `prevClose` can detect it.
+- **Corporate actions are adjusted on READ, and only where the ex-date is bracketed by
+  two stored sessions** (`core/corporate_actions.py`). NSE still serves raw traded
+  prices, so `db.eod_bars` keeps the crash — every *feature* path goes through
+  `ca.bars_all()` / `adjust_grouped()` instead. Residual gap worth knowing: an ex-date
+  falling inside a **backfill hole** stays unadjusted, because across a hole the split
+  factor can't be separated from real drift over the missing sessions (measured: 60
+  symbols whose two stored blocks straddle a 17-session hole). A **contiguous
+  backfill** is the fix, not a detector change.
 - The Live tab is optional and needs the user's own broker credentials. **Angel One
   SmartAPI is the free default** (auto TOTP login, no manual token step); **Dhan** is
   an alternative but its Data API is a paid ₹499+GST/mo subscription. With Angel it
@@ -627,30 +632,7 @@ and the calibration→adaptive-weighting loop all landed. `docs/AUDIT.md` and
 
 Ranked by expected value, highest first:
 
-1. **📐 Corporate-action (split / bonus) adjustment — the sharpest known correctness
-   gap.** Nothing in the pipeline adjusts for splits or bonuses, so an ex-date prints
-   as a fake crash and stays in the features for weeks. **Measured** in our own
-   `eod_bars` (2026-08-24, 80,328 bars / 3,480 symbols): **36 close-to-close moves
-   >50%**, and the biggest are unambiguous corporate actions in exactly the liquid F&O
-   names the strategies trade — `KOTAKBANK` −80.3% (ratio 5.07×), `MCX` −79.8%
-   (4.96×), `CAMS` −80.4% (5.10×), `NUVAMA` −80.4% (5.10×), `ANGELONE` −90.1%
-   (10.10×), `VEDL` −64.9% (2.85×). A NIFTY bank heavyweight does not fall 80% in a
-   session and those ratios are textbook split/bonus factors. Damage is twofold:
-   `backtest_daily._features` builds `ret1` from the **unadjusted** `prevClose`, so the
-   ex-date hands `meanrev` / `gap` / `vol_breakout` / `rel_strength` a huge phantom
-   signal; and `hi20` / `lo20` / `hh` / `ll` then straddle both price scales for 20+
-   sessions, so the name looks permanently ~90% below its 20-day high — manufacturing
-   breakdown tags and suppressing real breakouts. Same blast radius in
-   `eod_scanner`, `sector_scan` RS and anything `eod_conviction` fuses. **The
-   zero-price guard cannot catch this**: every price is positive and internally
-   consistent. `_regime_map` is safe (it takes the universe **median**).
-   ⚠️ **Verified gotcha:** `prevClose` is **not** a usable detector — on the live
-   historical path (`generateSecurityWiseHistoricalData`, the `DD-Mon-YYYY` rows) NSE
-   reports it **unadjusted**, so on ANGELONE's ex-date `prevClose == 2489.9` against a
-   `close` of `246.5`. Use NSE's corporate-actions feed as the authoritative source,
-   with a round-ratio + turnover-continuity heuristic as the offline fallback, then
-   back-adjust OHLC + volume before the ex-date so the series is continuous.
-2. **💸 Re-open transaction costs / slippage for the *portfolio* view only.**
+1. **💸 Re-open transaction costs / slippage for the *portfolio* view only.**
    `AUDIT2` N3 declined a cost model on the grounds that the bias "hits all strategies
    alike, so the relative **ranking** stays valid" — sound then, but
    `portfolio_backtest.py` was built afterwards and reports **absolute** CAGR /
@@ -659,28 +641,47 @@ Ranked by expected value, highest first:
    the per-trade R leaderboards untouched (and comparable to history) while making the
    headline compounding numbers honest. Scoped, cheap, and it removes the one caveat
    that undercuts the most user-facing number in the app.
-3. **🧪 Out-of-sample validation for the conviction board's adaptive weights.**
+2. **🧪 Out-of-sample validation for the conviction board's adaptive weights.**
    `conviction_calibration.pillar_weights()` learns each pillar's edge from **all**
    resolved history and applies it to today with no holdout — precisely the
    curve-fitting risk `walkforward.py` exists to police for the daily strategies. The
    weighting is currently the only learned component in the engine that isn't
    OOS-checked. Reuse `walkforward`'s holdout/anchored-fold machinery over the saved
    conviction ideas.
-4. **🚀 Optional deploy on a real WSGI server (was on the original roadmap).** The app
+3. **🚀 Optional deploy on a real WSGI server (was on the original roadmap).** The app
    still serves from Werkzeug's dev server while binding `0.0.0.0` for phone/LAN access
    and holding long-lived SSE connections. `waitress` fits (pure Python, Windows-clean,
    properly threaded); keep the reloader + `start.py` supervisor for local dev.
-5. **🌊 Joint regime×vol selection.** Selection blends the two **marginal**
+4. **🌊 Joint regime×vol selection.** Selection blends the two **marginal**
    leaderboards (`blendedR = 0.6·regimeR + 0.4·volR`) because a joint bucket would have
    starved sample sizes on the old curated ~40-name universe. The full-universe EOD
    backtest now yields ~5k trades (6 regimes × 3 vol states ≈ 280/cell on average), so
    **measure the per-cell depth first** and only build the joint view if it holds up.
-6. **⛓ Multi-leg option strategies in paper trading.** The engine handles long *and*
+5. **⛓ Multi-leg option strategies in paper trading.** The engine handles long *and*
    written single legs with correct margin, but not spreads / straddles / strangles as
    one position — the natural next step now that writing works, and the piece a
    premium-selling playbook would need.
 
 ## Done recently
+
+- **📐 Corporate-action (split / bonus / demerger) adjustment — `core/corporate_actions.py`** — closes the sharpest
+ known correctness gap (was roadmap item 1). NSE serves **raw traded prices** on every path we ingest, so a split
+ ex-date was stored as a real crash: **13 events** live in our own `eod_bars`, led by `ANGELONE` −90.1% (10×),
+ `KOTAKBANK` −80.3% (5×), `CAMS`/`NUVAMA` −80.4%, `MCX` −79.8%, `VEDL` −64.9% (2.85× demerger). Detection is
+ price-only and **pure**: a >30% adjacent-session move that snaps to a real split/bonus factor (10:1 … 3:2) — or,
+ past a 45% **fall**, any ratio, which is what lets an unround **demerger** through — confirmed by a **two-sided
+ persistence check** so one bad bhavcopy print can't be "adjusted" twice (once as the crash, once as the recovery).
+ Thresholds are deliberately **asymmetric**: only a *consolidation* raises price and those at least double it, so
+ upward rescaling needs 90%+ **and** a clean ratio, which stops a violent rally being mistaken for a corporate
+ action. Adjustment is **back**-adjustment (history scaled onto today's scale, so the newest bar keeps its real
+ traded price and every rupee filter downstream still means rupees) and happens **on read** — `db.eod_bars` keeps
+ NSE's truth, so a detector fix never needs a re-ingest. Wired through `ca.bars_all()` into `eod_scanner`,
+ `sector_scan`, `eod_conviction` and `backtest_daily` (both `_load_live` and `_load_eod`), reported as
+ `run().corporateActions`. **Verified on real data:** all 13 caught with correct snapping (10.10→10, 4.96→5),
+ ex-date `ret1` fixed from −90.1% to −1.00% (ANGELONE) and −80.3% to −1.29% (KOTAKBANK), re-detection after
+ adjustment finds **0** events, turnover invariant to 0.0001%, newest bar untouched. Measured backtest effect at
+ `universe=60` (the size the regime leaderboard and `strategy_of_day` actually use): 12 phantom trades gone,
+ expectancy **+0.02R → +0.04R**, total **+23.6R → +52.4R**. Suite **919 → 937**.
 
 - **🛟 `start.py` now supervises the server (a bad save no longer leaves it dead)** — hit this for real mid-session:
  **Werkzeug's reloader only restarts on its own exit code 3** ("file changed"); any other non-zero exit is returned

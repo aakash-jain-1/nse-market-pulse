@@ -93,6 +93,7 @@ nse_pulse/core/
   nse_quote.py       Per-stock quote/chart/DEPTH (NextApi) + OHLCV (charting) + get_book_stats
   db.py              SQLite store (snapshots/IV/context/sim_trades/ideas/alert_log/EOD/min_bars)
   intrabar.py        Minute-candle trade resolver (target/stop/MFE/MAE) + resolve_point
+  corporate_actions.py Split/bonus/demerger detect + back-adjust daily bars ON READ (pure)
   snapshot_logger.py Background logger (snapshots+IV+context+sim+alerts) → SQLite
   paths.py           Repo-root-anchored paths — data/, *_config.json, state JSON, logs/ stay at root
   swr.py             Stale-while-revalidate cache — serve stale + single-flight bg refresh (non-blocking heavy endpoints)
@@ -129,7 +130,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-  tests/               Unit tests — 919 across 39 suites; import `from nse_pulse.<sub> import <mod>`
+  tests/               Unit tests — 937 across 40 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -362,7 +363,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **919 tests** across 39 suites (grow it with every change;
+- `python -m pytest -q` — **937 tests** across 40 suites (grow it with every change;
   never shrink it).
 - **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
   committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
@@ -370,7 +371,9 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   `.git/info/exclude`, not `.gitignore`, so it never shows in `git status`. When
   recording a suite count in the docs, exclude it:
   `python -m pytest -q --ignore=tests/test_tv_watchlist.py`.
-  Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
+  Suites: `test_intrabar.py`, `test_corporate_actions.py` (split/bonus/reverse/demerger
+  detection, the snapping band, both sides of the bad-print guard, back-adjustment maths
+  + turnover invariance), `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
   math), `test_ideas.py` + `test_ideas_journal.py`, `test_fetch_cache.py`,
@@ -416,44 +419,41 @@ stays useful instead of becoming a wall of checkmarks.
 
 Ranked by expected value (full detail in `AGENTS.md` -> "Roadmap / ideas (not yet built)"):
 
-1. **Corporate-action (split/bonus) adjustment** — the sharpest known correctness gap,
-   and measured in our own data: 36 close-to-close moves >50% in `eod_bars`, the largest
-   being real splits in liquid F&O names (KOTAKBANK 5.07x, MCX 4.96x, CAMS 5.10x,
-   NUVAMA 5.10x, ANGELONE 10.10x, VEDL 2.85x). Unadjusted ex-dates feed phantom signals
-   to `meanrev`/`gap`/`vol_breakout`/`rel_strength` and poison `hi20`/`lo20`/`hh`/`ll`
-   for 20+ sessions. **`prevClose` is NOT a detector** — the live historical path reports
-   it unadjusted. See the 2026-08-24 findings entry.
-2. **Transaction costs / slippage — re-open for the portfolio view only.** AUDIT2 N3
+1. **Transaction costs / slippage — re-open for the portfolio view only.** AUDIT2 N3
    declined it because the bias preserves the relative *ranking*; `portfolio_backtest.py`
    postdates that decision and reports **absolute** CAGR / equity / max-DD, where the
    argument doesn't hold. Charge costs only in the portfolio sim; leave per-trade R alone.
-3. **Out-of-sample validation for the conviction board's adaptive pillar weights.**
+2. **Out-of-sample validation for the conviction board's adaptive pillar weights.**
    `pillar_weights()` learns from all resolved history and applies it to today with no
    holdout — the one learned component not policed the way `walkforward.py` polices the
    daily strategies.
-4. **Optional deploy on a real WSGI server** (`waitress`) — still on Werkzeug's dev
+3. **Optional deploy on a real WSGI server** (`waitress`) — still on Werkzeug's dev
    server while binding `0.0.0.0` for phone/LAN and holding long-lived SSE streams.
    Keep the reloader + `start.py` supervisor for dev.
-5. **Joint regime x vol selection** — deferred pending sample depth; the full-universe
+4. **Joint regime x vol selection** — deferred pending sample depth; the full-universe
    EOD backtest (~5k trades, ~280/cell) may now suffice. Measure per-cell depth first.
-6. **Multi-leg option strategies in paper trading** — spreads/straddles as one position.
+5. **Multi-leg option strategies in paper trading** — spreads/straddles as one position.
    Futures side: **calendar spreads** (rollover data already there) + basis/carry alerts.
 
 **Reversed decision:** transaction costs were previously "explicitly NOT doing" (AUDIT2
 N3). That still holds for the per-trade R leaderboards, but not for the absolute
-portfolio numbers built later — hence item 2 above.
+portfolio numbers built later — hence item 1 above.
 
 ## Known limitations
 
 - Real intraday charts + depth are per-symbol NextApi (need stock Referer); depth
   empty outside market hours. OI price-direction coverage partial pre-market.
 - All endpoints unofficial; data meaningful only during market hours.
-- **Daily bars are NOT adjusted for splits/bonuses.** NSE serves raw traded prices on
-  both paths, so an ex-date is a fake ±50-90% move that lingers in the 20-day features
-  for weeks. Measured: 36 such moves in `eod_bars`, incl. KOTAKBANK / MCX / CAMS /
-  NUVAMA / ANGELONE / VEDL. Treat extreme single-day EOD moves in a big name as suspect
-  until roadmap item 1 lands. The zero-price guard does not catch it (prices are all
-  positive and self-consistent), and `prevClose` can't detect it (also unadjusted).
+- **Corporate actions are adjusted on READ, not in the DB** (`core/corporate_actions.py`).
+  `db.eod_bars` still holds NSE's raw traded prices — the crash is real in the table, so
+  `db_inspect` shows what NSE published. Every *feature* path goes through
+  `ca.bars_all()` / `adjust_grouped()` instead, so if you add a new consumer of
+  `db.eod_bars_all()`, route it through `ca` or you re-import the bug. **Residual gap:**
+  an ex-date inside a **backfill hole** stays unadjusted — across a hole the split factor
+  can't be separated from real drift over the missing sessions, so `_adjacent` refuses
+  rather than guessing (measured: 60 symbols straddling a 17-session hole, e.g. TEMBO
+  530.40 -> 59.75). Fix that with a **contiguous backfill**, not a detector change. The
+  zero-price guard never caught any of this (prices are all positive and self-consistent).
 - Prices come from a five-tier chain (`nse_client.get_prices`): broker tick store →
   hot-list map (~100–150 names) → batched broker quote → NSE per-stock quote → **EOD
   bhavcopy close**. With a broker connected, off-hot-list names are genuinely live and
@@ -473,6 +473,72 @@ portfolio numbers built later — hence item 2 above.
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 📐 BUILT: corporate-action adjustment (`core/corporate_actions.py`, roadmap item 1)
+
+Closes the gap found in the entry below. Detection is **price-only** — we don't ingest NSE's corporate-actions
+calendar — and the whole module is pure over a bar list, so it's testable without a network or a DB.
+
+- **Why price-only detection is sound here:** NSE **price bands** make a large single-session move physically
+  impossible through trading (2/5/10/20% circuits; even band-free F&O names are held by a flexed dynamic band).
+  So a >30% adjacent-session move is already structural, and past ~45% nothing but a rescaling produces it.
+- **Snapping matters for accuracy, not tidiness.** ANGELONE's observed ratio is **10.10×**, not 10 — the stock
+  also fell ~1% that day. Snapping to the nearest real split/bonus factor (10:1, 5:1, 2:1, 3:2, …) adjusts by
+  **10.0** and *leaves the genuine −1.00% in the series*; adjusting by the raw 10.10 would erase it. Verified:
+  ANGELONE `ret1` −90.1% → **−1.00%**, KOTAKBANK −80.3% → **−1.29%**.
+- **Unround ratios are what a DEMERGER looks like.** Value transfers to the spun-off entity in no round
+  proportion, so there is no clean factor to snap to (`VEDL` 2.8488×, `PSRAJ` 4.7625×). Those are accepted only
+  past a 45% **fall**, where nothing else explains the size. Cost of that path: the ex-date's real move is
+  absorbed too (VEDL lands at exactly +0.00%) — deliberate, since a 0 beats a −65% phantom.
+- **Thresholds are ASYMMETRIC, and that's load-bearing.** Every one of the 13 real events is a *fall*: splits,
+  bonuses and demergers all push price down. The only thing that raises it is a **consolidation**, which is rare
+  here and never subtle (a 2:1 already doubles the price). So an upward rescale needs **90%+ AND a clean ratio**.
+  Found this the hard way — a symmetric 45% gate made the detector read a synthetic **+46% rally** in
+  `test_eod_conviction`'s fixture as a reverse split and rescale the fixture's history, breaking an unrelated
+  test. A rally is reachable; a 10× drop is not.
+- **Two-sided persistence check (`_separated`)** is what separates a corporate action (permanent) from a bad
+  bhavcopy print (transient). It splits the neighbourhood at the **geometric mean** of the two scales — the
+  scale-symmetric midpoint, so it behaves identically for a 1.5× bonus and a 10× split. Without the *second*
+  side, one garbage close gets adjusted **twice**: once as the crash, then again as a "reverse split" on the
+  recovery day, rescaling all history behind it by a nonsense factor.
+- **Back-adjustment, on read.** History is scaled onto **today's** scale, never the reverse: the newest bar must
+  keep its real traded price or entries/exits and the `minPrice`/`minValueCr` liquidity floors stop meaning
+  rupees. And it happens at **read** time, so `db.eod_bars` keeps NSE's truth and a detector fix never requires
+  re-ingesting anything. Prices scale by the factor, share counts inversely, which leaves **turnover invariant**
+  exactly as a real split does — verified to 0.0001% (pure rounding) across the six liquid split names.
+- **Not look-ahead, though it uses later bars.** `_separated` peeks up to 3 bars past the ex-date to confirm.
+  That's legitimate: a split is **announced in advance**, so knowing on the ex-date is information a real trader
+  had. The forward peek is a proxy for the announcement feed we don't ingest, not foresight about prices.
+- **Wired at the feature choke points**, not at the DB: `ca.bars_all()` in `eod_scanner` / `sector_scan` /
+  `eod_conviction`, and `adjust_grouped()` in `backtest_daily.run()` covering **both** `_load_live` and
+  `_load_eod`, reported back as `run().corporateActions`. A per-symbol failure is caught and that symbol passes
+  through raw, so one malformed name can't sink a 3,480-symbol market scan.
+- **Real-data verification (all 13 events, `eod_bars` to 2026-08-21):** ANGELONE 10×, KOTAKBANK 5×, CAMS 5×,
+  NUVAMA 5×, MCX 5×, JLHL 5×, GOODLUCK 3×, POCL 2.5×, HDFCAMC 2×, LICI 2×, TRENT 1.5×, plus the two unround
+  ones (VEDL 2.8488×, PSRAJ 4.7625×). Invariants: **re-detecting after adjustment finds 0 events** (the strongest
+  single check — a wrong factor would leave a residual break), newest bar unchanged, turnover flat. Whole-market
+  detect+adjust costs **0.08s** over 3,480 symbols, and returns the input list uncopied when there's nothing to
+  do (the overwhelmingly common case).
+- **Measured backtest effect** (`source="eod"`, 180 days): at `universe=60` — the size `cached_regime_leaderboard`
+  and therefore `strategy_of_day` actually run — **12 phantom trades removed, expectancy +0.0200R → +0.0400R,
+  total +23.6R → +52.4R**. Diluted at `universe=1500` (12 events among 1,500 names): −5 trades, total **−7.2R →
+  +1.2R**, i.e. it flips the whole-market aggregate's sign while barely moving per-trade averages. Biggest
+  single-strategy shift is `high52w` (**+0.10R**) — a split craters the 52-week-high proxy, which is exactly
+  what that strategy reads. **Today's EOD scanner top-60 is unchanged**, and that's expected rather than
+  disappointing: the 13 ex-dates are months old, so no current 20-day window straddles one. The value is in
+  the backtest that replays them.
+- **Live-data surprise worth remembering:** the 62 large moves the detector *declines* are all dated
+  **2026-08-18** and all non-adjacent — the whole-market bhavcopy backfill is only **4 sessions deep** (~3,330
+  symbols/day from 08-18; just **59** curated names before it), so those names have two blocks separated by a
+  17-session hole. Several are genuine splits (TEMBO 530.40→59.75, IVZINNIFTY 2726.94→277.59) that we correctly
+  refuse to size, because across the hole the factor is entangled with 17 sessions of real drift. Also note the
+  two ingest paths **disagree** about `prevClose`: the live historical path reports it **stale** (ANGELONE
+  2489.90 vs a 246.50 close — this is why `prevClose` is not a detector), whereas the bhavcopy path reports it
+  **re-based** (TEMBO 60.35 against a 59.75 close).
+- **Tests +18 (919 → 937):** clean split / bonus / reverse / demerger detection, the snapping band, both sides of
+  the persistence guard (bad print not adjusted in *either* direction), the non-adjacent refusal, the
+  violent-rally-is-not-a-consolidation case, back-adjustment maths incl. turnover invariance and the `prevClose`
+  re-point, uncopied passthrough when there's no event, and `adjust_grouped` isolating a broken symbol.
 
 ### 2026-08-24 — 📐 DISCOVERY: daily bars carry no split/bonus adjustment (roadmap refresh, docs only)
 
