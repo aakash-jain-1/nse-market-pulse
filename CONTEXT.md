@@ -409,119 +409,51 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Roadmap
 
-**Done recently (this session):**
-- ✅ **#1 Order-book intelligence** — buy/sell imbalance (ΣBid vs ΣAsk) + spread
-  from 5-level depth on Live depth panel, watchlist row stripes, detail modal; +
-  Scanner **⚖ Order-book scan** button/column via `/api/depth` (capped, pooled).
-- ✅ **#2 Off-screen alerts (`notify.py`)** — server-side Telegram/webhook alerts
-  on fresh high-conviction ideas + volume spikes; opt-in, deduped (`alert_log`),
-  rides the snapshot logger; header **🔔 Push** pill + status/test endpoints.
+**The original roadmap is fully closed** (2026-08-24). Shipped work is NOT listed here —
+it lives in `AGENTS.md`'s "Done recently" and, dated with the reasoning, in the findings
+log at the bottom of this file. This section is only for what is **not built**, so it
+stays useful instead of becoming a wall of checkmarks.
 
-**Selected next (user picked, sequenced):**
-- ✅ **#3 Walk-forward out-of-sample validation (`walkforward.py`)** — holdout
-  train/test split + anchored folds over the daily backtest's trades; per-strategy
-  in-sample vs OOS expectancy with an overfit verdict (robust / decaying / overfit /
-  no-edge / improving), plus the headline **adaptive-selection test** (learn the
-  best-per-regime playbook on train, follow it on test, compare to best fixed +
-  a-priori design). `/api/sim/walkforward` + Sim-tab 🧪 card. Pure → 100 % covered.
-- ✅ **Engine sharpening — volatility-aware regime board** — added an India-VIX
-  volatility axis (`volState` Calm/Normal/Elevated + 52-wk percentile) orthogonal
-  to the 6 directional labels, mirrored by a realized-vol proxy in the backtest;
-  every sim + backtest trade now tagged `volAtEntry`, plus a vol × strategy
-  leaderboard.
-- ✅ **Engine sharpening — vol-conditioned selection** — `strategy_of_day` + the
-  live adaptive playbook now pick using a **blend of the regime and vol marginal
-  expectancies** (`blendedR`, vol weight 0.4), walk-forward-gated. *Still open:*
-  more researched edges; a joint regime×vol view once samples are deep enough.
-- ✅ **#4 Data resilience + broaden universe (`bhavcopy.py`)** — native EOD UDiFF
-  bhavcopy ingest from NSE's static archive (no anti-bot gate). Prices ANY listed
-  symbol (last-resort in `get_price`, works off-hours + when the live API is down),
-  gives a lot-size fallback, and `ingest_db()` bulk-loads the whole market into the
-  EOD cache to widen the daily-backtest universe. `/api/eod/*` + Sim-tab "⬇ Load
-  EOD" button. Dependency-free (the `jugaad-data` slice we needed, in-house).
-- ✅ **Full-market EOD / swing scanner (`eod_scanner.py`)** — cashes in the
-  bhavcopy universe: a whole-market board (up to ~2400 cash names + the F&O set,
-  not just the ~100–150 live hot lists) ranked by end-of-day setups — breakouts/
-  breakdowns of the recent N-day high/low, gaps, unusual volume vs the trailing
-  average, trend vs the 20/50-day MAs, and NR7 squeezes. Pure feature math over
-  `db.eod_bars` → **works off-hours & weekends** (no live API). New **🌐 EOD Scan**
-  tab (view selector + filters + ⬇ Backfill), `/api/eod/scan`, and a background
-  `/api/eod/backfill` (POST starts, GET polls) built on `bhavcopy.backfill(days)`.
-- ✅ **EOD option chain (`eod_options.py`)** — resilient option chain from the FO
-  bhavcopy option rows (STO/IDO): PCR, max-pain, ATM, OI walls (support/resistance),
-  per-expiry summary — **off-hours & when the live NextApi is blocked**. Returns the
-  **same shape** as `nse_quote.get_option_chain`, so the existing ⛓ Option-Chain UI
-  renders it unchanged; the loader now **auto-falls-back** to EOD when the live chain
-  is empty/blocked, with a 🌐 EOD badge. `/api/eod/optionchain/<sym>[?expiry]` +
-  `/summary`, plus `rollover.py` (near→next rollover% / roll cost / basis / OI-state).
-- ✅ **Delivery% + bulk/block deals market-wide (`bhavcopy` delivery merge + `deals.py`)**
-  — the UDiFF CM bhavcopy omits delivery%, so `ingest_db()` now also ingests
-  **`sec_bhavdata_full`** and merges per-symbol `delivPct`/`delivQty` (same-session
-  only) into `eod_bars`. This **re-activates the delivery strategy** in the EOD
-  backtest (was 0 trades → now fires, regime-gated **+0.23R** on a real 23-session
-  run) and adds an **Accumulation (high delivery%)** scanner view + a Deliv% column
-  with a "+Npp vs avg" spike hint. `deals.py` fetches NSE **bulk/block deals** (the
-  institutional footprint) and the scanner cross-references them (`?deals=1`) to flag
-  🐋 rows a big player traded (+ score bonus). `/api/eod/deals`.
-- ✅ **EOD conviction board (`eod_conviction.py`)** — fuses the independent EOD signals
-  (breakout / delivery accumulation / bulk-block deal / OI buildup / volume / trend /
-  leading-lagging sector / option chain / **futures rollover**) into ONE ranked
-  "tomorrow's watchlist" via **confirmation stacking** (ranked by #signals that agree,
-  then blended score). Each pick carries a volatility-scaled 2R plan. **Save→Ideas
-  history** (durable watchlist, never clobbers a live idea) and an **off-screen digest**
-  via `notify.send_digest()`. 🏆 Conviction tab; `?rollover=0`/`?options=0`/`?deals=0`
-  disable a fuse, `?adaptive=1` weights pillars by realized edge. Verified e2e on ~3,300
-  real names (HIRECT = breakout + 26.9× vol + 🐋 bulk deal, etc.).
-- ✅ **Full-universe EOD backtest (`backtest_daily.py source="eod"`)** — runs the 9
-  EOD-computable strategies over the WHOLE ingested bhavcopy universe read straight
-  from SQLite (`db.eod_bars`/`db.eod_oi`) instead of a curated ~40–260-name NSE pull.
-  No network, works off-hours, and produces **thousands of trades** (~1500 names →
-  ~5k trades in <1s) so the regime/vol leaderboards, `strategy_of_day` and the
-  walk-forward validator become statistically trustworthy (the curated run flatters
-  the strategies; the whole market is the honest test). New loaders `_load_live` /
-  `_load_eod` share the whole analysis pipeline; `?source=eod` (+ `minPrice`/
-  `minValueCr` liquidity floors) on `/api/sim/backtest_daily|strategy_of_day|
-  walkforward`; Sim-tab **Backtest source** selector (Live NSE ↔ Full-market EOD).
-  *Trade-offs:* minute re-resolution is forced off (needs per-symbol NSE fetches).
-  *Still open:* a scheduled/auto backfill.
-- ✅ **Portfolio-level backtest (`portfolio_backtest.py`)** — replays the daily-backtest
-  trades through a REAL book (finite capital, concurrent-position cap, risk/equal
-  sizing) → equity curve + CAGR / max-DD / Sharpe / profit-factor, overall + per
-  strategy. Turns per-trade R into "could I actually have traded this?". Pure
-  `simulate()`; `run()` sources trades from `bd.run(_collect=True)`; same-day signal
-  contention is **conviction-ranked** (every `bd` trade carries an entry-time `score`);
-  open positions are **marked to market** on daily closes (`bd` also returns traded
-  symbols' `closes`) for true intra-trade drawdown. *Feature complete.*
-- ✅ **Conviction calibration + adaptive weighting (`conviction_calibration.py`)** —
-  measures whether the board's confirmation-stacking actually pays on realized outcomes:
-  reads back the saved conviction ideas, scores their candle-accurate `TARGET`/`STOP`
-  results, and reports win rate by **pillar count** (do 4-signal beat 2-signal?), by
-  rating/direction, the **per-pillar lift** (WITH vs WITHOUT each of the 8 pillars), and
-  the **option-⚠️ warning impact**, with an honest verdict. `/api/eod/conviction/calibration`;
-  📊 Calibration modal on the 🏆 Conviction tab. Then **closes the loop**: `pillar_weights()`
-  turns each measured lift into a clamped, sample-shrunk scoring multiplier that the board
-  applies via `board(adaptive=True)` / **⚖️ Adaptive** toggle — re-ordering within a
-  confirmation tier without ever touching the stacking count. *Feature complete.*
+Ranked by expected value (full detail in `AGENTS.md` -> "Roadmap / ideas (not yet built)"):
 
-**Open (older roadmap, in AGENTS.md):**
-- ✅ *(done)* Route paper-trading fills / `get_price` / sim MTM through the broker feed —
-  `nse.get_prices()` is now a five-tier chain (broker store → hot lists → batched broker
-  quote → NSE quote → EOD close) fed by `register_price_source()` + each adapter's
-  `price_map()`. See the 2026-08-24 log entry. **The live-feed roadmap item is fully closed.**
-- ✅ *(done)* Extend the Live tab to **index/F&O** instruments — **indices** stream on
-  the cash segment and **F&O legs** (option CE/PE + futures) on `NFO`, both over one
-  socket, with a ⛓ underlying→expiry→strike picker. See the 2026-08-24 log entries.
-- Optional deploy (real WSGI server), server-side backtest logging growth.
-- ✅ *(done)* Futures rollover tracker (`rollover.py`) — near→next OI shift + roll cost.
+1. **Corporate-action (split/bonus) adjustment** — the sharpest known correctness gap,
+   and measured in our own data: 36 close-to-close moves >50% in `eod_bars`, the largest
+   being real splits in liquid F&O names (KOTAKBANK 5.07x, MCX 4.96x, CAMS 5.10x,
+   NUVAMA 5.10x, ANGELONE 10.10x, VEDL 2.85x). Unadjusted ex-dates feed phantom signals
+   to `meanrev`/`gap`/`vol_breakout`/`rel_strength` and poison `hi20`/`lo20`/`hh`/`ll`
+   for 20+ sessions. **`prevClose` is NOT a detector** — the live historical path reports
+   it unadjusted. See the 2026-08-24 findings entry.
+2. **Transaction costs / slippage — re-open for the portfolio view only.** AUDIT2 N3
+   declined it because the bias preserves the relative *ranking*; `portfolio_backtest.py`
+   postdates that decision and reports **absolute** CAGR / equity / max-DD, where the
+   argument doesn't hold. Charge costs only in the portfolio sim; leave per-trade R alone.
+3. **Out-of-sample validation for the conviction board's adaptive pillar weights.**
+   `pillar_weights()` learns from all resolved history and applies it to today with no
+   holdout — the one learned component not policed the way `walkforward.py` polices the
+   daily strategies.
+4. **Optional deploy on a real WSGI server** (`waitress`) — still on Werkzeug's dev
+   server while binding `0.0.0.0` for phone/LAN and holding long-lived SSE streams.
+   Keep the reloader + `start.py` supervisor for dev.
+5. **Joint regime x vol selection** — deferred pending sample depth; the full-universe
+   EOD backtest (~5k trades, ~280/cell) may now suffice. Measure per-cell depth first.
+6. **Multi-leg option strategies in paper trading** — spreads/straddles as one position.
+   Futures side: **calendar spreads** (rollover data already there) + basis/carry alerts.
 
-**Explicitly NOT doing:** transaction cost/slippage model (AUDIT2 N3 — accepted as
-a documented caveat).
+**Reversed decision:** transaction costs were previously "explicitly NOT doing" (AUDIT2
+N3). That still holds for the per-trade R leaderboards, but not for the absolute
+portfolio numbers built later — hence item 2 above.
 
 ## Known limitations
 
 - Real intraday charts + depth are per-symbol NextApi (need stock Referer); depth
   empty outside market hours. OI price-direction coverage partial pre-market.
 - All endpoints unofficial; data meaningful only during market hours.
+- **Daily bars are NOT adjusted for splits/bonuses.** NSE serves raw traded prices on
+  both paths, so an ex-date is a fake ±50-90% move that lingers in the 20-day features
+  for weeks. Measured: 36 such moves in `eod_bars`, incl. KOTAKBANK / MCX / CAMS /
+  NUVAMA / ANGELONE / VEDL. Treat extreme single-day EOD moves in a big name as suspect
+  until roadmap item 1 lands. The zero-price guard does not catch it (prices are all
+  positive and self-consistent), and `prevClose` can't detect it (also unadjusted).
 - Prices come from a five-tier chain (`nse_client.get_prices`): broker tick store →
   hot-list map (~100–150 names) → batched broker quote → NSE per-stock quote → **EOD
   bhavcopy close**. With a broker connected, off-hot-list names are genuinely live and
@@ -541,6 +473,52 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 📐 DISCOVERY: daily bars carry no split/bonus adjustment (roadmap refresh, docs only)
+
+Refreshing the roadmap (it had decayed into a wall of ✅ items duplicating "Done recently"), the search for
+what's genuinely left turned up a **real correctness gap**, in the same class as the zero-price sweep and
+arguably worse because it lands squarely in the liquid F&O names the strategies actually trade.
+
+- **Finding:** nothing in the pipeline adjusts for corporate actions. Grepping the whole package for
+  split/bonus/adjust found **zero** hits outside the watchlist side project's *ticker-rename* map (a different
+  thing). NSE serves raw traded prices on both ingest paths, so a split ex-date is stored as a genuine crash.
+- **Measured, not theorised** (read-only scan of `data/market.db`, 80,328 bars / 3,480 symbols /
+  2026-04-01..2026-07-31 plus the live-path rows): **36 close-to-close moves >50%**. The largest are
+  unmistakable corporate actions — `ANGELONE` −90.1% (ratio **10.10×**), `KOTAKBANK` −80.3% (**5.07×**),
+  `CAMS` −80.4% (**5.10×**), `NUVAMA` −80.4% (**5.10×**), `MCX` −79.8% (**4.96×**), `VEDL` −64.9% (**2.85×**).
+  A NIFTY bank heavyweight does not drop 80% in a session, and those ratios are textbook split/bonus factors.
+- **Why it matters, precisely.** `backtest_daily._features` takes `ret1` from `prevClose` (line 439-440), so
+  the ex-date hands `meanrev` (oversold bounce), `gap`, `vol_breakout` and `rel_strength` an enormous phantom
+  signal — a trade entered on an event that never happened. Worse and longer-lived: `hi20`/`lo20`/`hh`/`ll`
+  then straddle **both price scales for 20+ sessions**, so the name reads as permanently ~90% below its
+  20-day high — manufacturing breakdown tags while suppressing real breakouts. Same blast radius through
+  `eod_scanner`, `sector_scan` RS, and everything `eod_conviction` fuses on top.
+- **Two things that do NOT save us:**
+  1. The **zero-price guard is blind to it** — `min(c, hi, lo) <= 0` passes, because every price is positive
+     and internally consistent within the bar. Only the *cross-day* ratio is wrong.
+  2. **`prevClose` is not a detector.** This was the obvious idea (NSE re-bases previous close on an ex-date,
+     so a `prevClose(T)` vs `close(T-1)` mismatch would flag it for free, straight out of a column we already
+     store). **Tested and false** on the live historical path: on ANGELONE's ex-date `prevClose` is
+     **2,489.90** against a `close` of **246.50** — i.e. reported *unadjusted*, agreeing with the stale scale.
+     Don't build the detector on it.
+- **What IS safe:** `_regime_map` takes the universe **median** daily move, so a handful of splits can't move
+  the regime label. Intraday `rngPos` is within-bar and therefore fine.
+- **Also checked and NOT a bug:** `eod_bars.date` holds two formats — `YYYY-MM-DD` (44,234 rows, bhavcopy)
+  and `DD-Mon-YYYY` (36,094, live historical API). Looked like a join hazard, but **`d` is the normalised
+  `YYYY-MM-DD` key** everything actually keys on; `date` just preserves the source string. Leave it.
+- **Also explains an earlier red herring:** a first pass flagged 1,662 `prevClose`-vs-prior-close mismatches
+  all dated 2026-08-18. That's a **backfill boundary**, not corporate actions — the stored "previous" bar is
+  ~25 days earlier, so the comparison spans a hole in our history. Any future detector must require the two
+  bars to be *adjacent trading days* (the scan above prints `dgap` for exactly this reason).
+- **Suggested fix (not built):** NSE's corporate-actions feed as the authoritative source, a round-ratio +
+  turnover-continuity heuristic as the offline fallback, then back-adjust OHLC **and volume** before the
+  ex-date so the series is continuous. Logged as roadmap item 1.
+- **Docs:** roadmap rewritten in `AGENTS.md` + `CONTEXT.md` (open items only, ranked, ~110 lines of ✅ wall
+  removed), the futures roadmap closed out with two new open items (calendar spreads, basis/carry alerts),
+  AUDIT2 N3's "explicitly not doing" **partially reversed** (costs still don't matter for per-trade R
+  ranking, but `portfolio_backtest` reports absolute CAGR/DD, which postdates that decision), and this
+  caveat added to both Known-limitations lists. No code changed; suite still 919.
 
 ### 2026-08-24 — 🛟 `start.py` supervises the server: a bad save no longer leaves it dead (suite 911 → 919)
 
