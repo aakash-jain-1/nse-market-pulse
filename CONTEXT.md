@@ -92,7 +92,7 @@ nse_pulse/core/
   paths.py           Repo-root-anchored paths — data/, *_config.json, state JSON, logs/ stay at root
   swr.py             Stale-while-revalidate cache — serve stale + single-flight bg refresh (non-blocking heavy endpoints)
 nse_pulse/feeds/
-  angel_feed.py      Live feed adapter — Angel One SmartAPI WebSocket (FREE default; cash + NSE indices) + rest_quote/chart/ohlc
+  angel_feed.py      Live feed adapter — Angel One SmartAPI WebSocket (FREE default; cash + NSE indices + F&O legs) + rest_quote/chart/ohlc
   dhan_feed.py       Live feed adapter — Dhan WebSocket (paid data plan)
 nse_pulse/sim/
   sim.py             Multi-strategy forward-tester (per-strategy sims + daily rollup)
@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-tests/               Unit tests — 860 across 38 suites; import `from nse_pulse.<sub> import <mod>`
+tests/               Unit tests — 875 across 39 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -357,7 +357,14 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **826 tests** (grow it with every change; never shrink it).
+- `python -m pytest -q` — **875 tests** across 39 suites (grow it with every change;
+  never shrink it).
+- **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
+  committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
+  Dhan watchlist side project) is **local-only** — kept untracked via
+  `.git/info/exclude`, not `.gitignore`, so it never shows in `git status`. When
+  recording a suite count in the docs, exclude it:
+  `python -m pytest -q --ignore=tests/test_tv_watchlist.py`.
   Suites: `test_intrabar.py`, `test_sim.py` + `test_sim_views.py` (DB-backed
   read/aggregation + settings), `test_take.py` (temp DB e2e), `test_backtest.py`,
   `test_backtest_daily.py` + `test_backtest_strategies.py` (signal/exit/regime
@@ -493,9 +500,9 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 **Open (older roadmap, in AGENTS.md):**
 - Route paper-trading fills / `get_price` through the broker feed.
-- Extend the Live tab to **F&O** instruments (option/futures legs) — needs the `NFO`
-  segment + an expiry/strike picker. ✅ *(done)* **indices** now stream (same cash
-  segment; see the 2026-08-24 log entry).
+- ✅ *(done)* Extend the Live tab to **index/F&O** instruments — **indices** stream on
+  the cash segment and **F&O legs** (option CE/PE + futures) on `NFO`, both over one
+  socket, with a ⛓ underlying→expiry→strike picker. See the 2026-08-24 log entries.
 - Optional deploy (real WSGI server), server-side backtest logging growth.
 - ✅ *(done)* Futures rollover tracker (`rollover.py`) — near→next OI shift + roll cost.
 
@@ -511,12 +518,65 @@ a documented caveat).
   name now falls back to its **EOD bhavcopy close** (`bhavcopy.py`) — so paper
   trading/pricing works market-wide, just at last close when it's not live.
 - Live tab needs the user's own broker creds (Angel free / Dhan paid). Angel streams NSE
-  cash **+ the NSE indices** (an index has no volume/OI/depth — we omit those, not zero
-  them); **F&O legs are not wired yet**. Dhan stays cash-only.
+  cash, **the NSE indices** and **F&O legs** (options + futures). An index has no
+  volume/OI/depth — we omit those, not zero them; an option **is** traded, so it keeps
+  all three. Dhan stays cash-only.
+- An **F&O tradingsymbol exists only in the broker's master** — NSE's quote/charting
+  hosts key off cash tickers, so a leg has **no NSE or EOD fallback**: `/api/quote`
+  returns 503 and `/api/live/seed` empty points. Live F&O needs a connected broker.
 
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — ⛓ Live tab streams F&O LEGS (options + futures) — roadmap item closed (suite 860 → 875)
+- **Why:** "extend the Live tab to index/F&O instruments" was the last open half of the live-feed roadmap item.
+  Indices landed earlier today (same segment as cash); F&O was the genuinely new part because contracts live on a
+  **different exchange segment**.
+- **Key insight:** it needs no second socket. Angel's `SmartWebSocketV2` multiplexes segments on ONE connection —
+  each token just has to be listed under **its own `exchangeType`** in the subscribe payload (`1` = NSE cash +
+  indices, `2` = NFO). So the work was segment plumbing: `segment_of(token)` → exchangeType, `_by_segment(tokens)`
+  → the grouped payload (used by both `set_watch`'s add/remove delta and `_subscribe_current`), and
+  `exchange_of(token)` → the REST `exchange` string. That last one matters: `getMarketData`/`getCandleData` key off
+  `exchange`, and an **NFO token asked on `"NSE"` silently returns nothing** — a miss, not an error.
+- **Master indexing (the real design decision):** the master carries **~36k NFO contracts** vs ~2.7k cash names.
+  Putting those in `_sym2sec` would bloat it ~14× AND risk an opaque tradingsymbol shadowing a stock. Instead
+  `_parse_fno(rows)` (pure → fully unit-testable without the 37 MB download) builds separate
+  `_fno_tok` (tsym→token) / `_fno_meta` (token→parts) / `_fno_tree`
+  (**underlying → expiry → {CE:{strike:tok}, PE:{…}, FUT, lot}**), and `resolve()` checks cash/indices first, then
+  F&O. Data quirks handled: **strikes are in paise** like every other master price (`STRIKE_DIV = 100`), futures
+  carry `strike = -1`, and expiries are strings like `29DEC2026` — so `_expiry_key()` parses them to
+  `(y, m, d)` because a plain sort puts `29DEC` before `25AUG`. Malformed rows (no expiry, an "option" whose tsym
+  doesn't end CE/PE, other segments like CDS) are skipped, not crashed on.
+- **Ticks:** unlike an index, an option/future **is genuinely traded** — volume, OI and the 5-level book are real,
+  so the index guard must NOT apply. Records carry `fno: {underlying, expiry, strike, optType, lot, tsym, kind}`,
+  which is what lets the UI label an opaque tradingsymbol.
+- **What (UI):** a **⛓ F&O leg** picker (shown only when `public_status().fnoContracts > 0`, i.e. a broker master is
+  loaded) walks underlying → expiry → strike via the new `GET /api/live/fno` and adds the **CE / PE / FUT**
+  tradingsymbol straight to the watchlist — the browser never sees the master. The strike list is **centred on spot**
+  when the underlying is already streaming (the index chips sit right above, so it usually is), legs the chosen
+  expiry doesn't list are greyed out, and rows read `NIFTY 24150 CE · 25 Aug` (lot size on the header, next to the
+  premium, since lot × premium is the real exposure). `_liveFnoMeta` caches each leg's parts from the picker AND
+  from `rec.fno`, so a watchlist restored from `localStorage` labels correctly from the first tick.
+- **No NSE fallback for a leg** (important): a tradingsymbol only exists in the broker's master, so `/api/quote` and
+  `/api/live/seed` now short-circuit on `_is_fno()` (503 / empty points) instead of spending a WAF-rationed request
+  to rediscover that, and the 12s NSE poll **skips legs and keeps their last streamed record** rather than blanking
+  the row when the socket drops.
+- **Live-verified 2026-08-24 (market open, real Angel session, read-only — no orders):** 35,947 contracts across 232
+  underlyings parsed in **0.13s**; NIFTY spot 24153.95 → ATM strike **24150** auto-selected (exp `25AUG2026`, lot 65);
+  the subscribe payload split correctly into `exchangeType 1: [2885 RELIANCE, 99926009 BANKNIFTY]` +
+  `2: [CE, PE, FUT]` on ONE socket; real ticks on all three legs — **CE ₹81.55 / PE ₹42.20 / FUT 24196.10**
+  (≈ +42 basis to spot, sane) — each with volume, OI and a full 5-level book, while BANKNIFTY still correctly
+  reported no volume/OI/depth; `rest_quote` on the CE served `source: angel` and `rest_ohlc` returned **225** 5-min
+  candles.
+- **Tests (+15, 860 → 875):** `_parse_fno` tree shape incl. paise→rupee strikes and every malformed-row guard;
+  chronological `_expiry_key`; **F&O must not shadow cash** (`resolve("RELIANCE")` stays the equity token, no leg in
+  `_sym2sec`, `public_status().instruments` unchanged by the legs); `segment_of`/`exchange_of`; `_by_segment`
+  grouping; `set_watch` subscribing/unsubscribing a leg under NFO on a fake socket; `fno_chain` default/explicit
+  expiry + an unknown underlying returning the **same keys** as a hit; `fno_meta` by symbol or token; an F&O tick
+  keeping volume/OI/depth and carrying its parts; REST calls using the NFO exchange; the route + the "no NSE
+  fallback" guards; Dhan's stubs matching the interface; and the picker's markup in `test_index_renders`.
+  Whole file runs with **sockets blocked** (verified) — no test touches the network.
 
 ### 2026-08-24 — 🚨 Fix: the access log had silently killed ALL SSE streaming (suite 859 → 860)
 - **Found while** live-verifying the index work above: `/api/live/stream` never returned even its HTTP *headers*

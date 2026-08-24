@@ -429,6 +429,235 @@ def test_angel_rest_quote_blanks_traded_only_fields_for_an_index():
 
 
 # ---------------------------------------------------------------------------
+# angel F&O legs (options + futures) — a second exchange segment on one socket
+# ---------------------------------------------------------------------------
+#: NFO rows in the master's real shape: `symbol` is the opaque tradingsymbol, `name`
+#: the underlying, `strike` is in paise like every other price, and weekly index
+#: expiries list options but no future.
+FNO_ROWS = [
+    {"token": "61647", "symbol": "NIFTY25AUG2624200CE", "name": "NIFTY",
+     "exch_seg": "NFO", "instrumenttype": "OPTIDX", "expiry": "25AUG2026",
+     "strike": "2420000.000000", "lotsize": "65"},
+    {"token": "61648", "symbol": "NIFTY25AUG2624200PE", "name": "NIFTY",
+     "exch_seg": "NFO", "instrumenttype": "OPTIDX", "expiry": "25AUG2026",
+     "strike": "2420000.000000", "lotsize": "65"},
+    {"token": "61649", "symbol": "NIFTY25AUG2624300CE", "name": "NIFTY",
+     "exch_seg": "NFO", "instrumenttype": "OPTIDX", "expiry": "25AUG2026",
+     "strike": "2430000.000000", "lotsize": "65"},
+    # a LATER expiry, listed FIRST, to prove chronological (not alphabetical) sorting
+    {"token": "61650", "symbol": "NIFTY29DEC2624000CE", "name": "NIFTY",
+     "exch_seg": "NFO", "instrumenttype": "OPTIDX", "expiry": "29DEC2026",
+     "strike": "2400000.000000", "lotsize": "65"},
+    {"token": "61651", "symbol": "NIFTY01SEP2624000CE", "name": "NIFTY",
+     "exch_seg": "NFO", "instrumenttype": "OPTIDX", "expiry": "01SEP2026",
+     "strike": "2400000.000000", "lotsize": "65"},
+    {"token": "61660", "symbol": "NIFTY25AUG26FUT", "name": "NIFTY",
+     "exch_seg": "NFO", "instrumenttype": "FUTIDX", "expiry": "25AUG2026",
+     "strike": "-1.000000", "lotsize": "65"},
+    {"token": "61670", "symbol": "RELIANCE25AUG261400CE", "name": "RELIANCE",
+     "exch_seg": "NFO", "instrumenttype": "OPTSTK", "expiry": "25AUG2026",
+     "strike": "140000.000000", "lotsize": "500"},
+    # malformed rows that must be skipped, not crash: no expiry, an option whose
+    # tradingsymbol doesn't end CE/PE, and an instrumenttype we don't trade.
+    {"token": "70001", "symbol": "NIFTY24000CE", "name": "NIFTY",
+     "exch_seg": "NFO", "instrumenttype": "OPTIDX", "expiry": "",
+     "strike": "2400000.000000", "lotsize": "65"},
+    {"token": "70002", "symbol": "NIFTY25AUG2624000XX", "name": "NIFTY",
+     "exch_seg": "NFO", "instrumenttype": "OPTIDX", "expiry": "25AUG2026",
+     "strike": "2400000.000000", "lotsize": "65"},
+    {"token": "70003", "symbol": "USDINR25AUG26FUT", "name": "USDINR",
+     "exch_seg": "CDS", "instrumenttype": "FUTCUR", "expiry": "25AUG2026",
+     "strike": "-1.000000", "lotsize": "1000"},
+]
+
+ALL_ROWS = SCRIP_ROWS + FNO_ROWS
+
+
+def test_angel_expiry_key_sorts_expiries_chronologically():
+    keys = sorted(["29DEC2026", "01SEP2026", "25AUG2026"], key=angel_feed._expiry_key)
+    assert keys == ["25AUG2026", "01SEP2026", "29DEC2026"]
+    # an unparseable value sorts last instead of raising
+    assert angel_feed._expiry_key("junk") == (9999, 99, 99)
+
+
+def test_angel_parse_fno_builds_the_contract_tree():
+    """Pure: the whole tree shape is checked without the 37 MB download."""
+    sym2tok, meta, tree = angel_feed._parse_fno(FNO_ROWS)
+    assert sym2tok["NIFTY25AUG2624200CE"] == "61647"
+    # strikes are quoted in paise and must be divided down to rupees
+    assert meta["61647"] == {"underlying": "NIFTY", "expiry": "25AUG2026",
+                             "strike": 24200.0, "optType": "CE", "lot": 65,
+                             "tsym": "NIFTY25AUG2624200CE", "kind": "option"}
+    assert meta["61660"]["kind"] == "future" and meta["61660"]["strike"] is None
+    assert tree["NIFTY"]["25AUG2026"]["CE"][24200.0] == "61647"
+    assert tree["NIFTY"]["25AUG2026"]["PE"][24200.0] == "61648"
+    assert tree["NIFTY"]["25AUG2026"]["FUT"] == "61660"
+    assert tree["NIFTY"]["25AUG2026"]["lot"] == 65
+    # the malformed / other-segment rows are dropped
+    assert set(tree) == {"NIFTY", "RELIANCE"}
+    for bad in ("70001", "70002", "70003"):
+        assert bad not in meta, bad
+
+
+def test_angel_fno_contracts_do_not_shadow_cash_symbols():
+    """~36k contracts must stay OUT of the cash map, or RELIANCE could resolve to an
+    option and the equity watchlist would silently break."""
+    with _scrip(ALL_ROWS):
+        assert angel_feed.resolve("RELIANCE") == "2885"
+        assert angel_feed.resolve("NIFTY") == "99926000"
+        assert not any(r["symbol"] in angel_feed._sym2sec for r in FNO_ROWS)
+        # ...but the tradingsymbol itself resolves, so the watchlist can subscribe it
+        assert angel_feed.resolve("nifty25aug2624200ce") == "61647"
+        assert angel_feed.is_fno("NIFTY25AUG2624200CE") is True
+        assert angel_feed.is_fno("61660") is True
+        assert angel_feed.is_fno("RELIANCE") is False
+        assert angel_feed.is_fno(None) is False
+
+
+def test_angel_segment_and_exchange_follow_the_token():
+    with _scrip(ALL_ROWS):
+        assert angel_feed.segment_of("61647") == angel_feed.NSE_FO
+        assert angel_feed.segment_of("2885") == angel_feed.NSE_CM
+        assert angel_feed.segment_of("99926009") == angel_feed.NSE_CM
+        assert angel_feed.exchange_of("61647") == "NFO"
+        assert angel_feed.exchange_of("2885") == "NSE"
+
+
+def test_angel_subscribe_payload_groups_tokens_by_segment():
+    """Cash, indices and F&O share ONE socket, but each token must be listed under
+    its own exchangeType or the broker silently drops the subscription."""
+    with _scrip(ALL_ROWS):
+        assert angel_feed._by_segment({"2885", "61647", "99926009", "61660"}) == [
+            {"exchangeType": angel_feed.NSE_CM, "tokens": ["2885", "99926009"]},
+            {"exchangeType": angel_feed.NSE_FO, "tokens": ["61647", "61660"]},
+        ]
+
+
+def test_angel_set_watch_subscribes_an_fno_leg_under_nfo():
+    calls = []
+
+    class _Sws:
+        def subscribe(self, corr, mode, payload):
+            calls.append(("sub", payload))
+
+        def unsubscribe(self, corr, mode, payload):
+            calls.append(("unsub", payload))
+
+    with _scrip(ALL_ROWS), _patch(angel_feed, "_sws", _Sws()):
+        res = angel_feed.set_watch(["RELIANCE", "NIFTY25AUG2624200CE"])
+        assert res["unresolved"] == []
+        assert res["watching"] == ["NIFTY25AUG2624200CE", "RELIANCE"]
+        assert calls == [("sub", [
+            {"exchangeType": angel_feed.NSE_CM, "tokens": ["2885"]},
+            {"exchangeType": angel_feed.NSE_FO, "tokens": ["61647"]},
+        ])]
+        calls.clear()
+        angel_feed.set_watch(["RELIANCE"])           # drop the leg
+        assert calls == [("unsub", [{"exchangeType": angel_feed.NSE_FO,
+                                     "tokens": ["61647"]}])]
+
+
+def test_angel_fno_chain_walks_underlying_expiry_strike():
+    with _scrip(ALL_ROWS):
+        ch = angel_feed.fno_chain("nifty")
+    # expiries chronological; the nearest is the default slice
+    assert ch["expiries"] == ["25AUG2026", "01SEP2026", "29DEC2026"]
+    assert ch["expiry"] == "25AUG2026" and ch["lot"] == 65
+    assert ch["fut"] == "NIFTY25AUG26FUT"
+    # each strike carries the tradingsymbol POST /api/live/watch takes directly
+    assert ch["strikes"] == [
+        {"strike": 24200.0, "ce": "NIFTY25AUG2624200CE", "pe": "NIFTY25AUG2624200PE"},
+        {"strike": 24300.0, "ce": "NIFTY25AUG2624300CE", "pe": None},
+    ]
+
+
+def test_angel_fno_chain_honours_an_explicit_expiry():
+    with _scrip(ALL_ROWS):
+        ch = angel_feed.fno_chain("NIFTY", "29dec2026")
+    assert ch["expiry"] == "29DEC2026"
+    assert ch["strikes"] == [{"strike": 24000.0, "ce": "NIFTY29DEC2624000CE",
+                              "pe": None}]
+    assert ch["fut"] is None          # a far expiry here lists no future
+
+
+def test_angel_fno_chain_and_underlyings_handle_unknown_names():
+    with _scrip(ALL_ROWS):
+        assert angel_feed.fno_underlyings() == ["NIFTY", "RELIANCE"]
+        empty = angel_feed.fno_chain("NOSUCH")
+    # a miss carries the SAME keys as a hit, so the caller never special-cases it
+    assert empty == {"underlying": "NOSUCH", "expiry": None, "expiries": [],
+                     "strikes": [], "fut": None, "lot": None}
+
+
+def test_angel_fno_meta_reads_by_symbol_or_token():
+    with _scrip(ALL_ROWS):
+        by_sym = angel_feed.fno_meta("NIFTY25AUG26FUT")
+        assert by_sym == angel_feed.fno_meta("61660")
+        assert angel_feed.fno_meta("RELIANCE") is None
+    assert by_sym["underlying"] == "NIFTY" and by_sym["kind"] == "future"
+    assert by_sym["lot"] == 65
+
+
+def test_angel_fno_tick_keeps_volume_oi_and_carries_its_contract_parts():
+    """Unlike an index, an option IS traded — volume, OI and the book are real. The
+    record also carries the leg's parts so the UI can label an opaque tradingsymbol."""
+    tick = dict(INDEX_TICK, token="61647", last_traded_price=18525,
+                volume_trade_for_the_day=4_512_300, open_interest=9_120_750,
+                average_traded_price=18400,
+                best_5_buy_data=[{"price": 18500, "quantity": 650}],
+                best_5_sell_data=[{"price": 18550, "quantity": 1300}])
+    with _scrip(ALL_ROWS):
+        angel_feed._on_data(None, tick)
+        rec = angel_feed.snapshot(["NIFTY25AUG2624200CE"])["NIFTY25AUG2624200CE"]
+    assert rec["ltp"] == 185.25 and rec["volume"] == 4_512_300
+    assert rec["oi"] == 9_120_750 and rec["atp"] == 184.0
+    assert rec["depth"]["bids"][0] == {"price": 185.0, "qty": 650}
+    assert "isIndex" not in rec
+    assert rec["fno"]["underlying"] == "NIFTY" and rec["fno"]["strike"] == 24200.0
+    assert rec["fno"]["optType"] == "CE" and rec["fno"]["lot"] == 65
+
+
+def test_angel_public_status_counts_fno_contracts_separately():
+    with _scrip(SCRIP_ROWS):
+        base = angel_feed.public_status()
+    with _scrip(ALL_ROWS):
+        st = angel_feed.public_status()
+    assert base["fnoContracts"] == 0
+    assert st["fnoContracts"] == 7          # the malformed/other-segment rows excluded
+    # the legs are counted on their own — they must not inflate the cash/index map
+    assert st["instruments"] == base["instruments"]
+
+
+def test_angel_rest_calls_use_the_nfo_exchange_for_a_leg():
+    """getMarketData / getCandleData key off `exchange`; an NFO token asked on "NSE"
+    returns nothing, so the segment has to follow the token."""
+    seen = {}
+
+    class _Smart:
+        def getMarketData(self, mode, tokens):
+            seen["quote"] = dict(tokens)
+            return {"data": {"fetched": [{"ltp": 185.25, "close": 180.0,
+                                          "tradeVolume": 4512300}]}}
+
+        def getCandleData(self, params):
+            seen.setdefault("candles", []).append(params["exchange"])
+            return {"data": [["2026-08-24T09:15:00+05:30", 180, 186, 179, 185, 5000]]}
+
+    with _scrip(ALL_ROWS), _patch(angel_feed, "_smart", _Smart()), \
+            _patch(angel_feed, "_candle_cache", {}), \
+            _patch(angel_feed, "_candle_calls", angel_feed.collections.deque()):
+        q = angel_feed.rest_quote("NIFTY25AUG2624200CE")
+        angel_feed.rest_ohlc("NIFTY25AUG2624200CE", interval=15)
+        angel_feed.rest_chart("NIFTY25AUG2624200CE")      # 5-min: a distinct cache key
+        angel_feed.rest_ohlc("RELIANCE", interval=15)
+    assert seen["quote"] == {"NFO": ["61647"]}
+    assert seen["candles"] == ["NFO", "NFO", "NSE"]
+    # an option is traded, so nothing is blanked the way an index's fields are
+    assert q["ltp"] == 185.25 and q["volume"] == 4512300
+    assert q["fno"]["optType"] == "CE"
+
+
+# ---------------------------------------------------------------------------
 # angel on-demand REST (stock-detail modal served from the broker, not NSE)
 # ---------------------------------------------------------------------------
 class _FakeSmart:
@@ -703,13 +932,21 @@ def test_dhan_rest_stubs_return_none():
     assert dhan_feed.rest_ohlc("RELIANCE") is None
 
 
-def test_dhan_index_stubs():
+def test_dhan_index_and_fno_stubs():
     """Both adapters must expose the same interface — this one indexes cash
-    equities only, so nothing is ever an index."""
+    equities only, so nothing is ever an index or an F&O leg."""
     assert dhan_feed.is_index("NIFTY") is False
     assert dhan_feed.index_symbols() == []
+    assert dhan_feed.is_fno("NIFTY25AUG2624200CE") is False
+    assert dhan_feed.fno_meta("NIFTY25AUG2624200CE") is None
+    assert dhan_feed.fno_underlyings() == []
+    # identical shape across adapters, so the picker never special-cases a provider
+    with _scrip(ALL_ROWS):
+        angel_miss = angel_feed.fno_chain("NIFTY_NOSUCH")
+    assert dhan_feed.fno_chain("NIFTY") == angel_miss | {"underlying": "NIFTY"}
     with _env(DHAN_KEYS), _cfg(dhan_feed, None), _feed_state(dhan_feed):
-        assert dhan_feed.public_status()["indices"] == []
+        st = dhan_feed.public_status()
+    assert st["indices"] == [] and st["fnoContracts"] == 0
 
 
 def _main():

@@ -153,6 +153,24 @@ def index_symbols():
     return []
 
 
+def is_fno(symbol_or_token):
+    """Part of the shared feed interface — this adapter carries no derivatives."""
+    return False
+
+
+def fno_meta(symbol_or_token):
+    return None
+
+
+def fno_underlyings():
+    return []
+
+
+def fno_chain(underlying, expiry=None):
+    return {"underlying": (underlying or "").upper().strip(), "expiry": None,
+            "expiries": [], "strikes": [], "fut": None, "lot": None}
+
+
 # ---------------------------------------------------------------------------
 # In-memory live store
 # ---------------------------------------------------------------------------
@@ -515,5 +533,6 @@ def public_status():
         "errorAt": _status["errorAt"],
         "instruments": scrip_count(),
         "indices": index_symbols(),
+        "fnoContracts": 0,
         "watching": watching,
     }

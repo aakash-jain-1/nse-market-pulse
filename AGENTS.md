@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 860 unit tests across 38 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 875 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +142,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 860 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 875 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -313,16 +313,23 @@ with no creds the app is unchanged.
   committed): `ANGEL_API_KEY/CLIENT_CODE/MPIN/TOTP_SECRET` env or `angel_config.json`.
   Login is a TOTP session — `SmartConnect.generateSession(client, mpin, pyotp.TOTP(secret).now())`
   → jwt + feed token; the daily refresh is automatic (we hold the TOTP *secret*, not
-  a fixed token). `SmartWebSocketV2` streams **SNAP_QUOTE** (mode 3, exchangeType
-  1=NSE cash): LTP + day OHLC/volume + OI + **best-5 depth**. Prices arrive in
-  **paise (×100)** — divide by 100, indices included. Scrip master
+  a fixed token). `SmartWebSocketV2` streams **SNAP_QUOTE** (mode 3): LTP + day
+  OHLC/volume + OI + **best-5 depth**, over **two exchangeTypes on ONE socket** —
+  `1` = NSE cash (equities + indices), `2` = NFO (options + futures). Prices arrive in
+  **paise (×100)** — divide by 100, indices and strikes included. Scrip master
   `OpenAPIScripMaster.json` filtered to NSE `-EQ` **plus** the 57 NSE indices
   (`instrumenttype == "AMXIDX"`, tokens `9992…`) → `resolve → token` (RELIANCE →
   `2885`, same NSE ids as Dhan; BANKNIFTY → `99926009`). Equities are indexed FIRST
   and index keys use `setdefault`, so a stock always wins a name collision;
   `INDEX_ALIASES` accepts `NIFTY 50`/`INDIAVIX`/`VIX`-style spellings, `_sec2trad`
   keeps each token's real tradingsymbol (an index has no `-EQ` to append), and
-  `is_index()` / `index_symbols()` expose the split. The
+  `is_index()` / `index_symbols()` expose the split. The **~36k NFO contracts** are
+  parsed by `_parse_fno()` into their OWN maps (`_fno_tok` / `_fno_meta` / `_fno_tree`),
+  never `_sym2sec` — 36k opaque tradingsymbols in the cash map would both bloat it and
+  risk shadowing a stock. `resolve()` checks cash/indices first, then F&O.
+  `segment_of()` / `exchange_of()` map a token to its `exchangeType` / REST `exchange`
+  ("NSE"/"NFO"), `_by_segment()` builds the grouped subscribe payload, and
+  `is_fno()` / `fno_meta()` / `fno_underlyings()` / `fno_chain()` expose the tree. The
   SDK spews per-tick INFO to `./logs/<date>/app.log`; `_quiet_logs()` mutes logzero
   to WARNING. (NSE's Apr-2026 static-IP rule is for *order* APIs; **market data has
   no such requirement** and we only stream data.)
@@ -345,11 +352,19 @@ with no creds the app is unchanged.
   `db.min_bars` — the Live feed thus **warms the backtester's minute cache** for free.
   **Index records omit volume/oi/atp/depth entirely** (Angel sends zeros + a
   `-0.01/-1` sentinel book for one) and `snapshot()` stamps them `isIndex: true`.
+  **F&O records keep all of it** (an option really is traded) and carry
+  `fno: {underlying, expiry, strike, optType, lot, tsym, kind}` so the UI can label an
+  opaque tradingsymbol.
 - **Endpoints (all under `/api/live/`):**
   - `GET config` — `public_status()`: configured/connected/marketOpen + watchlist +
     `indices` (the streamable index names, read off the already-loaded master so this
-    never blocks on the download) — never returns secrets.
-  - `POST watch` — `{symbols:[…], focus}` → subscribe/unsubscribe the delta.
+    never blocks on the download) + `fnoContracts` — never returns secrets.
+  - `POST watch` — `{symbols:[…], focus}` → subscribe/unsubscribe the delta, grouped
+    by exchange segment so cash/index and F&O tokens can be watched together.
+  - `GET fno[?underlying=&expiry=]` — browse the contract tree for the picker: no args
+    → underlyings with listed contracts; `?underlying=NIFTY` → its expiries
+    (chronological) + the nearest expiry's strikes, each carrying the CE/PE
+    **tradingsymbol** `POST watch` takes directly (the browser never sees the master).
   - `GET seed/<sym>?interval=1|5|15|D` — historical candles to seed the chart
     (reuses `nse_quote.get_ohlc`).
   - `GET stream` — **SSE**, yields `{quotes, status, ts}` ~1×/s (headers:
@@ -365,6 +380,12 @@ with no creds the app is unchanged.
   `config.indices` and refreshed from the SSE status when the master lands late) adds
   the six index majors in one click; `liveIsIndex()` drives the ` idx` row tag, the
   `index` header label instead of `Vol 0`, and the "no order book" depth message.
+  A **⛓ F&O leg** picker (`liveRenderFnoPicker` / `liveFnoLoadChain` / `liveFnoAdd`,
+  shown only when `fnoContracts > 0`) walks underlying → expiry → strike and adds the
+  CE / PE / FUT tradingsymbol; the strike list is **centred on spot** when the
+  underlying is already streaming, and legs the chosen expiry doesn't list are greyed
+  out. `liveFnoLabel()` renders `NIFTY 24150 CE · 25 Aug` (+ lot size on the header)
+  from `rec.fno`, cached in `_liveFnoMeta` so a restored watchlist labels correctly.
   The lib loads from CDN; `static/vendor/lightweight-charts.standalone.production.js`
   is an offline fallback (browser `onerror`).
 - **NSE polled fallback (no/again-offline broker):** the Live tab is no longer
@@ -379,6 +400,10 @@ with no creds the app is unchanged.
   poll is stopped in `liveApply`). Chip: **● NSE · ~12s** / **● NSE (broker offline) ·
   …** / **· market closed** (depth is empty outside 09:15–15:30 IST either way). The
   per-stock **detail modal already renders NSE depth** the same way (`loadDepth`).
+  **F&O legs are skipped by this poll** — a tradingsymbol exists only in the broker's
+  master, so `/api/quote` and `/api/live/seed` short-circuit on `_is_fno()` (503 / empty
+  points) instead of spending a WAF-rationed NSE request, and the poll keeps each leg's
+  last streamed record rather than dropping the row.
 
 ### BLOCKED / unreliable endpoints (do not rely on)
 - `/api/quote-equity?symbol=X` → **403 Forbidden** (superseded by NextApi above).
@@ -561,21 +586,27 @@ with no creds the app is unchanged.
 - Data only meaningful during NSE market hours (Mon–Fri, 09:15–15:30 IST).
 - The Live tab is optional and needs the user's own broker credentials. **Angel One
   SmartAPI is the free default** (auto TOTP login, no manual token step); **Dhan** is
-  an alternative but its Data API is a paid ₹499+GST/mo subscription. It streams
-  **NSE cash equities + the NSE indices** (Angel); **F&O legs are not wired yet**
-  (they need the `NFO` segment + expiry/strike handling). Dhan stays cash-only.
+  an alternative but its Data API is a paid ₹499+GST/mo subscription. With Angel it
+  streams **NSE cash equities, the NSE indices and F&O legs** (options + futures, on
+  the `NFO` segment). Dhan stays cash-only — its adapter reports no indices/contracts.
 - An **index has no volume, OI, VWAP or order book** — it's a computed level. Angel
   sends placeholder zeros and a **sentinel book (`price -0.01, qty -1`)** for one; we
   drop those rather than pass them on, so don't "fix" a missing index volume field.
+  An **option/future is** genuinely traded, so it keeps all of those — don't apply the
+  index guard to an F&O token.
+- An **F&O tradingsymbol only exists in the broker's master.** NSE's per-stock quote /
+  charting hosts key off cash tickers, so there is **no NSE or EOD fallback** for a leg
+  (`/api/quote` returns 503, `/api/live/seed` empty). Live F&O needs a connected broker.
 
 ## Roadmap / ideas (not yet built)
 
 - **Real-time broker feed** — ✅ **done for charts/quotes/depth** via a
   provider-agnostic adapter: **Angel One SmartAPI (free, default)** or **Dhan (paid
   data plan)** — `angel_feed.py` / `dhan_feed.py`, 📈 Live tab; see the live-feed
-  architecture note. ✅ *(done — see below)* the Live tab now also streams the **NSE
-  indices**. Still open: route paper-trading fills/`get_price` through the broker feed,
-  and extend the Live tab to **F&O legs** (needs the `NFO` segment + expiry/strike UI).
+  architecture note. ✅ *(done — see below)* the Live tab now streams the **NSE indices**
+  **and F&O legs** (options + futures on the `NFO` segment) — the whole
+  "extend the Live tab to index/F&O instruments" item is complete. Still open: route
+  paper-trading fills / `get_price` through the broker feed too.
 - Phone/LAN access + optional deploy.
 - ✅ *(done — see below)* `jugaad-data`/`nsefeed`-style fallback for the flaky bits:
   implemented natively as `bhavcopy.py` (EOD UDiFF ingest), no third-party dep.
@@ -605,6 +636,27 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **⛓ Live tab streams F&O LEGS (options + futures)** — closes the "extend the Live tab to index/F&O instruments"
+ roadmap item. Contracts sit on a **different exchange segment** (`NFO`, `exchangeType 2`) but ride the **same
+ socket**, so the work was segment plumbing, not a second connection: `_by_segment()` groups every
+ subscribe/unsubscribe payload by `segment_of(token)`, and `exchange_of()` gives the REST `exchange` ("NSE"/"NFO")
+ that `getMarketData`/`getCandleData` need — an NFO token asked on "NSE" silently returns nothing.
+ The master's **~36k NFO rows** deliberately do NOT go into `_sym2sec`: `_parse_fno()` (pure) indexes them into
+ `_fno_tok` / `_fno_meta` / `_fno_tree` as an **underlying → expiry → strike → CE/PE (+FUT)** tree, so 36k opaque
+ tradingsymbols can't bloat or shadow the cash map (`resolve()` checks cash/indices first, then F&O). Strikes are in
+ **paise** like every other master price (÷100), and `_expiry_key()` sorts expiries chronologically, not
+ alphabetically. Unlike an index, an option **is** traded, so volume/OI/depth are kept as-is; each record carries
+ `fno: {underlying, expiry, strike, optType, lot, tsym, kind}`. UI: a **⛓ F&O leg** picker walks the tree via new
+ `GET /api/live/fno`, centres the strike list **on spot** when the underlying is already streaming, greys out legs an
+ expiry doesn't list, and labels rows `NIFTY 24150 CE · 25 Aug` (+ lot size on the header) instead of
+ `NIFTY25AUG2624150CE`. Because a leg has **no NSE/EOD counterpart**, `/api/quote` and `/api/live/seed` short-circuit
+ on `_is_fno()` rather than burning a WAF-rationed request, and the NSE poll skips legs and keeps their last streamed
+ values. `dhan_feed` gets matching stubs (cash-only). **Live-verified 2026-08-24 (market open):** 35,947 contracts /
+ 232 underlyings parsed in 0.13s; NIFTY spot 24153.95 → ATM 24150 auto-picked; the subscribe payload split cleanly
+ into `exchangeType 1: [RELIANCE, BANKNIFTY]` + `2: [CE, PE, FUT]` on one socket; real ticks on all three legs
+ (CE ₹81.55, PE ₹42.20, FUT 24196.10 ≈ +42 basis) each with volume, OI and a 5-level book; `rest_ohlc` returned 225
+ 5-min candles for the CE. Suite **860 → 875**.
 
 - **🚨 Fix: the access log had silently killed ALL SSE streaming** — found while live-verifying the index work below.
  `/api/live/stream` never returned even its HTTP headers, so the Live tab's realtime path was dead (the browser just

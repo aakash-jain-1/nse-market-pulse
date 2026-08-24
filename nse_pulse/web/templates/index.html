@@ -423,6 +423,22 @@
     .live-note { font-size: 11px; color: var(--muted); margin-top: 8px; }
     .live-add { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border);
                 border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-bottom: 8px; }
+    /* F&O leg picker: underlying → expiry → strike → CE/PE/FUT. */
+    .live-fno { border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-bottom: 10px; background: var(--panel-2); }
+    .live-fno h5 { margin: 0 0 7px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .live-fno input, .live-fno select { width: 100%; background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font-size: 12px; margin-bottom: 6px; }
+    .live-fno .fno-row { display: flex; gap: 6px; }
+    .live-fno .fno-row > * { flex: 1; min-width: 0; }
+    .live-fno .fno-legs { display: flex; gap: 6px; margin-top: 1px; }
+    .live-fno .fno-legs button { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 5px 0; font-size: 12px; font-weight: 700; cursor: pointer; }
+    .live-fno .fno-legs button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .live-fno .fno-legs button:disabled { opacity: 0.4; cursor: default; }
+    .live-fno .fno-legs button.ce:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+    .live-fno .fno-legs button.pe:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+    .live-fno .fno-note { font-size: 10.5px; color: var(--muted); margin-top: 6px; }
+    .lw-sub { font-weight: 400; color: var(--muted); font-size: 11px; }
     .live-col h4 { margin: 2px 0 8px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
     .lw-row { display: flex; justify-content: space-between; align-items: center; gap: 6px;
               padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
@@ -3882,6 +3898,21 @@
           <h4>Watchlist</h4>
           <input id="liveAdd" class="live-add" placeholder="Add symbol (e.g. INFY) ↵" autocomplete="off">
           <div id="liveIndexPicks" class="oc-index-picks" style="margin-bottom:10px"></div>
+          <div id="liveFnoBox" class="live-fno" style="display:none">
+            <h5>⛓ F&amp;O leg</h5>
+            <input id="liveFnoUnd" list="liveFnoUnds" placeholder="Underlying (e.g. NIFTY)" autocomplete="off">
+            <datalist id="liveFnoUnds"></datalist>
+            <div class="fno-row">
+              <select id="liveFnoExp" title="Expiry"></select>
+              <select id="liveFnoStrike" title="Strike"></select>
+            </div>
+            <div class="fno-legs">
+              <button class="ce" data-leg="ce" title="Add the call option">CE</button>
+              <button class="pe" data-leg="pe" title="Add the put option">PE</button>
+              <button data-leg="fut" title="Add the future">FUT</button>
+            </div>
+            <div class="fno-note" id="liveFnoNote"></div>
+          </div>
           <div id="liveWatchList"></div>
         </div>
         <div class="live-main">
@@ -3933,10 +3964,149 @@
         ? known.includes(sym) : LIVE_INDEX_PICKS.includes(sym);
     }
 
+    // ---- F&O legs (options + futures) ----------------------------------------
+    // Contracts live on a different exchange segment (NFO) than cash/indices, so the
+    // broker streams them over the same socket but the tradingsymbol is opaque
+    // ("NIFTY25AUG2624200CE"). The picker walks the master's tree instead of asking
+    // the user to spell one, and `_liveFnoMeta` caches each leg's parts for labelling.
+    function liveIsFno(sym, rec) {
+      if (rec && rec.fno) return true;
+      return !!(window._liveFnoMeta || {})[sym];
+    }
+
+    // "25AUG2026" → "25 Aug" (the year is noise on a near-month leg).
+    function liveFnoExpShort(exp) {
+      const m = /^(\d{2})([A-Z]{3})(\d{4})$/.exec(String(exp || "").toUpperCase());
+      if (!m) return exp || "";
+      return m[1] + " " + m[2][0] + m[2].slice(1).toLowerCase();
+    }
+
+    // A leg's watchlist label: "NIFTY 24200 CE" reads at a glance where the raw
+    // tradingsymbol does not. Falls back to the symbol until the master/first tick
+    // fills the parts in (e.g. a watchlist restored from localStorage).
+    function liveFnoLabel(sym, rec) {
+      const f = (rec && rec.fno) || (window._liveFnoMeta || {})[sym];
+      if (!f) return null;
+      const exp = liveFnoExpShort(f.expiry);
+      const main = f.optType
+        ? `${f.underlying} ${fmtNum(f.strike)} ${f.optType}`
+        : `${f.underlying} FUT`;
+      return { main, sub: exp, lot: f.lot,
+               title: `${sym} · expiry ${exp}${f.lot ? ` · lot ${f.lot}` : ""}` };
+    }
+
+    function liveRenderFnoPicker() {
+      const box = document.getElementById("liveFnoBox");
+      if (!box) return;
+      // Only the broker feed carries F&O — NSE's per-stock quote API has no
+      // tradingsymbol coverage, so in polled mode the picker would build dead rows.
+      if (!((window._liveCfg || {}).fnoContracts > 0)) { box.style.display = "none"; return; }
+      box.style.display = "";
+      if (window._liveFnoUnds) return;                       // already loaded
+      window._liveFnoUnds = [];
+      fetch("/api/live/fno").then(r => r.json()).then(d => {
+        window._liveFnoUnds = d.underlyings || [];
+        const dl = document.getElementById("liveFnoUnds");
+        if (dl) dl.innerHTML = window._liveFnoUnds
+          .map(u => `<option value="${escapeHtml(u)}"></option>`).join("");
+        const note = document.getElementById("liveFnoNote");
+        if (note) note.textContent = `${window._liveFnoUnds.length} underlyings`;
+      }).catch(() => {});
+    }
+
+    async function liveFnoLoadChain(und, exp) {
+      const expSel = document.getElementById("liveFnoExp");
+      const stSel = document.getElementById("liveFnoStrike");
+      const note = document.getElementById("liveFnoNote");
+      if (!expSel || !stSel) return;
+      und = String(und || "").toUpperCase().trim();
+      window._liveFnoChain = null;
+      if (!und) { expSel.innerHTML = ""; stSel.innerHTML = ""; liveFnoLegs(); return; }
+      let d = null;
+      try {
+        const qs = "underlying=" + encodeURIComponent(und) + (exp ? "&expiry=" + encodeURIComponent(exp) : "");
+        d = await (await fetch("/api/live/fno?" + qs)).json();
+      } catch (e) { /* handled below */ }
+      if (!d || !d.expiries || !d.expiries.length) {
+        expSel.innerHTML = ""; stSel.innerHTML = "";
+        if (note) note.textContent = und ? `No listed contracts for ${und}.` : "";
+        liveFnoLegs();
+        return;
+      }
+      window._liveFnoChain = d;
+      expSel.innerHTML = d.expiries.map(e =>
+        `<option value="${escapeHtml(e)}"${e === d.expiry ? " selected" : ""}>${escapeHtml(liveFnoExpShort(e))}</option>`).join("");
+      // Centre the strike list on spot when the underlying is already streaming
+      // (the index chips sit right above, so it usually is); otherwise mid-list.
+      const spot = ((window._liveQuotes || {})[d.underlying] || {}).ltp;
+      const strikes = d.strikes || [];
+      let pick = strikes.length ? Math.floor(strikes.length / 2) : -1;
+      if (spot != null && strikes.length) {
+        let best = Infinity;
+        strikes.forEach((s, i) => {
+          const diff = Math.abs(s.strike - spot);
+          if (diff < best) { best = diff; pick = i; }
+        });
+      }
+      stSel.innerHTML = strikes.map((s, i) =>
+        `<option value="${i}"${i === pick ? " selected" : ""}>${fmtNum(s.strike)}</option>`).join("");
+      if (note) {
+        note.textContent = `${strikes.length} strikes${d.lot ? ` · lot ${d.lot}` : ""}`
+          + (spot != null ? " · centred on spot" : "");
+      }
+      liveFnoLegs();
+    }
+
+    // Grey out legs the chosen expiry doesn't actually list (weekly index expiries
+    // have no future; a few names list futures only).
+    function liveFnoLegs() {
+      const d = window._liveFnoChain;
+      const stSel = document.getElementById("liveFnoStrike");
+      const i = stSel ? parseInt(stSel.value, 10) : NaN;
+      const row = (d && d.strikes && !isNaN(i)) ? d.strikes[i] : null;
+      const have = { ce: !!(row && row.ce), pe: !!(row && row.pe), fut: !!(d && d.fut) };
+      document.querySelectorAll("#liveFnoBox .fno-legs button").forEach(b => {
+        b.disabled = !have[b.getAttribute("data-leg")];
+      });
+    }
+
+    function liveFnoAdd(leg) {
+      const d = window._liveFnoChain;
+      if (!d) return;
+      let tsym = null, meta = { underlying: d.underlying, expiry: d.expiry, lot: d.lot };
+      if (leg === "fut") { tsym = d.fut; meta.kind = "future"; meta.strike = null; meta.optType = null; }
+      else {
+        const stSel = document.getElementById("liveFnoStrike");
+        const row = (d.strikes || [])[parseInt(stSel ? stSel.value : "", 10)];
+        if (!row) return;
+        tsym = leg === "ce" ? row.ce : row.pe;
+        meta.kind = "option"; meta.strike = row.strike; meta.optType = leg.toUpperCase();
+      }
+      if (!tsym) return;
+      window._liveFnoMeta = window._liveFnoMeta || {};
+      window._liveFnoMeta[tsym] = meta;
+      liveAddSymbol(tsym);
+    }
+
     function wireLiveShell() {
       const add = document.getElementById("liveAdd");
       if (add) add.onkeydown = (e) => { if (e.key === "Enter") liveAddSymbol(); };
       liveRenderIndexPicks();
+      liveRenderFnoPicker();
+      const und = document.getElementById("liveFnoUnd");
+      if (und) {
+        und.onchange = () => liveFnoLoadChain(und.value);
+        und.onkeydown = (e) => { if (e.key === "Enter") liveFnoLoadChain(und.value); };
+      }
+      const expSel = document.getElementById("liveFnoExp");
+      if (expSel) expSel.onchange = () => liveFnoLoadChain(
+        (window._liveFnoChain || {}).underlying || (und ? und.value : ""), expSel.value);
+      const stSel = document.getElementById("liveFnoStrike");
+      if (stSel) stSel.onchange = liveFnoLegs;
+      document.querySelectorAll("#liveFnoBox .fno-legs button").forEach(b => {
+        b.disabled = true;
+        b.onclick = () => liveFnoAdd(b.getAttribute("data-leg"));
+      });
       document.querySelectorAll("#liveIvs .ivbtn").forEach(b => {
         b.classList.toggle("on", b.dataset.iv === (window._liveIv || "1"));
         b.onclick = () => liveSetIv(b.dataset.iv);
@@ -4074,6 +4244,10 @@
         window._liveCfg = Object.assign(window._liveCfg || {}, { indices: st.indices });
         liveRenderIndexPicks();
       }
+      if (st.fnoContracts && st.fnoContracts !== (window._liveCfg || {}).fnoContracts) {
+        window._liveCfg = Object.assign(window._liveCfg || {}, { fnoContracts: st.fnoContracts });
+        liveRenderFnoPicker();
+      }
 
       // Broker configured but NOT actually streaming (market closed, token pending,
       // socket dropped)? Hand off to the NSE polled fallback so the tab still shows
@@ -4087,6 +4261,12 @@
       window._liveConnected = true;
 
       window._liveQuotes = payload.quotes || {};
+      // The feed stamps each leg's parts on its record; cache them so a watchlist
+      // restored from localStorage labels correctly from the first tick onward.
+      window._liveFnoMeta = window._liveFnoMeta || {};
+      for (const [sym, rec] of Object.entries(window._liveQuotes)) {
+        if (rec && rec.fno) window._liveFnoMeta[sym] = rec.fno;
+      }
       const chip = document.getElementById("liveStatus");
       if (chip) {
         if (st.marketOpen) { chip.textContent = "● LIVE"; chip.className = "live-chip on"; }
@@ -4134,7 +4314,10 @@
 
     async function liveNsePollOnce() {
       if (current !== "live" || !window._lwc) return;
-      const wl = (window._liveWatch || []).slice(0, 12);   // cap the NSE fan-out
+      // F&O legs are broker-only (NSE's quote API has no tradingsymbol coverage), so
+      // polling them would just 404 — keep their last streamed values instead.
+      const prev = window._liveQuotes || {};
+      const wl = (window._liveWatch || []).filter(s => !liveIsFno(s, prev[s])).slice(0, 12);
       try {
         const pairs = await Promise.all(wl.map(async (sym) => {
           try {
@@ -4143,6 +4326,7 @@
           } catch (e) { return [sym, null]; }
         }));
         const quotes = {};
+        for (const s of (window._liveWatch || [])) if (liveIsFno(s, prev[s]) && prev[s]) quotes[s] = prev[s];
         for (const [sym, rec] of pairs) if (rec) quotes[sym] = rec;
         window._liveQuotes = quotes;
       } catch (e) { /* best-effort; keep last snapshot */ }
@@ -4205,8 +4389,11 @@
         const st = idx ? null : depthStats(rec.depth);
         const stripe = obiStripe(st);
         const obiTip = st ? ` · book ${st.imb >= 0 ? "+" : ""}${st.imb.toFixed(0)}% (${st.imb >= 0 ? "buy" : "sell"}-heavy)` : "";
-        return `<div class="lw-row${sel}" data-sym="${esym}"${stripe ? ` style="${stripe}"` : ""} title="${esym}${idx ? " · index (no volume or order book)" : ""}${obiTip}">
-          <span class="lw-sym">${esym}${idx ? `<span class="muted" style="font-weight:400"> idx</span>` : ""}</span>
+        // An F&O tradingsymbol is unreadable in a narrow column — show its parts.
+        const fno = liveFnoLabel(sym, rec);
+        const tip = fno ? fno.title : esym;
+        return `<div class="lw-row${sel}" data-sym="${esym}"${stripe ? ` style="${stripe}"` : ""} title="${escapeHtml(tip)}${idx ? " · index (no volume or order book)" : ""}${obiTip}">
+          <span class="lw-sym">${fno ? `${escapeHtml(fno.main)}<span class="lw-sub"> ${escapeHtml(fno.sub)}</span>` : esym}${idx ? `<span class="muted" style="font-weight:400"> idx</span>` : ""}</span>
           <span class="lw-ltp"><span class="${cls}">${rec.ltp != null ? fmtPrice(rec.ltp) : "—"}</span>${
             chgPct == null ? "" : `<span class="${cls}" style="font-size:11px"> ${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%</span>`}</span>
           <span class="lw-x" title="Remove">×</span>
@@ -4217,7 +4404,11 @@
     function liveHeader(rec) {
       const symEl = document.getElementById("liveSym");
       const vals = document.getElementById("liveVals");
-      if (symEl) symEl.textContent = window._liveFocus || "—";
+      const fno = liveFnoLabel(window._liveFocus, rec);
+      if (symEl) {
+        symEl.textContent = fno ? fno.main : (window._liveFocus || "—");
+        symEl.title = fno ? fno.title : "";
+      }
       if (!vals) return;
       if (!rec || rec.ltp == null) { vals.innerHTML = `<span>waiting for ticks…</span>`; return; }
       const base = (rec.prevClose != null) ? rec.prevClose : rec.close;
@@ -4233,7 +4424,11 @@
         (liveIsIndex(window._liveFocus, rec) ? `<span class="muted">index</span>`
           : `<span>Vol ${fmtNum(rec.volume)}</span>` +
             (rec.oi ? `<span>OI ${fmtNum(rec.oi)}</span>` : "") +
-            (rec.atp ? `<span>VWAP ${fmtPrice(rec.atp)}</span>` : ""));
+            (rec.atp ? `<span>VWAP ${fmtPrice(rec.atp)}</span>` : "")) +
+        // A leg's expiry + lot size decide the real rupee exposure, so keep them
+        // on screen next to the premium rather than only in a tooltip.
+        (fno ? `<span class="muted">${escapeHtml(liveFnoExpShort((rec.fno || {}).expiry || fno.sub))}${
+          fno.lot ? ` · lot ${fno.lot}` : ""}</span>` : "");
     }
 
     // Order-book pressure from a {bids,asks} 5-level ladder. Returns null when the

@@ -54,8 +54,19 @@ SCRIP_TTL = 86400          # refresh the instrument master at most once a day
 # NSE indices live in this SAME segment (exchangeType 1) — only their instrumenttype
 # differs — so streaming them needs no new segment, just carrying them in the master.
 NSE_CM = 1
+NSE_FO = 2                  # options + futures — same socket, different exchangeType
 SNAP_QUOTE = 3
 CORR_ID = "nsepulse01"      # 10-char tracking id echoed back on errors
+
+# NFO instrument types, and the REST `exchange` string each segment needs.
+FNO_OPT_TYPES = ("OPTSTK", "OPTIDX")
+FNO_FUT_TYPES = ("FUTSTK", "FUTIDX")
+_EXCH_OF_SEG = {NSE_CM: "NSE", NSE_FO: "NFO"}
+# Angel reports option strikes in paise, like every other price in the master.
+STRIKE_DIV = 100.0
+_MONTHS = {m: i for i, m in enumerate(
+    ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV",
+     "DEC"), 1)}
 
 # Angel tags the 57 NSE indices with this instrumenttype (tokens 999260xx). Their
 # `name` field already matches the naming the rest of the app uses ("NIFTY",
@@ -137,15 +148,77 @@ _sym2sec = {}       # "RELIANCE" -> "2885" | "BANKNIFTY" -> "99926009"
 _sec2sym = {}       # "2885"     -> "RELIANCE"
 _sec2trad = {}      # "2885"     -> "RELIANCE-EQ" | "99926009" -> "Nifty Bank"
 _index_tokens = set()   # tokens that are indices (no volume/OI/depth on their ticks)
+# F&O (NFO segment). Kept in their OWN structures: the cash/index maps stay small and
+# keep their "one entry per symbol" meaning, while ~36k derivative contracts need a
+# browsable tree instead (nobody types "NIFTY25AUG2624500CE" from memory).
+_fno_tok = {}       # "NIFTY25AUG2624500CE" -> "45123"
+_fno_meta = {}      # token -> {underlying, expiry, strike, optType, lot, tsym}
+_fno_tree = {}      # underlying -> {expiry: {"CE": {strike: tok}, "PE": {…}, "FUT": tok}}
+_fo_tokens = set()  # tokens that live on the NSE_FO segment (drives subscribe grouping)
 _scrip_at = 0.0
 
 
+def _expiry_key(exp):
+    """`'29DEC2026'` → `(2026, 12, 29)` so expiries sort chronologically rather than
+    alphabetically. Unparseable values sort last instead of raising."""
+    try:
+        return (int(exp[5:9]), _MONTHS[exp[2:5].upper()], int(exp[:2]))
+    except (ValueError, KeyError, IndexError, TypeError):
+        return (9999, 99, 99)
+
+
+def _parse_fno(rows):
+    """Index the NFO slice into `(sym2tok, meta, tree)`. Pure, so the whole
+    contract-tree shape is unit-testable without the 37 MB download."""
+    sym2tok, meta, tree = {}, {}, {}
+    for row in rows:
+        if row.get("exch_seg") != "NFO":
+            continue
+        itype = row.get("instrumenttype")
+        is_opt, is_fut = itype in FNO_OPT_TYPES, itype in FNO_FUT_TYPES
+        if not (is_opt or is_fut):
+            continue
+        tok = str(row.get("token") or "").strip()
+        tsym = (row.get("symbol") or "").strip().upper()
+        und = (row.get("name") or "").strip().upper()
+        exp = (row.get("expiry") or "").strip().upper()
+        if not (tok and tsym and und and exp):
+            continue
+        opt_type = tsym[-2:] if is_opt and tsym[-2:] in ("CE", "PE") else None
+        if is_opt and not opt_type:              # an option we can't classify
+            continue
+        strike = None
+        if is_opt:
+            s = _to_f(row.get("strike"))
+            if s is None or s < 0:
+                continue
+            strike = round(s / STRIKE_DIV, 2)
+        lot = None
+        try:
+            lot = int(float(row.get("lotsize")))
+        except (TypeError, ValueError):
+            pass
+
+        sym2tok[tsym] = tok
+        meta[tok] = {"underlying": und, "expiry": exp, "strike": strike,
+                     "optType": opt_type, "lot": lot, "tsym": tsym,
+                     "kind": "option" if is_opt else "future"}
+        slot = tree.setdefault(und, {}).setdefault(exp, {})
+        if is_opt:
+            slot.setdefault(opt_type, {})[strike] = tok
+        else:
+            slot["FUT"] = tok
+        slot.setdefault("lot", lot)
+    return sym2tok, meta, tree
+
+
 def _load_scrip(force=False):
-    """Download + cache the NSE slice of Angel's scrip master: cash equities (-EQ)
-    AND the NSE indices (`instrumenttype` AMXIDX).
+    """Download + cache Angel's scrip master: NSE cash equities (-EQ), the NSE
+    indices (`instrumenttype` AMXIDX) and the NFO derivative contracts.
 
     Equities are registered FIRST and every index key goes in with `setdefault`, so a
-    tradable stock always wins a name collision against an index."""
+    tradable stock always wins a name collision against an index. F&O contracts live
+    in their own maps (see `_fno_tok`), so they can never shadow a cash symbol."""
     global _scrip_at
     with _scrip_lock:
         if _sym2sec and not force and (time.time() - _scrip_at) < SCRIP_TTL:
@@ -189,19 +262,90 @@ def _load_scrip(force=False):
             trads[tok] = disp                    # "Nifty Bank" — indices have no -EQ
             indices.add(tok)
 
+        fno_tok, fno_meta, fno_tree = _parse_fno(rows)
+        for tok, info in fno_meta.items():
+            trads[tok] = info["tsym"]            # F&O trades under its own symbol
+            rev.setdefault(tok, info["tsym"])
+
         if m:
             _sym2sec.clear(); _sym2sec.update(m)
             _sec2sym.clear(); _sec2sym.update(rev)
             _sec2trad.clear(); _sec2trad.update(trads)
             _index_tokens.clear(); _index_tokens.update(indices)
+            _fno_tok.clear(); _fno_tok.update(fno_tok)
+            _fno_meta.clear(); _fno_meta.update(fno_meta)
+            _fno_tree.clear(); _fno_tree.update(fno_tree)
+            _fo_tokens.clear(); _fo_tokens.update(fno_meta)
             _scrip_at = time.time()
 
 
 def resolve(symbol):
-    """Symbol -> NSE token (str) for a cash equity or an index, or None."""
+    """Symbol -> token (str) for a cash equity, an index, or an F&O contract
+    tradingsymbol (e.g. `NIFTY25AUG2624500CE`). Cash/index wins, so a derivative
+    can never shadow a stock."""
     if not _sym2sec:
         _load_scrip()
-    return _sym2sec.get((symbol or "").upper().strip())
+    key = (symbol or "").upper().strip()
+    return _sym2sec.get(key) or _fno_tok.get(key)
+
+
+def segment_of(token):
+    """SmartWebSocketV2 exchangeType for a token — F&O rides the SAME socket as cash,
+    just under a different segment, so subscriptions must be grouped by this."""
+    return NSE_FO if token in _fo_tokens else NSE_CM
+
+
+def exchange_of(token):
+    """REST `exchange` string ("NSE" / "NFO") matching the token's segment."""
+    return _EXCH_OF_SEG.get(segment_of(token), "NSE")
+
+
+def is_fno(symbol_or_token):
+    """True for an F&O contract (option leg or futures contract)."""
+    s = str(symbol_or_token or "").strip()
+    if not s:
+        return False
+    return s in _fo_tokens or _fno_tok.get(s.upper()) in _fo_tokens
+
+
+def fno_meta(symbol_or_token):
+    """Contract metadata (underlying/expiry/strike/optType/lot) or None."""
+    s = str(symbol_or_token or "").strip()
+    return _fno_meta.get(s) or _fno_meta.get(_fno_tok.get(s.upper()) or "")
+
+
+def fno_underlyings():
+    """Underlyings that have listed F&O contracts, alphabetical."""
+    if not _fno_tree:
+        _load_scrip()
+    return sorted(_fno_tree)
+
+
+def fno_chain(underlying, expiry=None):
+    """Browsable slice of the contract tree for the Live tab's picker.
+
+    Without `expiry`: the underlying's expiries (chronological). With one: that
+    expiry's strikes plus the futures contract, each as a tradingsymbol the
+    watchlist can subscribe directly."""
+    if not _fno_tree:
+        _load_scrip()
+    und = (underlying or "").upper().strip()
+    by_exp = _fno_tree.get(und)
+    if not by_exp:   # same keys as a hit, so the caller never special-cases a miss
+        return {"underlying": und, "expiry": None, "expiries": [], "strikes": [],
+                "fut": None, "lot": None}
+    expiries = sorted(by_exp, key=_expiry_key)
+    exp = (expiry or "").upper().strip() or (expiries[0] if expiries else "")
+    slot = by_exp.get(exp) or {}
+    ce, pe = slot.get("CE") or {}, slot.get("PE") or {}
+    fut = slot.get("FUT")
+    strikes = [{"strike": k,
+                "ce": _sec2trad.get(ce.get(k)) if k in ce else None,
+                "pe": _sec2trad.get(pe.get(k)) if k in pe else None}
+               for k in sorted(set(ce) | set(pe))]
+    return {"underlying": und, "expiry": exp, "expiries": expiries,
+            "strikes": strikes, "fut": _sec2trad.get(fut) if fut else None,
+            "lot": slot.get("lot")}
 
 
 def is_index(symbol_or_token):
@@ -407,6 +551,18 @@ def _on_close(wsapp):
     _set_conn(False)
 
 
+def _by_segment(tokens):
+    """SmartWebSocketV2 subscribe payload, grouped by exchangeType. Cash, indices and
+    F&O share one socket but each token must be listed under ITS OWN segment."""
+    groups = {}
+    for tok in tokens:
+        groups.setdefault(segment_of(tok), []).append(tok)
+    # `tokens` is often a set (the subscribe/unsubscribe delta) — sort so the payload
+    # is deterministic.
+    return [{"exchangeType": seg, "tokens": sorted(groups[seg])}
+            for seg in sorted(groups)]
+
+
 def _subscribe_current():
     """Subscribe the whole current watch set (SNAP_QUOTE) on the open socket."""
     sws = _sws
@@ -417,7 +573,7 @@ def _subscribe_current():
     if not toks:
         return
     try:
-        sws.subscribe(CORR_ID, SNAP_QUOTE, [{"exchangeType": NSE_CM, "tokens": toks}])
+        sws.subscribe(CORR_ID, SNAP_QUOTE, _by_segment(toks))
     except Exception as e:
         _note_err(e)
 
@@ -451,11 +607,9 @@ def set_watch(symbols, focus=None):
     if sws is not None:
         try:
             if add:
-                sws.subscribe(CORR_ID, SNAP_QUOTE,
-                              [{"exchangeType": NSE_CM, "tokens": list(add)}])
+                sws.subscribe(CORR_ID, SNAP_QUOTE, _by_segment(add))
             if rem:
-                sws.unsubscribe(CORR_ID, SNAP_QUOTE,
-                                [{"exchangeType": NSE_CM, "tokens": list(rem)}])
+                sws.unsubscribe(CORR_ID, SNAP_QUOTE, _by_segment(rem))
         except Exception as e:
             _note_err(e)
 
@@ -487,6 +641,11 @@ def snapshot(symbols=None):
                 # An index has no traded volume, OI or order book — say so, so the UI
                 # renders "—" instead of a misleading 0 / empty depth ladder.
                 r["isIndex"] = True
+            info = _fno_meta.get(tok)
+            if info:
+                # A derivative row is unreadable without its contract terms, and lot
+                # size is what turns a premium into rupees at risk.
+                r["fno"] = dict(info)
             out[sym] = r
         return out
 
@@ -563,18 +722,23 @@ def rest_quote(symbol):
     # The exchange tradingsymbol as the master spells it ("RELIANCE-EQ", "Nifty Bank");
     # an index has no -EQ series, so this can't be reconstructed from the name.
     trad = _sec2trad.get(tok) or ((_sec2sym.get(tok) or sym) + "-EQ")
+    exch = exchange_of(tok)          # "NFO" for a derivative leg, else "NSE"
     try:
         q = None
         if hasattr(smart, "getMarketData"):
-            resp = smart.getMarketData("FULL", {"NSE": [tok]})
+            resp = smart.getMarketData("FULL", {exch: [tok]})
             fetched = (((resp or {}).get("data") or {}).get("fetched") or [])
             if fetched:
                 q = _map_market_data(sym, fetched[0])
         if q is None:
-            resp = smart.ltpData("NSE", trad, tok)
+            resp = smart.ltpData(exch, trad, tok)
             d = (resp or {}).get("data") or {}
             if d.get("ltp") is not None:
                 q = _map_ltp(sym, d)
+        if q is not None:
+            info = _fno_meta.get(tok)
+            if info:
+                q["fno"] = dict(info)
         if q is not None and tok in _index_tokens:
             # Same honesty as the streaming path: an index is a computed level, so
             # report its traded-only fields as absent rather than as a real zero.
@@ -696,7 +860,7 @@ def rest_chart(symbol, days=5):
         return None
     now = datetime.now(IST)
     params = {
-        "exchange": "NSE", "symboltoken": tok, "interval": "FIVE_MINUTE",
+        "exchange": exchange_of(tok), "symboltoken": tok, "interval": "FIVE_MINUTE",
         "fromdate": (now - timedelta(days=max(1, days))).strftime("%Y-%m-%d %H:%M"),
         "todate": now.strftime("%Y-%m-%d %H:%M"),
     }
@@ -741,7 +905,7 @@ def rest_ohlc(symbol, interval=1, chart_type="I", days=None):
     lookback = days or (120 if daily else 5)
     now = datetime.now(IST)
     params = {
-        "exchange": "NSE", "symboltoken": tok, "interval": ang_iv,
+        "exchange": exchange_of(tok), "symboltoken": tok, "interval": ang_iv,
         "fromdate": (now - timedelta(days=max(1, lookback))).strftime("%Y-%m-%d %H:%M"),
         "todate": now.strftime("%Y-%m-%d %H:%M"),
     }
@@ -929,5 +1093,8 @@ def public_status():
         # runs on every /api/live/config poll). Empty until the feed has started,
         # which is honest: indices are only streamable through the broker.
         "indices": sorted(_sec2sym[t] for t in _index_tokens if t in _sec2sym),
+        # Contract count only — the ~36k F&O tradingsymbols are browsed via
+        # /api/live/fno, never shipped wholesale to the browser.
+        "fnoContracts": len(_fno_meta),
         "watching": watching,
     }

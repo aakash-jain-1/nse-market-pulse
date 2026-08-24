@@ -368,6 +368,47 @@ def test_live_endpoints():
         assert _json("/api/live/seed/ACC?interval=D&days=90")[1]["kw"]["chart_type"] == "D"
 
 
+def test_live_fno_browses_the_contract_tree():
+    """The picker walks underlying → expiry → strike server-side; the browser must
+    never need the ~36k-row master."""
+    import types
+    seen = {}
+    fake = types.SimpleNamespace(
+        public_status=lambda: {"provider": "angel"},
+        fno_underlyings=lambda: ["NIFTY", "RELIANCE"],
+        fno_chain=lambda und, exp=None: seen.update(und=und, exp=exp) or {
+            "underlying": und, "expiry": exp or "25AUG2026", "expiries": ["25AUG2026"],
+            "strikes": [{"strike": 24200.0, "ce": "NIFTY25AUG2624200CE", "pe": None}],
+            "fut": "NIFTY25AUG26FUT", "lot": 65},
+    )
+    with _patch(webapp, "live_feed", fake):
+        assert _json("/api/live/fno")[1] == {"underlyings": ["NIFTY", "RELIANCE"]}
+        j = _json("/api/live/fno?underlying=nifty&expiry=29DEC2026")[1]
+    assert seen == {"und": "nifty", "exp": "29DEC2026"}
+    assert j["strikes"][0]["ce"] == "NIFTY25AUG2624200CE" and j["lot"] == 65
+
+
+def test_fno_leg_never_falls_through_to_nse():
+    """An F&O tradingsymbol exists only in the broker's master, so quote/seed must
+    fail fast rather than spend a WAF-rationed NSE request rediscovering that."""
+    import types
+    from nse_pulse.core import nse_quote as q
+    calls = []
+    fake = types.SimpleNamespace(
+        public_status=lambda: {"connected": False},
+        is_fno=lambda s: s.startswith("NIFTY25AUG"),
+    )
+    with _patches((webapp, "live_feed", fake),
+                  (q, "get_quote", lambda s: calls.append(s) or {"symbol": s}),
+                  (q, "get_ohlc", lambda s, **k: calls.append(s) or {"symbol": s})):
+        st, j = _json("/api/quote/NIFTY25AUG2624200CE")
+        assert st == 503 and "broker" in j["error"]
+        assert _json("/api/live/seed/NIFTY25AUG2624200CE")[1]["points"] == []
+        # a cash symbol still falls through to NSE
+        assert _json("/api/quote/RELIANCE")[1]["symbol"] == "RELIANCE"
+    assert calls == ["RELIANCE"]
+
+
 # ---------------------------------------------------------------------------
 # paper trading orders
 # ---------------------------------------------------------------------------
@@ -910,6 +951,12 @@ def test_index_renders():
     assert b'id="nsePulse"' in r.data and b'id="nseTls"' in r.data
     # NSE request-budget table lives in the Log/diagnostics modal.
     assert b'id="nseBudget"' in r.data
+    # Live-tab instrument pickers: one-click index chips + the F&O leg selector
+    # (underlying -> expiry -> strike -> CE/PE/FUT).
+    assert b'id="liveIndexPicks"' in r.data
+    for el in (b'id="liveFnoBox"', b'id="liveFnoUnd"', b'id="liveFnoExp"',
+               b'id="liveFnoStrike"', b'data-leg="ce"', b'data-leg="fut"'):
+        assert el in r.data, el
 
 
 def test_force_utf8_stdio_is_idempotent_and_safe():

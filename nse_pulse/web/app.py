@@ -307,6 +307,16 @@ def _broker_connected():
         return False
 
 
+def _is_fno(symbol):
+    """True for a broker F&O tradingsymbol (e.g. NIFTY25AUG2624200CE). Those exist only
+    in the broker's master, so the NSE/EOD fallbacks can't serve them."""
+    try:
+        fn = getattr(live_feed, "is_fno", None)
+        return bool(fn(symbol)) if fn else False
+    except Exception:
+        return False
+
+
 def _broker_quote(symbol):
     """Per-stock quote from the broker (Angel REST), or None. Only when connected;
     swallows every error so the caller cleanly falls back to NSE."""
@@ -329,6 +339,10 @@ def api_quote(symbol):
     q = _broker_quote(symbol)      # broker-first: dodges NSE's Akamai entirely
     if q is not None and q.get("ltp") is not None:
         return jsonify(q)
+    # An F&O leg has no NSE cash ticker and no bhavcopy row under this name — say so
+    # rather than burning a WAF-rationed request to rediscover it.
+    if _is_fno(symbol):
+        return jsonify({"symbol": symbol, "error": "F&O contract needs a connected broker feed"}), 503
     if not nse.blocked_for():
         try:
             return jsonify(nse_quote.get_quote(symbol))
@@ -704,6 +718,21 @@ def api_live_watch():
     return jsonify(live_feed.set_watch(symbols, focus))
 
 
+@app.route("/api/live/fno")
+def api_live_fno():
+    """Browse the broker's F&O contract tree for the Live tab's picker.
+
+    No args → the underlyings that have listed contracts. `?underlying=NIFTY` → its
+    expiries (chronological) + the nearest expiry's strikes. Adding `&expiry=` picks a
+    different one. Each strike carries the CE/PE **tradingsymbol**, which is exactly
+    what POST /api/live/watch takes — the browser never sees the ~36k-row master.
+    """
+    und = request.args.get("underlying")
+    if not und:
+        return jsonify({"underlyings": live_feed.fno_underlyings()})
+    return jsonify(live_feed.fno_chain(und, request.args.get("expiry")))
+
+
 @app.route("/api/live/seed/<symbol>")
 def api_live_seed(symbol):
     """Historical candles to seed the live chart. Broker-first (Angel candles) when
@@ -716,6 +745,10 @@ def api_live_seed(symbol):
     c = _broker_ohlc(symbol, iv, ct, days)
     if c is not None:
         return jsonify(c)
+    # An F&O tradingsymbol only exists in the broker's master — NSE's charting host
+    # keys off cash tickers, so falling through would spend a request to find nothing.
+    if _is_fno(symbol):
+        return jsonify({"symbol": symbol, "points": [], "source": "none"})
     if daily:
         return jsonify(nse_quote.get_ohlc(symbol, chart_type="D", days=days))
     return jsonify(nse_quote.get_ohlc(symbol, interval=iv))

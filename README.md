@@ -156,7 +156,17 @@ flowchart LR
   watchlist adds the majors. An index is a *computed level*, not a traded instrument,
   so it has **no volume, OI, VWAP or order book**; the broker sends placeholder zeros
   (and a `-0.01 / -1` sentinel book) which we deliberately **drop**, and the UI shows
-  `index` in place of a volume figure. F&O legs aren't wired into the tab yet.
+  `index` in place of a volume figure.
+- **F&O legs stream too** (option CE/PE + futures contracts). Those live on a *different*
+  exchange segment (`NFO`) but ride the **same socket** — each token just has to be listed
+  under its own `exchangeType`, so subscriptions are grouped by segment. Angel's master
+  carries ~36,000 contracts, far too many to put in the symbol map, so they're indexed
+  into a separate **underlying → expiry → strike → CE/PE** tree and a **⛓ F&O leg**
+  picker walks it (`/api/live/fno`); the strike list is centred on spot when the
+  underlying is already streaming. An option **is** traded, so unlike an index it keeps
+  its real volume, **OI** and 5-level book. Each row is labelled `NIFTY 24150 CE · 25 Aug`
+  rather than the opaque `NIFTY25AUG2624150CE`, with the **lot size** on the header so
+  the real rupee exposure is visible next to the premium.
 - Every packet updates an in-memory `LATEST[token]` record (LTP, day OHLC, volume,
   OI, best-5 depth) and folds the LTP into a **forming 1-minute candle** whose
   timestamp uses the **same IST-baked-as-UTC epoch** as `/api/ohlc`, so the live bar
@@ -1007,11 +1017,13 @@ retry after cooldown. One gentle daily pass is the safe pattern (the WAF trips o
 - The **Live tab** is **optional** and needs your own broker credentials. **Angel
   One SmartAPI is free** and the default (auto TOTP login — no manual token step);
   **Dhan** works too but its Data API is a paid ₹499+GST/mo subscription. Ticks only
-  flow during market hours. It streams **NSE cash equities + the NSE indices**
-  (NIFTY / BANKNIFTY / FINNIFTY / MIDCPNIFTY / NIFTYNXT50 / INDIA VIX and the rest of
-  the 57 the broker publishes). An index is a computed level, so it has **no volume,
-  OI or order book** — the UI shows those as absent rather than as a misleading `0`.
-  **F&O legs** (options/futures contracts) aren't wired into the tab yet.
+  flow during market hours. With Angel it streams **NSE cash equities, the NSE indices
+  and F&O legs** (option CE/PE + futures) — indices (NIFTY / BANKNIFTY / FINNIFTY /
+  MIDCPNIFTY / NIFTYNXT50 / INDIA VIX and the rest of the 57 the broker publishes) on
+  the cash segment, contracts on `NFO`, all over one socket. An index is a computed
+  level, so it has **no volume, OI or order book** — the UI shows those as absent
+  rather than as a misleading `0`; an option, being genuinely traded, keeps all three.
+  Dhan stays cash-only (its adapter reports no indices or contracts).
 - The core app needs **no API key**; **no secrets in the repo** (`.gitignore`
   covers `.env`, `*.db`, state JSON, CSVs, `logs/`, and the broker configs
   `angel_config.json` / `dhan_config.json`).
