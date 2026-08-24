@@ -67,6 +67,10 @@ def test_move_pct_direction():
     assert ij._move_pct("LONG", 100, 95) == -5.0
     assert ij._move_pct("LONG", None, 105) is None
     assert ij._move_pct("LONG", 100, None) is None
+    # a 0/negative price is missing data, not a -100% move — otherwise it would write
+    # a sticky STOP verdict that never happened and drag the Ideas hit-rate down
+    for px in (0, 0.0, -1.0):
+        assert ij._move_pct("LONG", 100, px) is None, px
 
 
 def test_key():

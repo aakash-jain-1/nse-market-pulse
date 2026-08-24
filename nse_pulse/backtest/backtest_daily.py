@@ -429,7 +429,9 @@ def _features(bars):
     run_hi = run_lo = None
     for i, b in enumerate(bars):
         c, hi, lo = b["close"], b["high"], b["low"]
-        if None in (c, hi, lo):
+        # A non-positive price is missing data, not a bar: it would distort ret1 /
+        # range position and could seed a trade at an entry of 0.
+        if None in (c, hi, lo) or min(c, hi, lo) <= 0:
             feats.append(None)
             continue
         run_hi = hi if run_hi is None else max(run_hi, hi)

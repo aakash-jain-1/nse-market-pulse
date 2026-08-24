@@ -646,6 +646,18 @@ def test_eod_close_futures_underlying_fallback():
         assert b.eod_close("FUTONLY") == 250.0   # spot preferred over fut close
 
 
+def test_eod_close_treats_a_zero_as_no_close():
+    """This is the last-resort paper-trading price, so a hole in the archive must not
+    be reported as a price of zero — it falls through to the futures spot instead."""
+    fcm, ffo, _ = _stub_fetch(
+        {"ZED": {"close": 0.0}, "NEG": {"close": -1}, "BOTH": {"close": 0}},
+        {"BOTH": {"underlying": 0, "close": 77.0}, "NEG": {"underlying": 0, "close": 0}})
+    with _reset_cache(), _patch(b, "fetch_cm", fcm), _patch(b, "fetch_fo", ffo):
+        assert b.eod_close("ZED") is None
+        assert b.eod_close("BOTH") == 77.0       # zero spot → the futures close
+        assert b.eod_close("NEG") is None        # nothing usable anywhere
+
+
 def test_eod_quote_merges_cm_and_future():
     fcm, ffo, _ = _stub_fetch(
         {"ACME": {"close": 10.0, "symbol": "ACME"}},

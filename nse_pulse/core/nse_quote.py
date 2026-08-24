@@ -659,7 +659,14 @@ def get_option_chain(symbol, expiry=None):
 
 
 def get_option_price(underlying, expiry, strike, opt_type):
-    """Current premium (LTP) for a specific option contract, or None."""
+    """Current premium (LTP) for a specific option contract, or None.
+
+    A leg that hasn't traded reports `lastPrice: 0` in NSE's chain, and that is very
+    common — measured live, 45 of 121 NIFTY legs and 9 of 42 RELIANCE legs on the
+    near expiry. Zero is "untraded", not "free": callers price paper fills and mark
+    open positions with this, so a 0 would fill an option for nothing or mark a long
+    leg to a fabricated -100%. Those come back as **None** (no price) instead.
+    """
     try:
         strike = float(strike)
         opt_type = (opt_type or "").upper()
@@ -667,7 +674,8 @@ def get_option_price(underlying, expiry, strike, opt_type):
         for r in oc.get("rows", []):
             if r.get("strike") == strike:
                 leg = r.get("ce") if opt_type == "CE" else r.get("pe")
-                return leg.get("ltp") if leg else None
+                ltp = leg.get("ltp") if leg else None
+                return ltp if (ltp or 0) > 0 else None
     except Exception:
         pass
     return None

@@ -46,6 +46,26 @@ def _move_pct(direction, entry, px):
     return (px - entry) / entry * 100 if direction == "LONG" else (entry - px) / entry * 100
 
 
+def _usable(b):
+    """Is this candle safe to resolve a stop/target against?
+
+    A price of 0 is not a low — it's a hole in the data. An all-zero bar would put
+    the LOW at 0, which trips ANY long stop and writes a phantom STOP (at -100% MAE)
+    into the ledger permanently, where it then skews expectancy, the regime
+    leaderboards and the adaptive strategy pick that reads them. Inverted bars
+    (low > high) are equally untrustworthy. NSE's charting feed is clean in practice
+    (0 bad bars in 8,134 sampled), so this is a guard against a rare, irreversible
+    corruption rather than a routine occurrence — a suspect bar is skipped, and if
+    none survive `resolve()` returns None and the caller keeps its LTP path.
+    """
+    try:
+        hi, lo = b.get("h"), b.get("l")
+        return (b.get("t") is not None and hi is not None and lo is not None
+                and lo > 0 and hi > 0 and hi >= lo)
+    except TypeError:
+        return False
+
+
 def resolve_point(direction, entry, stop, target, px, tie="stop"):
     """Resolve a trade against a SINGLE coarse price sample (live LTP / EOD close).
 
@@ -94,9 +114,7 @@ def resolve(trade, bars, risk_per_trade, max_sessions=None, tie="stop"):
     if max_sessions is None:
         max_sessions = trade.get("maxSessions", 3)
 
-    rel = [b for b in bars
-           if b.get("t") is not None and b.get("h") is not None
-           and b.get("l") is not None and candle_dt(b["t"]) >= opened]
+    rel = [b for b in bars if _usable(b) and candle_dt(b["t"]) >= opened]
     if not rel:
         return None
 

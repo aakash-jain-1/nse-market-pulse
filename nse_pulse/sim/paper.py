@@ -307,7 +307,10 @@ def place_futures_order(symbol, side, lots):
         return False, "Lots must be positive", None
 
     fut = nse_quote.get_near_future(symbol)
-    if not fut or fut.get("ltp") is None:
+    # A non-positive LTP means the contract simply hasn't traded — filling on it would
+    # open a position at Rs 0 with Rs 0 margin, then show vast fake P&L on the first
+    # real mark. (The option path has always checked this; futures hadn't.)
+    if not fut or not (fut.get("ltp") or 0) > 0:
         return False, f"No live futures price for {symbol} (F&O only)", None
     price = fut["ltp"]
     expiry = fut.get("expiry")
@@ -395,22 +398,29 @@ def _reprice(key, pos, equity_px=None):
 
     `equity_px` is the pre-resolved `{symbol: price}` batch for the cash leg (see
     `portfolio`); without it the cash leg falls back to the hot-list map alone, which
-    only knows the ~100-150 names currently on a live list."""
+    only knows the ~100-150 names currently on a live list.
+
+    Every leg holds at **cost** when there's no usable mark, and a non-positive price
+    counts as no mark: an untraded contract (or a chain that's empty off-hours) reports
+    0, and marking to that would invent a -100% loss on a long option or an enormous
+    swing on a futures notional."""
+    def _mark(px):
+        return px if (px or 0) > 0 else pos["avgPrice"]
+
     if pos.get("kind") == "future":
         from nse_pulse.core import nse_quote
-        fut = nse_quote.get_near_future(pos.get("symbol"))
-        return fut["ltp"] if fut and fut.get("ltp") is not None else pos["avgPrice"]
+        fut = nse_quote.get_near_future(pos.get("symbol")) or {}
+        return _mark(fut.get("ltp"))
     if pos.get("kind") == "option":
         from nse_pulse.core import nse_quote
-        p = nse_quote.get_option_price(
+        return _mark(nse_quote.get_option_price(
             pos.get("underlying"), pos.get("expiry"),
             pos.get("strike"), pos.get("optType"),
-        )
-        return p if p is not None else pos["avgPrice"]
+        ))
     px = (equity_px or {}).get(key)
     if px is None:
         px = nse.get_price_map().get(key)
-    return px if px is not None else pos["avgPrice"]
+    return _mark(px)
 
 
 def portfolio():

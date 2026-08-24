@@ -79,8 +79,12 @@ def _key(sym, direction):
 
 
 def _move_pct(direction, entry, px):
-    """Signed move since entry in the idea's favour (LONG up = +, SHORT down = +)."""
-    if not entry or px is None:
+    """Signed move since entry in the idea's favour (LONG up = +, SHORT down = +).
+
+    A non-positive price is a hole in the data, not a -100% move: it would otherwise
+    write a sticky STOP verdict that never happened and drag the Ideas hit-rate down.
+    """
+    if not entry or not (px or 0) > 0:
         return None
     raw = (px - entry) if direction == "LONG" else (entry - px)
     return round(raw / entry * 100, 2)

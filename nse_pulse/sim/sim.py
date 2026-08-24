@@ -362,6 +362,8 @@ def _refresh_trade(state, t, px=_UNSET):
         return
     if px is _UNSET:
         px = _price(t["symbol"])
+    if px is not None and px <= 0:
+        px = None       # a 0 is a hole in the data, not a price that hit every stop
     if px is None:
         # No live price — the symbol has cooled off the hot lists. Don't let the
         # trade hang OPEN forever (AUDIT.md M4): still enforce the max-hold

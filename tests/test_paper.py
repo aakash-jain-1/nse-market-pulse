@@ -347,6 +347,41 @@ def test_portfolio_marks_the_cash_leg_in_one_broker_first_batch():
     assert by["OFFLIST"]["pnl"] == round((61.0 - 50.0) * 4, 2)
 
 
+def test_futures_order_refuses_a_zero_priced_contract():
+    """An untraded contract reports ltp 0. The old check was `is None`, so a 0 filled
+    the position at Rs 0 with Rs 0 margin — then the first real mark showed enormous
+    fake profit. (The option path has always rejected `<= 0`.)"""
+    with _paper() as s:
+        s.lot["ACME"] = 50
+        for ltp in (0, 0.0, -1):
+            s.fut["ACME"] = {"ltp": ltp, "expiry": "28-Jul-2026"}
+            ok, msg, _ = paper.place_futures_order("ACME", "BUY", 1)
+            assert not ok and "No live futures price" in msg, ltp
+        assert paper.portfolio()["positions"] == []
+        s.fut["ACME"] = {"ltp": 110.0, "expiry": "28-Jul-2026"}   # a real price works
+        assert paper.place_futures_order("ACME", "BUY", 1)[0]
+
+
+def test_untraded_legs_hold_at_cost_instead_of_marking_to_zero():
+    """NSE's chain reports lastPrice 0 for a leg that hasn't traded — measured live at
+    45 of 121 NIFTY legs on the near expiry. Marking to that would invent a -100% loss
+    on a long option, and a huge swing on a futures notional."""
+    with _paper() as s:
+        s.lot["NIFTY"] = 50
+        s.opt[("NIFTY", "2026-07-30", 25000.0, "CE")] = 100.0
+        paper.place_option_order("NIFTY", "2026-07-30", 25000, "CE", "BUY", 1)
+        _fut(s, ltp=110.0, lot=50)
+        paper.place_futures_order("ACME", "BUY", 1)
+
+        s.opt[("NIFTY", "2026-07-30", 25000.0, "CE")] = 0.0    # went untraded
+        s.fut["ACME"]["ltp"] = 0.0                             # ditto
+        by = {p["symbol"]: p for p in paper.portfolio()["positions"]}
+    opt = by["NIFTY 25000CE 2026-07-30"]
+    assert opt["ltp"] == 100.0 and opt["pnl"] == 0.0           # held at cost, not -100%
+    fut = by["ACME FUT 2026-07-30"]
+    assert fut["ltp"] == 110.0 and fut["pnl"] == 0.0
+
+
 def test_portfolio_survives_a_dead_batch_and_holds_at_cost():
     with _paper() as s:
         s.price["X"] = 100.0

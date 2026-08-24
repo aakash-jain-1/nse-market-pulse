@@ -178,6 +178,21 @@ def test_refresh_trade_no_price_within_horizon_stays_open():
     assert t["status"] == "OPEN"            # no price, still within horizon -> untouched
 
 
+def test_refresh_trade_reads_a_zero_price_as_no_price():
+    """A 0 is below every long stop, so treating it as a price would stop the trade
+    out at -100% and write that to the ledger for good. It must read as 'no price'."""
+    for px in (0, 0.0, -3.0):
+        t = _trade("LONG", opened_date="2026-07-16")
+        restore = _patch("_price", lambda s: px)
+        restore2 = _patch("_today", lambda: "2026-07-16")
+        try:
+            sim._refresh_trade({"maxSessions": 3}, t)
+        finally:
+            restore2(); restore()
+        assert t["status"] == "OPEN", px
+        assert t["exitPrice"] is None and t["maePct"] == 0.0, px
+
+
 # ---------------------------------------------------------------------------
 # _scorecard — aggregation (win%, total R, expectancy)
 # ---------------------------------------------------------------------------

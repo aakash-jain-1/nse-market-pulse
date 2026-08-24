@@ -151,6 +151,41 @@ def test_resolve_point_missing_levels():
     assert intrabar.resolve_point("LONG", 100, None, None, 200.0) == (None, None)
 
 
+def test_a_zero_priced_bar_cannot_fake_a_stop():
+    """A hole in the candle feed reads as low=0, which is below ANY long stop. Left
+    unguarded that writes a phantom STOP (at -100% MAE) into the ledger permanently,
+    where it then skews expectancy, the regime leaderboards and the adaptive pick."""
+    t = _trade()
+    bars = [
+        _bar(2026, 7, 9, 9, 15, 100, 100.5, 99.6, 100.2),
+        _bar(2026, 7, 9, 9, 16, 0, 0, 0, 0, v=0),            # the hole
+        _bar(2026, 7, 9, 9, 17, 100.2, 100.7, 100.1, 100.6),
+    ]
+    assert intrabar.resolve(t, bars, RISK) == "OPEN"          # NOT "STOP"
+    assert t["status"] == "OPEN" and t["exitPrice"] is None
+    assert t["maePct"] > -1.0                                 # not -100%
+    # a genuine stop on a clean bar still resolves
+    t2 = _trade()
+    assert intrabar.resolve(t2, bars[:2] + [
+        _bar(2026, 7, 9, 9, 17, 99.5, 100, 97.5, 98.0)], RISK) == "STOP"
+
+
+def test_unusable_bars_are_skipped_not_trusted():
+    t = _trade()
+    good = _bar(2026, 7, 9, 9, 15, 100, 100.4, 99.7, 100.1)
+    for bad in (
+        _bar(2026, 7, 9, 9, 16, None, None, None, None),      # empty
+        _bar(2026, 7, 9, 9, 16, 100, 99.0, 101.0, 100),       # inverted (low > high)
+        _bar(2026, 7, 9, 9, 16, -1, -1, -1, -1),             # negative
+        {"t": None, "o": 1, "h": 1, "l": 1, "c": 1},          # no timestamp
+    ):
+        t = _trade()
+        assert intrabar.resolve(t, [good, bad], RISK) == "OPEN"
+        assert t["status"] == "OPEN"
+    # nothing usable at all → None, so the caller keeps its own LTP path
+    assert intrabar.resolve(_trade(), [_bar(2026, 7, 9, 9, 16, 0, 0, 0, 0)], RISK) is None
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

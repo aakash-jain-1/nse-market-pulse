@@ -1033,10 +1033,14 @@ retry after cooldown. One gentle daily pass is the safe pattern (the WAF trips o
   rather than as a misleading `0`; an option, being genuinely traded, keeps all three.
   Dhan stays cash-only (its adapter reports no indices or contracts). A connected feed
   also prices paper fills / sim MTM (see [Paper trading](#paper-trading-virtual-paperpy)).
-- A price of **0 is treated as "no price", not as free.** A suspended or renamed ticker
-  really does come back from NSE's quote as `ltp: 0.0`; that value is dropped so the
-  lookup falls through to the next source, and a symbol nothing can price stays honestly
-  blank rather than filling a trade at ₹0.
+- A price of **0 is treated as "no price", not as free.** NSE reports `ltp: 0` for a
+  suspended or renamed ticker, and `lastPrice: 0` for any **option leg that hasn't
+  traded** — routinely about a third of a near-expiry chain. Those are dropped, so the
+  lookup falls through to the next source, an untraded leg can't be bought for nothing
+  or marked to a fake −100%, and a symbol nothing can price stays honestly blank. A
+  genuine ₹0.10 minimum-tick premium still prices normally. The same rule guards the
+  candle feed: a zero-priced or inverted bar is skipped rather than being read as a low
+  of ₹0 that trips every stop.
 - The core app needs **no API key**; **no secrets in the repo** (`.gitignore`
   covers `.env`, `*.db`, state JSON, CSVs, `logs/`, and the broker configs
   `angel_config.json` / `dhan_config.json`).

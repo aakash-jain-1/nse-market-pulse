@@ -229,6 +229,20 @@ def test_get_option_price_picks_leg():
         assert q.get_option_price("X", "exp", 999, "CE") is None
 
 
+def test_get_option_price_reports_an_untraded_leg_as_no_price():
+    """NSE's chain carries `lastPrice: 0` for legs that haven't traded — live, that's
+    45 of 121 NIFTY legs on the near expiry. Zero must read as "no price", or paper
+    would buy the option for nothing and mark a long leg to a fabricated -100%."""
+    chain = {"rows": [{"strike": 100.0, "ce": {"ltp": 0}, "pe": {"ltp": 0.0}},
+                      {"strike": 110.0, "ce": {"ltp": -1}, "pe": {"ltp": None}},
+                      {"strike": 120.0, "ce": {}, "pe": {"ltp": 3.5}}]}
+    with _patch(q, "get_option_chain", lambda u, e: chain):
+        for strike, leg in ((100, "CE"), (100, "PE"), (110, "CE"), (110, "PE"),
+                            (120, "CE")):
+            assert q.get_option_price("X", "exp", strike, leg) is None, (strike, leg)
+        assert q.get_option_price("X", "exp", 120, "PE") == 3.5      # a real premium
+
+
 # ---------------------------------------------------------------------------
 # futures basis math
 # ---------------------------------------------------------------------------

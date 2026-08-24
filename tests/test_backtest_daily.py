@@ -86,6 +86,18 @@ def test_features_second_bar():
     assert round(f["rngPos"], 3) == round((110 - 100) / (112 - 100), 3)
 
 
+def test_features_skips_bars_with_a_non_positive_price():
+    """A hole in the bar history would otherwise distort ret1 / range position and
+    could seed a trade at an entry of 0."""
+    bars = [_bar("d0", 100, 101, 99, 1000, prev=100),
+            _bar("d1", 0, 0, 0, 0, prev=100),
+            _bar("d2", -1, -1, -1, 10, prev=100),
+            _bar("d3", 108, 113, 107, 1500, prev=100)]
+    f = bd._features(bars)
+    assert f[1] is None and f[2] is None      # both holes skipped, not trusted
+    assert f[0] is not None and f[3] is not None
+
+
 def test_signals_momentum_and_delivery():
     # _signals now returns (id, direction, conviction) triples — check the (id, dir)
     # pairs plus that each conviction is a sane 0-100 number.

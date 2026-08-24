@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 894 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 902 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +142,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 894 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 902 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -646,6 +646,25 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **🧯 Zero-price sweep — a "0" can no longer reach the financial math** — the broker-first work below caught one
+ instance (NSE's quote returning `ltp: 0.0`); this is the systematic follow-up across every price entry point. **The
+ worst one was real and measured, not theoretical:** NSE's live option chain reports `lastPrice: 0` for any leg that
+ hasn't traded — **45 of 121 NIFTY legs and 9 of 42 RELIANCE legs** on the near expiry — and `nse_quote.get_option_price`
+ returned that verbatim. The paper *fill* path already rejected `<= 0`, but `paper._reprice` did not, so a long option on
+ an untraded strike was **marked to ₹0 = a fabricated -100% loss**. Fixed at the source (untraded ⇒ `None`), and a
+ legitimate ₹0.10 minimum-tick premium is still preserved. Other genuine holes closed: **`place_futures_order` accepted a
+ 0 LTP** (checked only `is None`, unlike the option path) — it would open a position at ₹0 with ₹0 margin, then show vast
+ fake profit on the first real mark; **`paper._reprice`** now holds every leg at cost when there's no positive mark;
+ **`sim._refresh_trade`** treats a 0 as "no price" instead of a level below every long stop; **`ideas_journal._move_pct`**
+ no longer turns a 0 into a -100% move that writes a sticky STOP verdict that never happened; and **`intrabar.resolve`**
+ skips unusable candles (non-positive, inverted, or missing) — an all-zero bar put the LOW at 0, tripping ANY long stop
+ and writing a **phantom STOP at -100% MAE permanently into the ledger**, from where it poisons expectancy → the regime
+ leaderboards → the adaptive strategy pick that reads them. Also guarded, defensively: `bhavcopy.eod_close`,
+ `nse_client.get_price_map`, and `backtest_daily._features`. **Honest scope:** the two *data feeds* are clean in practice —
+ 0 suspect bars in 8,134 sampled 1-min candles, 0 bad rows in 3,354 cash + 214 futures bhavcopy rows — so those guards
+ protect against a rare but **irreversible** corruption; the option-chain zeros, by contrast, are routine and were
+ actively wrong every day. Suite **894 → 902**.
 
 - **💰 Paper fills / `get_price` / sim MTM now price BROKER-FIRST** — closes the last open leg of the real-time-feed
  roadmap item. The broker socket already knew a live price for anything being watched, yet every paper fill and every

@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-tests/               Unit tests — 894 across 39 suites; import `from nse_pulse.<sub> import <mod>`
+tests/               Unit tests — 902 across 39 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -357,7 +357,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **894 tests** across 39 suites (grow it with every change;
+- `python -m pytest -q` — **902 tests** across 39 suites (grow it with every change;
   never shrink it).
 - **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
   committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
@@ -521,8 +521,10 @@ a documented caveat).
   hot-list map (~100–150 names) → batched broker quote → NSE per-stock quote → **EOD
   bhavcopy close**. With a broker connected, off-hot-list names are genuinely live and
   cost no NSE requests; without one they fall to last close. A **0 counts as unpriced**
-  (`_valid_px`) — a suspended/stale ticker really does return `ltp: 0.0`, and a ₹0 fill
-  would poison the paper P&L and every R-multiple.
+  everywhere (`_valid_px` and the per-source guards) — NSE reports `ltp: 0` for a
+  suspended ticker and `lastPrice: 0` for any **untraded option leg** (routinely ~⅓ of a
+  near-expiry chain). A ₹0 would otherwise fill for free, mark a long option to -100%, or
+  put a candle's LOW under every stop; a real ₹0.10 tick still prices normally.
 - Live tab needs the user's own broker creds (Angel free / Dhan paid). Angel streams NSE
   cash, **the NSE indices** and **F&O legs** (options + futures). An index has no
   volume/OI/depth — we omit those, not zero them; an option **is** traded, so it keeps
@@ -534,6 +536,45 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 🧯 Zero-price sweep: a `0` can no longer reach the financial math (suite 894 → 902)
+- **Why:** the broker-first work below tripped over ONE instance of this (NSE's quote returning `ltp: 0.0` for a
+  stale ticker). That smelled systemic, so this is the deliberate sweep of every price entry point. It found a
+  **routine, actively-wrong** bug plus several latent ones.
+- **THE REAL ONE — untraded option legs were marked to ₹0.** NSE's live chain reports `lastPrice: 0` for any leg
+  that hasn't traded, and that is not rare: measured live on the near expiry, **45 of 121 NIFTY legs** and **9 of 42
+  RELIANCE legs**. `nse_quote.get_option_price` returned it verbatim. `paper.place_option_order` had always rejected
+  `price <= 0`, so *fills* were safe — but **`paper._reprice` didn't**, so a long option sitting on a strike that went
+  untraded was marked to **₹0, i.e. a fabricated -100% loss**, every time the portfolio was viewed. Fixed at the
+  source: untraded ⇒ `None`. Verified live afterwards that a legitimate **₹0.10 minimum-tick** premium still comes
+  through (the guard is `> 0`, deliberately not a threshold).
+- **`paper.place_futures_order` accepted a zero fill.** It checked `fut.get("ltp") is None` where the option path
+  checked `<= 0` — an inconsistency, not a design. A 0 opened the position at ₹0 with **₹0 margin**, and the first
+  real mark then showed enormous fake profit on a lot-sized notional.
+- **`intrabar.resolve` could write a phantom STOP — the highest-consequence find.** Its bar filter dropped `None`
+  highs/lows but not zeros. An all-zero candle puts the LOW at 0, which is below **any** long stop, so the trade
+  closed STOP at -100% MAE and that outcome was written to `sim_trades` **permanently** — from where it flows into
+  expectancy → the regime/vol leaderboards → walk-forward verdicts → the adaptive strategy-of-the-day that reads
+  them. Now `_usable(bar)` requires positive, non-inverted, timestamped bars; if none survive, `resolve()` returns
+  None and the caller keeps its LTP path (the existing contract).
+- **Also closed:** `sim._refresh_trade` (a 0 now means "no price", not a level under every stop);
+  `ideas_journal._move_pct` (a 0 no longer becomes a -100% move that writes a sticky STOP verdict and drags the
+  Ideas hit-rate); `bhavcopy.eod_close`, `nse_client.get_price_map`'s `absorb`, and `backtest_daily._features`
+  (defensive — same rule at the remaining sources).
+- **Honest scope — which of these were actually firing.** The option-chain zeros are routine and were wrong every
+  single day. The two *bar/archive* feeds, by contrast, measured **clean**: 0 suspect bars in **8,134** sampled 1-min
+  candles (8 symbols × 5 days: no None/0/negative, no low > high) and 0 bad rows in **3,354** cash + **214** futures
+  bhavcopy rows. Those guards are therefore insurance against a rare but **irreversible** corruption, not fixes for
+  an observed one — worth having precisely because a bad candle writes a permanent phantom trade, and worth labelling
+  honestly rather than overselling.
+- **Gotcha to remember:** NSE's RELIANCE chain also carries a junk **`strike 0.0`** row. Don't assume chain strikes
+  are sane.
+- **Tests (+8, 894 → 902):** an untraded leg reading as no-price (0 / 0.0 / negative / missing, with a real premium
+  still passing); futures refusing a 0/negative fill then accepting a real one; option+futures legs holding at cost
+  instead of marking to zero; a zero bar not faking a stop (while a genuine stop on a clean bar still resolves);
+  unusable bars (empty / inverted / negative / no timestamp) skipped, and `None` when nothing is usable;
+  `_refresh_trade` reading 0 as no-price; `_move_pct` rejecting non-positive; `_features` skipping holed bars;
+  `eod_close` falling through a zero close to the futures spot.
 
 ### 2026-08-24 — 💰 Paper fills / `get_price` / sim MTM price BROKER-FIRST — live-feed roadmap item fully closed (suite 875 → 894)
 - **Why:** the broker socket already held a live price for every watched symbol, but every paper fill and every sim
