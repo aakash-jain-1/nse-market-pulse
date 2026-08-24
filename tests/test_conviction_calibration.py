@@ -248,6 +248,110 @@ def test_pillar_weights_from_report_shape():
 
 
 # ---------------------------------------------------------------------------
+# out-of-sample guard on the learned weights
+# ---------------------------------------------------------------------------
+# pillar_weights() measures a pillar's lift on the same ideas it then re-weights, so
+# with 9 pillars and a thin sample the luckiest one earns a multiplier on noise. These
+# lock the guard: split by day, and only trust a pillar whose edge kept its sign.
+def _days(n, start=1):
+    return ["2026-03-%02d" % d for d in range(start, start + n)]
+
+
+def _slice(day, pillar, wins, losses):
+    """`wins` TARGET + `losses` STOP ideas on `day`, all carrying `pillar`."""
+    return ([_idea(day=day, pillars=(pillar,), outcome="TARGET", outcomePct=8.0)] * wins
+            + [_idea(day=day, pillars=(pillar,), outcome="STOP", outcomePct=-4.0)] * losses)
+
+
+def test_split_by_day_never_cuts_a_day_in_half():
+    # One saved board is ONE decision — a day landing on both sides would leak.
+    ideas = [_idea(day=d, sym="S%d" % i) for i, d in enumerate(_days(5))
+             for _ in range(3)]
+    train, test = cc.split_by_day(ideas)
+    assert train and test
+    assert not ({i["day"] for i in train} & {i["day"] for i in test})
+    assert {i["day"] for i in train} | {i["day"] for i in test} == set(_days(5))
+    # earlier days train, later days test
+    assert max(i["day"] for i in train) < min(i["day"] for i in test)
+
+
+def test_split_by_day_refuses_a_single_day():
+    assert cc.split_by_day([_idea(day="2026-03-01")] * 9) == ([], [])
+
+
+def test_held_up_only_trusts_a_consistent_sign():
+    assert cc._held_up(20.0, 5.0) is True        # helped, then helped again
+    assert cc._held_up(-20.0, -5.0) is True      # consistently HARMFUL is also a signal
+    assert cc._held_up(20.0, -5.0) is False      # flipped → noise
+    assert cc._held_up(20.0, None) is None       # untestable
+    assert cc._held_up(None, 5.0) is None
+
+
+def test_validate_needs_enough_days_before_it_will_judge():
+    v = cc.validate([_idea(day="2026-03-01", pillars=(_TREND,), outcome="TARGET")] * 30)
+    assert v["ok"] is False and v["trusted"] == []
+    assert "1 saved board day" in v["reason"]
+
+
+def test_validate_needs_enough_resolved_on_both_sides():
+    ideas = [_idea(day=d, pillars=(_TREND,)) for d in _days(6)]   # all still OPEN
+    v = cc.validate(ideas)
+    assert v["ok"] is False and "Thin split" in v["reason"]
+
+
+def test_validate_separates_a_real_edge_from_a_lucky_one():
+    ideas = []
+    for i, day in enumerate(_days(5)):
+        early = i < 3
+        ideas += _slice(day, _SECTOR, 3, 1)          # wins throughout → holds
+        # good early, bad later: the classic in-sample mirage
+        ideas += _slice(day, _BREAK, 3, 1) if early else _slice(day, _BREAK, 1, 3)
+        ideas += _slice(day, _TREND, 1, 3)           # consistently harmful → also held
+    v = cc.validate(ideas)
+    assert v["ok"] is True
+    byk = {p["pillar"]: p for p in v["pillars"]}
+    assert byk["sector"]["verdict"] == "held"
+    assert byk["breakout"]["verdict"] == "noise"
+    assert "sector" in v["trusted"] and "breakout" not in v["trusted"]
+    assert byk["trend"]["trainLift"] < 0 and byk["trend"]["verdict"] == "held"
+
+
+def _earned(ideas):
+    """The raw in-sample weights, i.e. what the board applied before the guard."""
+    return cc.pillar_weights(rep={"byPillar": [
+        dict(cc._lift_by_pillar(ideas)[k], pillar=k) for k in cc.PILLAR_KEYS]})
+
+
+def test_validated_weights_neutralize_what_did_not_hold():
+    # `trend` is the filler that drags the without-bucket down, so each pillar's lift
+    # is measured against a blend rather than against the one other test pillar.
+    ideas = []
+    for i, day in enumerate(_days(5)):
+        early = i < 3
+        ideas += _slice(day, _SECTOR, 8, 2)                       # steady winner
+        ideas += _slice(day, _TREND, 4, 6)                        # steady drag
+        # Strong enough overall to earn a real weight, but the edge is all in the
+        # early days — exactly the mirage an in-sample fit would buy.
+        ideas += _slice(day, _BREAK, 10, 0) if early else _slice(day, _BREAK, 4, 6)
+    w, v = cc.validated_weights(ideas=ideas)
+    assert v["ok"] is True
+    assert _earned(ideas)["breakout"] > 1.0        # in-sample it looked good...
+    assert w["breakout"] == 1.0                    # ...but the guard sees it flip
+    assert w["sector"] > 1.0                       # earned it AND it held up
+    assert all(cc._W_LO <= x <= cc._W_HI for x in w.values())
+
+
+def test_validated_weights_are_all_neutral_without_enough_history():
+    # The honest default: an unvalidated weight is worse than none, because it
+    # dresses noise up as a measured edge.
+    ideas = _slice("2026-03-01", _SECTOR, 40, 2) + _slice("2026-03-01", _TREND, 2, 40)
+    w, v = cc.validated_weights(ideas=ideas)
+    assert v["ok"] is False
+    assert set(w) == set(cc.PILLAR_KEYS) and all(x == 1.0 for x in w.values())
+    assert _earned(ideas)["sector"] > 1.0          # the raw estimate WOULD have moved it
+
+
+# ---------------------------------------------------------------------------
 # report() — against a throwaway DB
 # ---------------------------------------------------------------------------
 def _seed(db):

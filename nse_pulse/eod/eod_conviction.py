@@ -420,10 +420,11 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
     `adaptive` feeds the confirmation-calibration back into scoring: each pillar's
     weight is nudged by its measured realized edge (win-rate lift), so pillars that
     have actually worked count for more. The confirmation COUNT (the primary sort key)
-    is untouched — weighting only re-orders within a tier — and multipliers are
-    neutral until a pillar has enough resolved history. Returns
+    is untouched — weighting only re-orders within a tier — and a multiplier only
+    leaves neutral once the pillar has enough resolved history AND its edge held up
+    out of sample (`conviction_calibration.validated_weights`). Returns
     {date, longs, shorts, count, universe, scanned, filters, coverage,
-    adaptive, adaptiveWeights, note}.
+    adaptive, adaptiveWeights, adaptiveValidation, note}.
     """
     from nse_pulse.core import corporate_actions as ca
     from nse_pulse.core import db
@@ -476,15 +477,17 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
             rmap = {}
 
     # Adaptive scoring weights from the confirmation calibration (best-effort): each
-    # pillar's realized win-rate lift → a clamped, sample-shrunk scoring multiplier.
-    weights = None
+    # pillar's realized win-rate lift → a clamped, sample-shrunk scoring multiplier,
+    # applied ONLY where that edge survived an out-of-sample check (else neutral), so
+    # a thin history can't dress noise up as a measured edge and re-order the board.
+    weights = validation = None
     if adaptive:
         try:
             from nse_pulse.eod import conviction_calibration as _cc
-            weights = _cc.pillar_weights()
+            weights, validation = _cc.validated_weights()
         except Exception:
             log.warning("board: adaptive-weight lookup failed", exc_info=True)
-            weights = None
+            weights = validation = None
 
     fno = None
     if fno_only:
@@ -532,6 +535,7 @@ def board(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2,
         "withRollover": bool(rmap),
         "adaptive": bool(adaptive),
         "adaptiveWeights": (weights if adaptive else None),
+        "adaptiveValidation": (validation if adaptive else None),
         "filters": {"minPrice": min_price, "minValueCr": min_value_cr,
                     "minPillars": min_pillars, "fnoOnly": bool(fno_only),
                     "withDeals": bool(with_deals), "withOptions": bool(with_options),
@@ -563,6 +567,7 @@ def _board_placeholder(limit=25, min_price=20.0, min_value_cr=2.0, min_pillars=2
         "date": None, "longs": [], "shorts": [], "count": 0,
         "universe": 0, "scanned": 0, "withDeals": False, "withOptions": False,
         "withRollover": False, "adaptive": bool(adaptive), "adaptiveWeights": None,
+        "adaptiveValidation": None,
         "filters": {"minPrice": min_price, "minValueCr": min_value_cr,
                     "minPillars": min_pillars, "fnoOnly": bool(fno_only),
                     "withDeals": bool(with_deals), "withOptions": bool(with_options),

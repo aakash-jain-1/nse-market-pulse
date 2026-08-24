@@ -360,6 +360,23 @@ def test_ideas_endpoints():
     assert seen["win"] == 30 and seen["lim"] == 7 and seen["mr"] == "High"
 
 
+def test_ideas_resolve_arg_parsing():
+    from nse_pulse.sim import ideas_journal as ij
+    seen = {}
+    with _patch(ij, "resolve_outcomes_eod",
+                lambda days=180, force=False: seen.update(days=days, force=force)
+                or {"settled": 3}):
+        r = client.post("/api/ideas/resolve", json={})
+        assert r.status_code == 200 and r.get_json()["settled"] == 3
+        assert seen == {"days": 180, "force": False}
+        client.post("/api/ideas/resolve?days=30&force=1", json={})
+        assert seen == {"days": 30, "force": True}
+        client.post("/api/ideas/resolve?days=abc", json={})   # garbage → default
+        assert seen["days"] == 180
+        client.post("/api/ideas/resolve?days=0", json={})     # floored, never zero
+        assert seen["days"] == 1
+
+
 def test_ideas_history_bad_limit_defaults():
     from nse_pulse.sim import ideas_journal as ij
     seen = {}

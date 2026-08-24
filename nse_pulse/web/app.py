@@ -310,6 +310,24 @@ def api_ideas_recent():
                                         min_rating=min_rating))
 
 
+@app.route("/api/ideas/resolve", methods=["POST"])
+def api_ideas_resolve():
+    """Settle unresolved PAST-day ideas against stored daily bars (no network).
+
+    Runs automatically after the close (`eod_scheduler`); this is the manual
+    catch-up for days the app was off. `?days=N` widens the window; `?force=1`
+    re-settles verdicts a previous daily pass wrote (never the minute-accurate
+    live ones) — use it after a bhavcopy backfill fills a hole.
+    """
+    from nse_pulse.sim import ideas_journal
+    try:
+        days = int(request.args.get("days", 180))
+    except (TypeError, ValueError):
+        days = 180
+    force = (request.args.get("force") or "").strip().lower() in ("1", "true", "yes")
+    return jsonify(ideas_journal.resolve_outcomes_eod(days=max(1, days), force=force))
+
+
 @app.route("/api/deepdive/<symbol>")
 def api_deepdive(symbol):
     return jsonify(nse.get_stock_deepdive(symbol))

@@ -125,8 +125,9 @@ def _save_last_run(date_str, days):
 # ---------------------------------------------------------------------------
 def run_job(days=None, digest=None):
     """Do the refresh ONCE: backfill bhavcopy (block-aware, paced) → refresh the
-    bulk/block deals cache → optionally push the conviction digest. Returns a
-    summary dict; safe to call manually (e.g. the 'run now' endpoint)."""
+    bulk/block deals cache → settle saved ideas on the fresh bars → optionally push
+    the conviction digest. Returns a summary dict; safe to call manually (e.g. the
+    'run now' endpoint)."""
     from nse_pulse.eod import bhavcopy
     from nse_pulse.eod import deals as D
     days = DAYS if days is None else max(1, int(days))
@@ -146,6 +147,15 @@ def run_job(days=None, digest=None):
         except Exception:
             log.warning("auto-EOD: deals refresh failed", exc_info=True)
             out["deals"] = None
+        # Settle saved ideas on the bars we just ingested. Must come BEFORE the
+        # digest so its track-record footer counts today's newly resolved outcomes,
+        # and after the backfill so a plan that hit its level yesterday can see it.
+        try:
+            from nse_pulse.sim import ideas_journal as ij
+            out["resolved"] = ij.resolve_outcomes_eod()
+        except Exception:
+            log.warning("auto-EOD: idea resolution failed", exc_info=True)
+            out["resolved"] = None
         # Only digest when a genuinely new session landed and we weren't blocked —
         # avoids re-sending yesterday's picks on a holiday / no-op pass.
         if want_digest and bf.get("days") and not bf.get("blocked"):

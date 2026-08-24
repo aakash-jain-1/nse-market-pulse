@@ -186,7 +186,12 @@ def pillar_weights(days=None, rep=None):
     """Turn each pillar's measured edge into a gentle SCORING multiplier the conviction
     board can apply (adaptive weighting → the board learns from its own realized
     results). Returns {pillar_key: mult in [0.5, 1.5]}; 1.0 = neutral / not enough
-    history. Pass `rep` to reuse an already-built report(). Educational — NOT advice."""
+    history. Pass `rep` to reuse an already-built report(). Educational — NOT advice.
+
+    This is the IN-SAMPLE estimate — it measures each pillar's lift on the very ideas
+    it then re-weights. Use `validated_weights()` for the number the board should
+    actually apply; see the out-of-sample guard below for why that matters.
+    """
     if rep is None:
         rep = report(days=days)
     out = {}
@@ -198,13 +203,132 @@ def pillar_weights(days=None, rep=None):
 
 
 # ---------------------------------------------------------------------------
+# Out-of-sample guard on the learned weights
+# ---------------------------------------------------------------------------
+# `pillar_weights()` measures a pillar's lift on all resolved history and then feeds
+# that straight back into scoring the next board. That's fitting and applying on the
+# same data: with 9 pillars and a thin sample, the luckiest one *will* show a healthy
+# lift by chance, earn a >1.0 multiplier, and re-order the board on noise. It's the
+# same curve-fit trap `walkforward.py` guards the strategy leaderboard against, so we
+# use the same remedy — learn on the earlier days, check on the later ones.
+#
+# A pillar's edge is "trusted" only if its win-rate lift keeps the same SIGN out of
+# sample. Sign agreement (not magnitude) is deliberately the bar: with samples this
+# small, a pillar being consistently helpful-or-harmful is all the data can honestly
+# support. Once trusted, the multiplier applied is the FULL-history one — the split is
+# a gate on whether to believe the pillar at all, not a smaller estimate of its size.
+# Splits are on DAY boundaries because one saved board is one decision; slicing a day
+# across train and test would leak.
+_V_MIN_DAYS = 4          # distinct board days needed before a split means anything
+_V_MIN_RESOLVED = 5      # resolved ideas needed on each side of the split
+_V_TRAIN_FRAC = 0.6
+
+
+def split_by_day(ideas, train_frac=_V_TRAIN_FRAC):
+    """Chronological train/test split on DAY boundaries (pure). Earlier days train."""
+    days = sorted({i.get("day") for i in ideas if i.get("day")})
+    if len(days) < 2:
+        return [], []
+    cut = max(1, min(len(days) - 1, int(round(len(days) * train_frac))))
+    train_days, test_days = set(days[:cut]), set(days[cut:])
+    return ([i for i in ideas if i.get("day") in train_days],
+            [i for i in ideas if i.get("day") in test_days])
+
+
+def _lift_by_pillar(ideas):
+    """{pillar_key: _lift(...)} over one slice of ideas (pure)."""
+    out = {}
+    for key in PILLAR_KEYS:
+        withs = [i for i in ideas if key in _pillars_in(i)]
+        out[key] = _lift(withs, [i for i in ideas if key not in _pillars_in(i)])
+    return out
+
+
+def _resolved(stats):
+    return int((stats or {}).get("resolved") or 0)
+
+
+def _held_up(train_lift, oos_lift):
+    """Did the pillar's measured edge keep its sign out of sample? None = can't tell."""
+    if train_lift is None or oos_lift is None or abs(train_lift) < 1e-9:
+        return None
+    return (train_lift > 0) == (oos_lift > 0)
+
+
+def validate(ideas, train_frac=_V_TRAIN_FRAC):
+    """Out-of-sample check on the adaptive pillar weights (pure).
+
+    Splits `ideas` by day, measures each pillar's win-rate lift on each side, and
+    reports whether the edge held. Returns {ok, reason, days, trainDays, testDays,
+    pillars:[…], trusted:[…]} where `ok` False means NOTHING should be re-weighted.
+    """
+    days = sorted({i.get("day") for i in ideas if i.get("day")})
+    train, test = split_by_day(ideas, train_frac)
+    out = {"ok": False, "reason": None, "days": len(days), "trainDays": 0,
+           "testDays": 0, "trainResolved": 0, "testResolved": 0,
+           "pillars": [], "trusted": []}
+    if len(days) < _V_MIN_DAYS:
+        out["reason"] = (f"Only {len(days)} saved board day(s) — need {_V_MIN_DAYS} to "
+                         "split history into train and test. Weights stay neutral.")
+        return out
+    out["trainDays"] = len({i.get("day") for i in train})
+    out["testDays"] = len({i.get("day") for i in test})
+    out["trainResolved"] = _resolved(_bucket_stats(train))
+    out["testResolved"] = _resolved(_bucket_stats(test))
+    if min(out["trainResolved"], out["testResolved"]) < _V_MIN_RESOLVED:
+        out["reason"] = (f"Thin split ({out['trainResolved']} resolved in train, "
+                         f"{out['testResolved']} out-of-sample) — need "
+                         f"{_V_MIN_RESOLVED} each side. Weights stay neutral.")
+        return out
+
+    tr, te = _lift_by_pillar(train), _lift_by_pillar(test)
+    for key in PILLAR_KEYS:
+        a, b = tr[key], te[key]
+        held = _held_up(a.get("winRateLift"), b.get("winRateLift"))
+        out["pillars"].append({
+            "pillar": key,
+            "trainLift": a.get("winRateLift"), "oosLift": b.get("winRateLift"),
+            "trainResolved": _resolved(a.get("with")),
+            "oosResolved": _resolved(b.get("with")),
+            "heldUp": held,
+            "verdict": "untested" if held is None else ("held" if held else "noise"),
+        })
+        if held:
+            out["trusted"].append(key)
+    out["ok"] = True
+    held_n = len(out["trusted"])
+    tested = sum(1 for p in out["pillars"] if p["heldUp"] is not None)
+    out["reason"] = (
+        f"{held_n} of {tested} testable pillars kept their edge out of sample "
+        f"({out['trainDays']} train days → {out['testDays']} test days)."
+        if tested else "No pillar had enough history on both sides of the split.")
+    return out
+
+
+def validated_weights(days=None, ideas=None, train_frac=_V_TRAIN_FRAC, limit=5000):
+    """The multipliers the board should ACTUALLY apply: the full-history weight for
+    pillars whose edge survived an out-of-sample check, 1.0 for everything else.
+
+    Returns `(weights, validation)`. Until there's enough saved history to split, every
+    weight is neutral — an unvalidated weight is worse than none, because it dresses
+    noise up as a measured edge.
+    """
+    if ideas is None:
+        ideas = _load_ideas(days=days, limit=limit)
+    earned = pillar_weights(rep={"byPillar": [
+        dict(_lift_by_pillar(ideas)[k], pillar=k) for k in PILLAR_KEYS]})
+    v = validate(ideas, train_frac=train_frac)
+    trusted = set(v.get("trusted") or [])
+    weights = {k: (earned.get(k, 1.0) if (v.get("ok") and k in trusted) else 1.0)
+               for k in PILLAR_KEYS}
+    return weights, v
+
+
+# ---------------------------------------------------------------------------
 # report (impure: reads db.ideas)
 # ---------------------------------------------------------------------------
-def report(days=None, limit=5000):
-    """Calibration of the saved EOD-conviction ideas. `days` optionally restricts to
-    the last N calendar days. Returns {totals, byConfirmations, byRating, byDirection,
-    byPillar (each with its earned `weight`), warningImpact, adaptiveWeights, verdict,
-    note}."""
+def _load_ideas(days=None, limit=5000):
+    """Every saved EOD-conviction idea in the window (the one impure read)."""
     from nse_pulse.core import db
     since = None
     if days:
@@ -213,8 +337,15 @@ def report(days=None, limit=5000):
             since = (date.today() - timedelta(days=int(days))).strftime("%Y-%m-%d")
         except (TypeError, ValueError):
             since = None
+    return [i for i in db.ideas_all(limit=limit, since=since) if is_conviction(i)]
 
-    ideas = [i for i in db.ideas_all(limit=limit, since=since) if is_conviction(i)]
+
+def report(days=None, limit=5000):
+    """Calibration of the saved EOD-conviction ideas. `days` optionally restricts to
+    the last N calendar days. Returns {totals, byConfirmations, byRating, byDirection,
+    byPillar (each with its earned `weight` + what's `applied` after the OOS check),
+    warningImpact, adaptiveWeights, validatedWeights, validation, verdict, note}."""
+    ideas = _load_ideas(days=days, limit=limit)
     totals = _bucket_stats(ideas)
     if ideas:
         days_seen = sorted({i.get("day") for i in ideas if i.get("day")})
@@ -255,8 +386,15 @@ def report(days=None, limit=5000):
     # Adaptive scoring multipliers derived from the same per-pillar lift, attached so
     # the board can apply them and the UI can show each pillar's earned weight inline.
     weights = pillar_weights(rep={"byPillar": by_pillar})
+    # ... then the out-of-sample gate, which is what the board actually applies. Showing
+    # both makes the difference legible: "measured +0.2 but didn't hold → applied 1.0".
+    applied, validation = validated_weights(ideas=ideas)
+    held = {p["pillar"]: p for p in validation.get("pillars", [])}
     for row in by_pillar:
-        row["weight"] = weights.get(row["pillar"], 1.0)
+        key = row["pillar"]
+        row["weight"] = weights.get(key, 1.0)
+        row["applied"] = applied.get(key, 1.0)
+        row["oos"] = held.get(key, {}).get("verdict")
 
     return {
         "totals": totals,
@@ -266,6 +404,8 @@ def report(days=None, limit=5000):
         "byPillar": by_pillar,
         "warningImpact": warn,
         "adaptiveWeights": weights,
+        "validatedWeights": applied,
+        "validation": validation,
         "verdict": _verdict(by_conf, totals),
         "filters": {"days": int(days) if days else None, "limit": limit},
         "note": None if ideas else (

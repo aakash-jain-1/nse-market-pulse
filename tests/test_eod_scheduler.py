@@ -54,6 +54,20 @@ def _reset_state():
 
 
 @contextlib.contextmanager
+def _no_resolve(log=None):
+    """Stub the idea resolver run_job now calls — it would otherwise settle ideas in
+    the real data/market.db when these tests run."""
+    from nse_pulse.sim import ideas_journal as ij
+
+    def fake(*a, **k):
+        if log is not None:
+            log.append("resolve")
+        return {"pending": 0, "settled": 0}
+    with _patch(ij, "resolve_outcomes_eod", fake):
+        yield
+
+
+@contextlib.contextmanager
 def _no_block():
     from nse_pulse.core import nse_client as nse
     saved = nse._blocked_until
@@ -116,7 +130,7 @@ def test_run_job_orchestrates_backfill_deals_digest():
         seen["digest"] = True
         return {"ok": True, "channels": ["telegram"]}
 
-    with _attrs(DAYS=5, DIGEST=True), _reset_state(), \
+    with _attrs(DAYS=5, DIGEST=True), _reset_state(), _no_resolve(), \
             _patch(bhavcopy, "backfill", fake_bf), \
             _patch(deals, "latest", fake_latest), \
             _patch(notify, "send_digest", fake_dg):
@@ -137,7 +151,7 @@ def test_run_job_skips_digest_when_blocked_midrun():
     def boom():
         raise AssertionError("digest must not fire after a block")
 
-    with _attrs(DAYS=5, DIGEST=True), _reset_state(), \
+    with _attrs(DAYS=5, DIGEST=True), _reset_state(), _no_resolve(), \
             _patch(bhavcopy, "backfill", lambda days=5: {"days": 1, "blocked": True}), \
             _patch(deals, "latest", lambda kind, force=False: {"deals": []}), \
             _patch(notify, "send_digest", boom):
@@ -154,7 +168,7 @@ def test_run_job_skips_digest_on_noop_day():
     def boom():
         raise AssertionError("digest must not fire when nothing new landed")
 
-    with _attrs(DAYS=5, DIGEST=True), _reset_state(), \
+    with _attrs(DAYS=5, DIGEST=True), _reset_state(), _no_resolve(), \
             _patch(bhavcopy, "backfill", lambda days=5: {"days": 0}), \
             _patch(deals, "latest", lambda kind, force=False: {"deals": []}), \
             _patch(notify, "send_digest", boom):
@@ -170,12 +184,53 @@ def test_run_job_digest_off_by_flag():
     def boom():
         raise AssertionError("digest disabled")
 
-    with _attrs(DAYS=3, DIGEST=False), _reset_state(), \
+    with _attrs(DAYS=3, DIGEST=False), _reset_state(), _no_resolve(), \
             _patch(bhavcopy, "backfill", lambda days=3: {"days": 2}), \
             _patch(deals, "latest", lambda kind, force=False: {"deals": []}), \
             _patch(notify, "send_digest", boom):
         out = S.run_job()
     assert "digest" not in out
+
+
+def test_run_job_settles_ideas_before_the_digest():
+    """The digest's track-record footer reads resolved outcomes, so resolution has to
+    happen after the backfill (fresh bars) and before the digest (fresh outcomes)."""
+    from nse_pulse.eod import bhavcopy
+    from nse_pulse.eod import deals
+    from nse_pulse.web import notify
+    order = []
+
+    def fake_bf(days=5):
+        order.append("backfill")
+        return {"days": 2}
+
+    def fake_dg():
+        order.append("digest")
+        return {"ok": True}
+
+    with _attrs(DAYS=5, DIGEST=True), _reset_state(), _no_resolve(order), \
+            _patch(bhavcopy, "backfill", fake_bf), \
+            _patch(deals, "latest", lambda kind, force=False: {"deals": []}), \
+            _patch(notify, "send_digest", fake_dg):
+        out = S.run_job()
+        assert out["resolved"] == {"pending": 0, "settled": 0}
+    assert order == ["backfill", "resolve", "digest"]
+
+
+def test_run_job_survives_a_resolver_failure():
+    from nse_pulse.eod import bhavcopy
+    from nse_pulse.eod import deals
+    from nse_pulse.sim import ideas_journal as ij
+
+    def boom(*a, **k):
+        raise RuntimeError("no bars")
+
+    with _attrs(DAYS=5, DIGEST=False), _reset_state(), \
+            _patch(ij, "resolve_outcomes_eod", boom), \
+            _patch(bhavcopy, "backfill", lambda days=5: {"days": 2}), \
+            _patch(deals, "latest", lambda kind, force=False: {"deals": []}):
+        out = S.run_job()
+    assert out["resolved"] is None and out["backfill"] == {"days": 2}
 
 
 # ---------------------------------------------------------------------------

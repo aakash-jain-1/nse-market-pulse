@@ -455,10 +455,14 @@ def test_board_adaptive_returns_weights_and_is_off_by_default():
         _seed(db)
         off = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2)
         assert off["adaptive"] is False and off["adaptiveWeights"] is None
+        assert off["adaptiveValidation"] is None
         on = ec.board(min_price=20, min_value_cr=1.0, min_pillars=2, adaptive=True)
         assert on["adaptive"] is True and isinstance(on["adaptiveWeights"], dict)
         # no resolved idea history seeded → every multiplier neutral (no swing)
         assert all(v == 1.0 for v in on["adaptiveWeights"].values())
+        # ... and the board says WHY it isn't weighting anything
+        assert on["adaptiveValidation"]["ok"] is False
+        assert on["adaptiveValidation"]["trusted"] == []
         # neutral weights ⇒ identical ranking to the non-adaptive board
         assert [p["symbol"] for p in on["longs"]] == [p["symbol"] for p in off["longs"]]
 

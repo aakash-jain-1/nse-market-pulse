@@ -63,7 +63,7 @@ NSE/
 │   │   ├── sim.py             # Multi-strategy forward-tester (per-strategy sims + daily rollup)
 │   │   ├── strategies.py      # Strategy library (17 generators) + market-regime detector
 │   │   ├── paper.py           # Paper-trading engine (virtual portfolio, JSON-persisted)
-│   │   └── ideas_journal.py   # Per-day idea entry/timestamp/live-move journal (Ideas tab)
+│   │   └── ideas_journal.py   # Per-day idea entry/timestamp/live-move journal (Ideas tab) + EOD outcome settler
 │   ├── eod/           # end-of-day pipeline (off-hours, pure where possible)
 │   │   ├── bhavcopy.py        # EOD UDiFF bhavcopy + sec_bhavdata_full delivery% — price/universe fallback + backfill(days)
 │   │   ├── deals.py           # Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache
@@ -71,7 +71,7 @@ NSE/
 │   │   ├── eod_conviction.py  # Conviction board — fuses breakout+delivery+deals+OI+sector RS+chain+rollover; save→ideas / digest→notify
 │   │   ├── eod_options.py     # Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls); oi_map() analytics
 │   │   ├── eod_scheduler.py   # Auto post-close EOD refresh — pure should_run() + block-aware daemon
-│   │   ├── conviction_calibration.py # Does stacking pay? per-pillar lift + verdict; pillar_weights() feeds back (adaptive)
+│   │   ├── conviction_calibration.py # Does stacking pay? per-pillar lift + verdict; pillar_weights() feeds back (adaptive), OOS-gated
 │   │   ├── rollover.py        # Futures rollover tracker off the FO bhavcopy — roll%/cost/basis/net-OI, ranked
 │   │   ├── sector_scan.py     # Sector relative-strength board over db.eod_bars — RS vs market, leaders/laggards
 │   │   └── sectors.py         # Curated NSE symbol→sector map (17 sectors, ~303 names)
@@ -89,7 +89,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 951 unit tests across 40 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 974 unit tests across 40 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -143,7 +143,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 951 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/corporateactions/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 974 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/corporateactions/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -483,10 +483,27 @@ with no creds the app is unchanged.
   whether stacking actually pays — win rate by **pillar count** (4-signal vs 2-signal), by
   rating/direction, the **per-pillar lift** (win rate WITH vs WITHOUT each pillar) and the
   **option-⚠️ warning impact**, plus a one-line verdict. `pillar_weights()` then turns each
-  measured lift into a clamped, sample-shrunk scoring multiplier the board applies with
-  `board(adaptive=True)` — re-ordering WITHIN a confirmation tier without touching the
-  stacking count. 📊 Calibration modal + ⚖️ Adaptive toggle on the Conviction tab;
+  measured lift into a clamped, sample-shrunk scoring multiplier — re-ordering WITHIN a
+  confirmation tier without touching the stacking count. That estimate is fitted on the
+  same ideas it re-weights, so `validate()`/`validated_weights()` gate it **out of
+  sample**: the saved boards are split **by day** and a pillar's multiplier is only
+  applied when its win-rate lift kept the same sign on the held-back days (needs 4+ board
+  days and 5+ resolved per side, else neutral — and the board says why via
+  `adaptiveValidation`). `board(adaptive=True)` applies the gated set. Outcomes are settled
+  post-close by `ideas_journal.resolve_outcomes_eod()`. 📊 Calibration modal (Measured /
+  Out-of-sample / Applied columns) + ⚖️ Adaptive toggle on the Conviction tab;
   `/api/eod/conviction/calibration?days=N`, `/api/eod/conviction?adaptive=1`.
+- **🧾 Idea outcome settlement (`ideas_journal.resolve_outcomes_eod()`)** — the intraday
+  resolvers only ever look at *today*, so any idea that outlived its session never got a
+  verdict: every EOD conviction pick (the board saves them dated to the last closed
+  session) plus every live idea that didn't touch a level before the close. This settles
+  them on **subsequent daily bars** — entry at the signal session's close, stop-first via
+  the canonical `intrabar.resolve`, signal-day bar excluded (no look-ahead), split-adjusted
+  bars via `ca.bars_all()`, and a per-source horizon (5 sessions for a conviction swing
+  plan, 3 for a live intraday idea) after which it settles **EXPIRED**. Network-free and
+  off-hours safe; runs inside `eod_scheduler.run_job()` after the backfill and before the
+  digest. `POST /api/ideas/resolve[?days=N&force=1]` for a manual catch-up (`force` only
+  re-scores verdicts a previous daily pass wrote — never the minute-accurate live ones).
 - **Demand Score** — composite ranking combining volume-gainers (volume
   multiple), most-active-by-value (money flow rank), and top-gainers (% gain).
   See `get_demand_score()`.
@@ -633,28 +650,61 @@ and the calibration→adaptive-weighting loop all landed. `docs/AUDIT.md` and
 
 Ranked by expected value, highest first:
 
-1. **🧪 Out-of-sample validation for the conviction board's adaptive weights.**
-   `conviction_calibration.pillar_weights()` learns each pillar's edge from **all**
-   resolved history and applies it to today with no holdout — precisely the
-   curve-fitting risk `walkforward.py` exists to police for the daily strategies. The
-   weighting is currently the only learned component in the engine that isn't
-   OOS-checked. Reuse `walkforward`'s holdout/anchored-fold machinery over the saved
-   conviction ideas.
-2. **🚀 Optional deploy on a real WSGI server (was on the original roadmap).** The app
+1. **🚀 Optional deploy on a real WSGI server (was on the original roadmap).** The app
    still serves from Werkzeug's dev server while binding `0.0.0.0` for phone/LAN access
    and holding long-lived SSE connections. `waitress` fits (pure Python, Windows-clean,
    properly threaded); keep the reloader + `start.py` supervisor for local dev.
-3. **🌊 Joint regime×vol selection.** Selection blends the two **marginal**
+2. **🌊 Joint regime×vol selection.** Selection blends the two **marginal**
    leaderboards (`blendedR = 0.6·regimeR + 0.4·volR`) because a joint bucket would have
    starved sample sizes on the old curated ~40-name universe. The full-universe EOD
    backtest now yields ~5k trades (6 regimes × 3 vol states ≈ 280/cell on average), so
    **measure the per-cell depth first** and only build the joint view if it holds up.
-4. **⛓ Multi-leg option strategies in paper trading.** The engine handles long *and*
+3. **⛓ Multi-leg option strategies in paper trading.** The engine handles long *and*
    written single legs with correct margin, but not spreads / straddles / strangles as
    one position — the natural next step now that writing works, and the piece a
    premium-selling playbook would need.
 
 ## Done recently
+
+- **🧪 The conviction board's learning loop actually turns now — resolver fix + an out-of-sample guard on the
+ adaptive weights** — was roadmap item 1 (OOS validation). Building it uncovered that there was **nothing to
+ validate**: the loop had never run once. `eod_conviction.save()` stamps a pick with the last **completed
+ bhavcopy session** and writes it after the close, but both idea resolvers (`resolve_outcomes_intrabar` and the
+ coarse `enrich` path) only ever look at **`_today()`** and only during market hours — so by the next open "today"
+ had moved on and that day was never revisited. Every saved board sat unresolved forever: **25 conviction ideas,
+ 0 outcomes**, which silently pegged Calibration, the ⚖️ Adaptive toggle and the digest's track-record footer at
+ "not enough history". The same gap quietly biased the **live** Ideas history too — an intraday idea that didn't
+ touch a level before the close stayed unresolved, so the per-day Hit% was computed only over the *fast movers*
+ (survivorship bias), which is why **1,843 of 3,907 live ideas had a verdict and the rest never would**.
+ Fixed with `ideas_journal.resolve_outcomes_eod()`: enter at the signal session's close, resolve on
+ **subsequent** sessions' highs/lows, delegating to the canonical stop-first `intrabar.resolve` rather than
+ adding a fourth exit engine. Details that mattered: the signal-day bar is **excluded** (the plan came *from*
+ that close, so scoring it there is look-ahead — a test pins that a wild same-day range resolves nothing);
+ `_daily_candle` bakes the session date as UTC midnight because `intrabar.candle_dt` reads epochs back via UTC
+ to recover IST, so any other convention slips the session by a day; bars come from `ca.bars_all()` so splits
+ are already back-adjusted; and the horizon is **per source** — 5 sessions for a conviction swing plan (matches
+ `backtest_daily.max_hold`), 3 for a live intraday idea (matches `sim.DEFAULT_MAX_SESSIONS`) — reusing each
+ engine's own convention instead of inventing a third. A run that touches neither level settles **EXPIRED**
+ (settled, but neither a win nor a loss) so the horizon can't manufacture verdicts. Live result: all 25
+ conviction orphans settled (**1 TARGET / 11 STOP / 13 EXPIRED**) and 1,969 ideas total, with the 1,843
+ minute-accurate live verdicts **provably untouched** — `daily_settled()` keys off a midnight `outcomeAt`, which
+ only a daily resolve can produce, so `force=` re-settles our own verdicts (after a backfill fills a hole)
+ and never the higher-fidelity ones. Runs post-close inside `eod_scheduler.run_job()`, ordered **after** the
+ backfill (fresh bars) and **before** the digest (fresh outcomes — a test pins that order); manual catch-up at
+ `POST /api/ideas/resolve[?days=N&force=1]`.
+ **Then** the actual roadmap item: `pillar_weights()` measures a pillar's lift on the very ideas it re-weights,
+ so with 9 pillars and a thin sample the luckiest one earns a multiplier on noise. `validate()` splits the saved
+ boards **by day** (one board is one decision — slicing a day across train and test would leak) and trusts a
+ pillar only when its win-rate lift keeps the same **sign** out of sample. Sign, not magnitude, is deliberately
+ the bar: at these sample sizes "consistently helpful or consistently harmful" is all the data honestly supports
+ (a consistently *negative* pillar is trusted too — it earns a <1.0 multiplier). Once trusted, the multiplier
+ applied is the **full-history** one: the split is a gate on believing the pillar at all, not a smaller estimate
+ of its size. `validated_weights()` is what `board(adaptive=True)` now calls, and it needs 4+ board days and 5+
+ resolved ideas per side before it will judge anything — so **today it returns all-neutral and says why**
+ (`adaptiveValidation` on the board, a banner + Measured/Out-of-sample/Applied columns in the 📊 Calibration
+ modal). That's the honest state with one saved board day, and strictly better than the old behaviour of
+ dressing a 12-idea in-sample fit up as a measured edge. `adaptiveWeights` still reports the in-sample number so
+ the difference is legible. Suite **951 → 974**.
 
 - **💸 Transaction costs in the portfolio backtest (`portfolio_backtest.COSTS`)** — was roadmap item 1, and it
  **reverses `docs/AUDIT2.md` N3**. That finding declined a cost model because the drag "hits all strategies alike,

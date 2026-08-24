@@ -104,7 +104,7 @@ nse_pulse/sim/
   sim.py             Multi-strategy forward-tester (per-strategy sims + daily rollup)
   strategies.py      Strategy library (17 generators) + market-regime detector
   paper.py           Paper-trading engine (equity + long/short options + long/short futures, margin-based)
-  ideas_journal.py   Per-day idea entry/timestamp/live-move journal (Ideas tab)
+  ideas_journal.py   Per-day idea entry/timestamp/live-move journal (Ideas tab); resolve_outcomes_eod() settles past days on daily bars
 nse_pulse/eod/
   bhavcopy.py        EOD UDiFF bhavcopy + sec_bhavdata_full delivery% — price/universe fallback + backfill(days)
   deals.py           Bulk/block deals (institutional footprint) from nsearchives CSV — parse/cache, off-hours
@@ -112,7 +112,7 @@ nse_pulse/eod/
   eod_conviction.py  EOD conviction board — fuses breakout+delivery+deals+OI+sector RS+chain+rollover; save→ideas
   eod_options.py     Resilient EOD option chain from FO bhavcopy (PCR/max-pain/OI walls); oi_map() analytics
   eod_scheduler.py   Auto post-close EOD refresh — pure should_run() + block-aware daemon, persists in eod_meta
-  conviction_calibration.py  Does stacking pay? per-pillar lift + honest verdict; pillar_weights() feeds back (adaptive)
+  conviction_calibration.py  Does stacking pay? per-pillar lift + honest verdict; pillar_weights() feeds back (adaptive), OOS-gated by validated_weights()
   rollover.py        Futures rollover tracker off the FO bhavcopy — roll%/cost/basis/net-OI, ranked
   sector_scan.py     Sector relative-strength (rotation) board over db.eod_bars — RS vs market median
   sectors.py         Curated NSE symbol→sector map (17 sectors, ~303 names) — static data
@@ -130,7 +130,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-  tests/               Unit tests — 951 across 40 suites; import `from nse_pulse.<sub> import <mod>`
+  tests/               Unit tests — 974 across 40 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -263,18 +263,25 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / id
   lift** (win rate WITH vs WITHOUT each of breakout/trend/delivery/volume/oi/deal/
   sector/option), and the **option-⚠️ warning impact** (does the soft-veto flag
   worse trades?). All maths pure + tested; `report()` = one DB read. Emits an honest
-  one-line `verdict`. `/api/eod/conviction/calibration?days=N`; 📊 Calibration button
-  (modal) on the 🏆 Conviction tab.
-- **Adaptive weighting (calibration → scoring)**: closes the loop — the board can feed
-  each pillar's measured edge BACK into its own scoring. `conviction_calibration.
+  one-line `verdict`. Outcomes are settled post-close by
+  `ideas_journal.resolve_outcomes_eod()` — before that fix nothing ever resolved a saved
+  board, so this report was permanently empty (see the 2026-08-24 log entry).
+  `/api/eod/conviction/calibration?days=N`; 📊 Calibration button (modal) on the 🏆 tab.
+- **Adaptive weighting (calibration → scoring), OOS-gated**: closes the loop — the board
+  feeds each pillar's measured edge BACK into its own scoring. `conviction_calibration.
   pillar_weights()` turns each pillar's realized win-rate lift into a clamped
   `[0.5,1.5]` scoring multiplier, **shrunk toward 1.0 by sample size** and neutral until
   a pillar has enough resolved history on both sides (`pillar_of()` is the one shared
-  label→key map). `eod_conviction.board(adaptive=True)` scales pillar weights by it via
-  `_apply_weights` — but the **confirmation COUNT (primary sort key) is untouched**, so
-  weighting only re-orders WITHIN a tier, never overriding how many signals agree.
-  Opt-in (`?adaptive=1`, ⚖️ Adaptive toggle, OFF by default); the board echoes the
-  applied `adaptiveWeights` and the Calibration modal shows each pillar's earned "→ weight".
+  label→key map). That estimate is **fitted on the ideas it re-weights**, so
+  `validated_weights()` gates it: `validate()` splits the saved boards **by day** and a
+  multiplier is applied only where the lift kept the same **sign** out of sample (needs 4+
+  board days, 5+ resolved per side; else neutral with a stated reason). A trusted pillar
+  gets the full-history multiplier — the split is a gate on belief, not a smaller estimate.
+  `eod_conviction.board(adaptive=True)` applies the gated set via `_apply_weights` — the
+  **confirmation COUNT (primary sort key) is untouched**, so weighting only re-orders
+  WITHIN a tier, never overriding how many signals agree. Opt-in (`?adaptive=1`, ⚖️
+  Adaptive toggle, OFF by default); the board echoes `adaptiveWeights` +
+  `adaptiveValidation`, and the Calibration modal shows Measured / Out-of-sample / Applied.
 - **Futures rollover (`rollover.py`)**: near-vs-next month futures from the EOD FO
   bhavcopy. `bhavcopy.parse_fo_futures_all()` keeps ALL expiries per symbol (parse_fo
   keeps only the nearest); `rollover.board()` computes per name **rollover%** (nextOI /
@@ -363,7 +370,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **951 tests** across 40 suites (grow it with every change;
+- `python -m pytest -q` — **974 tests** across 40 suites (grow it with every change;
   never shrink it).
 - **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
   committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
@@ -419,17 +426,18 @@ stays useful instead of becoming a wall of checkmarks.
 
 Ranked by expected value (full detail in `AGENTS.md` -> "Roadmap / ideas (not yet built)"):
 
-1. **Out-of-sample validation for the conviction board's adaptive pillar weights.**
-   `pillar_weights()` learns from all resolved history and applies it to today with no
-   holdout — the one learned component not policed the way `walkforward.py` polices the
-   daily strategies.
-2. **Optional deploy on a real WSGI server** (`waitress`) — still on Werkzeug's dev
+1. **Optional deploy on a real WSGI server** (`waitress`) — still on Werkzeug's dev
    server while binding `0.0.0.0` for phone/LAN and holding long-lived SSE streams.
    Keep the reloader + `start.py` supervisor for dev.
-3. **Joint regime x vol selection** — deferred pending sample depth; the full-universe
+2. **Joint regime x vol selection** — deferred pending sample depth; the full-universe
    EOD backtest (~5k trades, ~280/cell) may now suffice. Measure per-cell depth first.
-4. **Multi-leg option strategies in paper trading** — spreads/straddles as one position.
+3. **Multi-leg option strategies in paper trading** — spreads/straddles as one position.
    Futures side: **calendar spreads** (rollover data already there) + basis/carry alerts.
+
+**Waiting on data (not a build task):** the conviction board's adaptive weights are now
+OOS-gated (below), and the gate needs **4+ saved board days**. There is 1. Save a board
+each session (or let the auto-EOD refresh do it) and the ⚖️ Adaptive toggle starts having
+something to apply; until then it is correctly, deliberately neutral.
 
 **Reversed decision (now shipped):** transaction costs were "explicitly NOT doing"
 (AUDIT2 N3). That still holds for the per-trade R leaderboards, but not for the absolute
@@ -472,6 +480,103 @@ only (2026-08-24, see the findings log).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 🐛 FOUND + FIXED: the conviction board's learning loop had never run once
+
+**Found while starting roadmap item 1 (OOS validation of the adaptive weights): there was
+nothing to validate.** `eod_conviction.save()` stamps each pick with the last **completed
+bhavcopy session** and writes it after the close. Both idea resolvers
+(`ideas_journal.resolve_outcomes_intrabar()` and the coarse path inside `enrich()`) only
+ever look at **`_today()`**, and only during market hours. So a board saved on the 20th
+carrying ideas dated the 17th was already invisible the moment it was written, and nothing
+ever revisited that day. Measured: **25 conviction ideas, 0 outcomes.** Everything
+downstream reads `outcome`, so 📊 Calibration, the ⚖️ Adaptive toggle and the digest's
+track-record footer were all permanently stuck on "not enough resolved history" — not
+because history was thin, but because the resolver could never see it.
+
+**The same gap quietly biased the LIVE Ideas history.** An intraday idea that didn't touch
+target or stop before the close stayed unresolved forever, so the per-day Hit% was computed
+only over the *fast movers* — survivorship bias. Measured: **1,843 of 3,907 live ideas had
+a verdict; the remaining 2,064 never would.**
+
+**Fix — `ideas_journal.resolve_outcomes_eod()`** (+ pure `resolve_idea_on_daily`): enter at
+the signal session's close, resolve on **subsequent** sessions' highs/lows. It delegates to
+`intrabar.resolve` rather than adding a fourth exit engine, so stop-first and MFE/MAE match
+every other scorecard. Decisions worth remembering:
+
+- **The signal-day bar is excluded.** The plan was derived *from* that close, so scoring it
+  on the same bar is look-ahead. A test pins that a wild same-day range resolves nothing.
+- **`_daily_candle` bakes the session date as UTC midnight** — `intrabar.candle_dt` reads
+  epochs back via `utcfromtimestamp` to recover IST (NSE's baked-epoch convention), so any
+  other convention slips every exit by a day. Round-trip is unit-tested.
+- **Bars come from `ca.bars_all()`**, so a split ex-date inside the hold can't fake a stop.
+- **Horizon is per source, reusing each engine's own convention** rather than inventing a
+  third: `EOD_MAX_SESSIONS=5` for a conviction swing plan (= `backtest_daily.max_hold`),
+  `LIVE_MAX_SESSIONS=3` for a live intraday idea (= `sim.DEFAULT_MAX_SESSIONS`). Classified
+  via the single-source-of-truth `conviction_calibration.is_conviction()`.
+- **Neither level touched inside the horizon ⇒ `EXPIRED`**, not a win or a loss, so a
+  longer horizon can't manufacture verdicts. Fewer sessions than the horizon ⇒ left open.
+- **`daily_settled()` keys off a midnight `outcomeAt`** — only a daily resolve can produce
+  one; the live passes always stamp a wall-clock time. That makes `force=` safe: it
+  re-scores our own verdicts (after a backfill fills a hole) and provably never the
+  higher-fidelity minute-accurate ones.
+
+**Live result:** all 25 conviction orphans settled (**1 TARGET / 11 STOP / 13 EXPIRED** — a
+grim 8% win rate, but n=12 resolved from ONE day is noise, not a verdict on the board), plus
+the live backlog, **1,969 ideas settled in total**, with the 1,843 minute-accurate verdicts
+verified untouched. **First pass used a uniform 5-session horizon by mistake** and was
+re-settled with `force=True` once the per-source horizon landed — which is exactly the
+scenario `force` exists for.
+
+**Wiring:** runs inside `eod_scheduler.run_job()`, ordered **after** the backfill (so a
+level hit yesterday is visible) and **before** the digest (so its track-record footer counts
+today's outcomes) — a test pins that order, and a resolver exception degrades to
+`resolved: None` instead of losing the digest. Manual catch-up:
+`POST /api/ideas/resolve[?days=N&force=1]`.
+
+### 2026-08-24 — 🧪 BUILT: out-of-sample gate on the adaptive pillar weights (roadmap item 1)
+
+**Why:** `pillar_weights()` measures a pillar's win-rate lift on all resolved history and
+feeds it straight back into scoring the next board — fitting and applying on the same data.
+With **9 pillars** and a thin sample, the luckiest one *will* show a healthy lift by chance,
+earn a >1.0 multiplier and re-order the board on noise. Same curve-fit trap `walkforward.py`
+polices for the strategy leaderboard; this was the last learned component without a guard.
+
+**How:** `validate()` splits the saved boards **by day** (`split_by_day`) and re-measures
+each pillar's lift on both sides. Design choices:
+
+- **Split on day boundaries, never inside a day** — one saved board is one decision;
+  slicing a day across train and test would leak.
+- **Sign agreement, not magnitude, is the bar.** At these sample sizes "consistently
+  helpful" or "consistently harmful" is all the data honestly supports. A consistently
+  *negative* lift is trusted too and earns a <1.0 multiplier — down-weighting a pillar that
+  keeps hurting is just as much a finding as promoting one that helps.
+- **A trusted pillar gets the FULL-history multiplier**, not the train-only one. The split
+  is a gate on believing the pillar at all, not a smaller estimate of its size.
+- **Gates:** `_V_MIN_DAYS=4` distinct board days and `_V_MIN_RESOLVED=5` resolved per side,
+  else `ok: False` and every weight neutral with a human-readable `reason`.
+
+`validated_weights()` is what `board(adaptive=True)` now calls (was `pillar_weights()`);
+the board echoes `adaptiveValidation`. `report()` keeps `adaptiveWeights` as the **measured
+(in-sample)** number and adds `validatedWeights` + per-pillar `applied`/`oos`, so the
+difference is legible instead of hidden. UI: Measured / Out-of-sample / Applied columns +
+a banner in the 📊 Calibration modal.
+
+**Current state, stated honestly:** with 1 saved board day the gate refuses to judge, so
+⚖️ Adaptive is a **no-op that explains itself**. That is a real behaviour change from
+before — and strictly better than dressing a 12-idea in-sample fit up as a measured edge.
+It starts having something to apply after ~4 saved board days.
+
+**Tests +23 (951 → 974):** resolver — date round-trip through the baked-epoch convention,
+signal-day exclusion, target/stop/straddle-is-a-stop, SHORT mirror, EXPIRED at the horizon,
+still-open inside it, incomplete plans skipped, per-source horizon, the `daily_settled`
+marker, and two temp-DB e2e runs (settle past-only; `force` re-scores ours and not the live
+ones); OOS guard — day-boundary split, single-day refusal, `_held_up` sign logic, both
+gates, separating a real edge from a lucky one, and neutralization of an unvalidated weight;
+plus scheduler ordering (`backfill → resolve → digest`), resolver-failure isolation, and
+`/api/ideas/resolve` arg parsing. **Note:** the four existing `run_job` tests had to stub
+the resolver — `run_job` now touches the ideas table, and unstubbed they would have written
+to the real `data/market.db`.
 
 ### 2026-08-24 — 💸 BUILT: transaction costs in the portfolio backtest (AUDIT2 N3 reversed)
 

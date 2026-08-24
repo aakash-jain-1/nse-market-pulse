@@ -36,6 +36,7 @@ import time
 from datetime import datetime, timezone, timedelta
 
 from nse_pulse.core import db
+from nse_pulse.core import intrabar
 from nse_pulse.core import paths
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -256,6 +257,140 @@ def resolve_outcomes_intrabar():
                 merged.append(cur)
         if merged:
             db.ideas_upsert(merged)
+
+
+# ---------------------------------------------------------------------------
+# Settling PAST days' ideas on daily bars (the EOD conviction board's outcomes)
+# ---------------------------------------------------------------------------
+# Both resolvers above are scoped to `_today()` and gated to market hours, which is
+# right for intraday ideas but leaves the EOD conviction board permanently unsettled:
+# `eod_conviction.save()` stamps its picks with the last COMPLETED bhavcopy session
+# and writes them after the close, so by the time the market reopens "today" has
+# already moved on and nothing ever looks at that day again. The board's whole
+# calibration → adaptive-weighting loop reads `outcome`, so it could never turn.
+#
+# This settles them the way `backtest_daily` settles a daily-bar trade: enter at the
+# signal session's close, then resolve on SUBSEQUENT sessions' highs/lows. Same
+# stop-first convention as every other engine (it delegates to `intrabar.resolve`),
+# no network — the daily bars are already in SQLite.
+#
+# The same gap silently biased the live Ideas history: an intraday idea that didn't
+# touch a level before the close stayed unresolved forever, so the per-day Hit% was
+# computed only over the fast movers. Those get settled here too, but on the horizon
+# the live sim actually holds them for — we reuse each engine's own convention rather
+# than inventing a third one.
+EOD_MAX_SESSIONS = 5       # conviction-board swing plan (matches backtest_daily.max_hold)
+LIVE_MAX_SESSIONS = 3      # live intraday idea (matches sim.DEFAULT_MAX_SESSIONS)
+
+
+def _daily_candle(bar):
+    """One EOD bar in `intrabar`'s candle shape.
+
+    `t` is the session date treated as UTC midnight, because `intrabar.candle_dt`
+    reads epochs back via UTC to recover IST (NSE's baked-epoch convention) — so
+    round-tripping a date through it must use the same trick or the session slips a day.
+    """
+    from calendar import timegm
+    d = datetime.strptime(bar["d"], "%Y-%m-%d")
+    return {"t": timegm(d.timetuple()) * 1000, "o": bar.get("open"),
+            "h": bar.get("high"), "l": bar.get("low"), "c": bar.get("close")}
+
+
+def resolve_idea_on_daily(idea, bars, max_sessions=EOD_MAX_SESSIONS):
+    """Settle ONE saved idea against daily `bars` (pure; `bars` ascending, as stored).
+
+    Only sessions AFTER the idea's own day count: its plan was derived from that
+    session's close, so scoring it on the same bar would be look-ahead. Returns the
+    outcome fields to write, or None when there's nothing usable yet (no later bars).
+    A run that neither touches target nor stop inside the horizon settles as EXPIRED
+    at the last close — settled, but neither a win nor a loss.
+    """
+    entry, stop, target = idea.get("entry"), idea.get("stop"), idea.get("target")
+    day, direction = idea.get("day"), idea.get("direction")
+    if not (entry and stop and target and day and direction):
+        return None
+    later = [b for b in bars if str(b.get("d") or "")[:10] > str(day)[:10]]
+    if not later:
+        return None
+
+    probe = {"direction": direction, "entry": entry, "stop": stop, "target": target,
+             "qty": 1, "openedTs": f"{str(day)[:10]} 00:00:00"}
+    status = intrabar.resolve(probe, [_daily_candle(b) for b in later], 1.0,
+                              max_sessions=max_sessions)
+    if status not in ("TARGET", "STOP", "EXPIRED"):
+        return None                        # still inside its horizon — leave it open
+    return {
+        "outcome": status,
+        "outcomeAt": (probe.get("closedTs") or "").replace("T", " ") or None,
+        "outcomePct": probe.get("pnlPct"),
+        "ltp": probe.get("ltp"),
+        "movePct": probe.get("pnlPct"),
+        "maxMovePct": probe.get("mfePct"),
+        "minMovePct": probe.get("maePct"),
+    }
+
+
+def daily_settled(idea):
+    """True if this idea's outcome came from a DAILY bar (this pass), not live ticks.
+
+    Daily resolution can only ever timestamp an exit at a session boundary, so a
+    midnight `outcomeAt` is an unambiguous marker — the live intraday resolvers always
+    stamp a real wall-clock time. Lets `force=` re-settle our own verdicts (after a
+    bhavcopy backfill or a corporate-action fix) without ever clobbering the
+    higher-fidelity minute-accurate ones.
+    """
+    return str(idea.get("outcomeAt") or "").endswith(" 00:00:00")
+
+
+def _horizon(idea):
+    """Sessions to hold this idea before calling it EXPIRED, by where it came from."""
+    from nse_pulse.eod import conviction_calibration as _cc   # db-only, no cycle
+    return EOD_MAX_SESSIONS if _cc.is_conviction(idea) else LIVE_MAX_SESSIONS
+
+
+def resolve_outcomes_eod(days=180, limit=5000, force=False):
+    """Settle every unresolved PAST-day idea against stored daily bars.
+
+    Off-hours safe and network-free: one `corporate_actions.bars_all()` read (so
+    splits are already back-adjusted) covering the window, then a pure resolve per
+    idea. Today's ideas are left to the intraday resolvers, which see real minute
+    bars. `force=True` also re-settles verdicts a previous daily pass wrote (never
+    the live ones — see `daily_settled`). Returns a summary.
+    """
+    db.init()
+    today = _today()
+    since = (datetime.now(IST) - timedelta(days=int(days) + EOD_MAX_SESSIONS * 3)) \
+        .strftime("%Y-%m-%d")
+    pending = [i for i in db.ideas_all(limit=limit, since=since)
+               if str(i.get("day") or "")[:10] < today
+               and i.get("entry") and i.get("stop") and i.get("target")
+               and (not i.get("outcome") or (force and daily_settled(i)))]
+    out = {"pending": len(pending), "settled": 0, "target": 0, "stop": 0,
+           "expired": 0, "stillOpen": 0, "symbols": 0}
+    if not pending:
+        return out
+
+    from nse_pulse.core import corporate_actions as ca
+    wanted = {i["symbol"] for i in pending}
+    grouped = ca.bars_all(since=since)
+    out["symbols"] = sum(1 for s in wanted if grouped.get(s))
+
+    updates = []
+    for idea in pending:
+        bars = grouped.get(idea["symbol"])
+        fields = resolve_idea_on_daily(idea, bars, _horizon(idea)) if bars else None
+        if not fields:
+            out["stillOpen"] += 1
+            continue
+        idea.update(fields)
+        updates.append(idea)
+        out["settled"] += 1
+        out[{"TARGET": "target", "STOP": "stop", "EXPIRED": "expired"}[fields["outcome"]]] += 1
+
+    if updates:
+        with _lock:
+            db.ideas_upsert(updates)
+    return out
 
 
 def enrich(fresh_longs, fresh_shorts, price_fn=None):
