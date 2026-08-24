@@ -600,11 +600,12 @@ with no creds the app is unchanged.
 - **Corporate actions are adjusted on READ, and only where the ex-date is bracketed by
   two stored sessions** (`core/corporate_actions.py`). NSE still serves raw traded
   prices, so `db.eod_bars` keeps the crash — every *feature* path goes through
-  `ca.bars_all()` / `adjust_grouped()` instead. Residual gap worth knowing: an ex-date
-  falling inside a **backfill hole** stays unadjusted, because across a hole the split
-  factor can't be separated from real drift over the missing sessions (measured: 60
-  symbols whose two stored blocks straddle a 17-session hole). A **contiguous
-  backfill** is the fix, not a detector change.
+  `ca.bars_all()` / `adjust_grouped()` instead (18 events detected across the universe
+  today). Residual gap worth knowing: an ex-date falling inside a **backfill hole**
+  can't be sized, because across a hole the factor is entangled with real drift over the
+  missing sessions. The whole-market block is contiguous as of 2026-08-24, so keeping it
+  that way is a **backfill** chore, not a detector change. Note `prevClose` is **not** a
+  detector on either ingest path — both report it unadjusted.
 - The Live tab is optional and needs the user's own broker credentials. **Angel One
   SmartAPI is the free default** (auto TOTP login, no manual token step); **Dhan** is
   an alternative but its Data API is a paid ₹499+GST/mo subscription. With Angel it
@@ -681,7 +682,11 @@ Ranked by expected value, highest first:
  ex-date `ret1` fixed from −90.1% to −1.00% (ANGELONE) and −80.3% to −1.29% (KOTAKBANK), re-detection after
  adjustment finds **0** events, turnover invariant to 0.0001%, newest bar untouched. Measured backtest effect at
  `universe=60` (the size the regime leaderboard and `strategy_of_day` actually use): 12 phantom trades gone,
- expectancy **+0.02R → +0.04R**, total **+23.6R → +52.4R**. Suite **919 → 937**.
+ expectancy **+0.03R → +0.05R**, total **+46.5R → +75.0R**. Suite **919 → 937**.
+ **Follow-up (same day):** a 22-session `POST /api/eod/backfill` made the whole-market block **contiguous**
+ (2026-07-13 → 2026-08-24, 70,953 bars, 100% delivery merge, no WAF block), which lifted detection **13 → 18
+ events** — the five newly reachable ones (IVZINNIFTY 10×, TEMBO 8.71×, NARMADA 2.13×, KIRLPNU 2×, TDPOWERSYS 2×)
+ had ex-dates inside the old hole — and cut large unadjusted moves **62 → 2, with zero non-adjacent**.
 
 - **🛟 `start.py` now supervises the server (a bad save no longer leaves it dead)** — hit this for real mid-session:
  **Werkzeug's reloader only restarts on its own exit code 3** ("file changed"); any other non-zero exit is returned

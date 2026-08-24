@@ -604,7 +604,7 @@ flowchart LR
   bhavcopy slice of `jugaad-data`, implemented in-house).
 - **📐 Split / bonus adjustment** (`corporate_actions.py`): NSE publishes **raw traded
   prices**, so the day a stock splits 1:10 looks exactly like a **−90% crash** — and it
-  really is in our data (ANGELONE −90.1%, KOTAKBANK −80.3%, MCX −79.8%, and 10 more).
+  really is in our data (ANGELONE −90.1%, KOTAKBANK −80.3%, MCX −79.8%, and 15 more).
   Left alone, that hands the strategies a huge fake signal on the ex-date, and then makes
   the name look ~90% below its 20-day high for weeks afterwards, inventing breakdowns and
   hiding real breakouts. Every history read now detects these (a big one-session move that
@@ -613,7 +613,10 @@ flowchart LR
   ex-date shows its true move — ANGELONE's −90.1% becomes **−1.0%**. Today's *prices are
   never touched*, only history, and `data/market.db` keeps exactly what NSE published.
   Measured on the backtest the app actually uses for strategy selection: **12 fake trades
-  removed and expectancy up from +0.02R to +0.04R**.
+  removed and expectancy up from +0.03R to +0.05R**. One caveat: a split can only be sized
+  when both sides of it are in your history, so keep the EOD backfill **contiguous** (⬇
+  Backfill history, or the auto post-close refresh) — a split inside a missing stretch is
+  left alone rather than guessed at.
 
 ---
 

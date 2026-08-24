@@ -448,12 +448,14 @@ portfolio numbers built later — hence item 1 above.
   `db.eod_bars` still holds NSE's raw traded prices — the crash is real in the table, so
   `db_inspect` shows what NSE published. Every *feature* path goes through
   `ca.bars_all()` / `adjust_grouped()` instead, so if you add a new consumer of
-  `db.eod_bars_all()`, route it through `ca` or you re-import the bug. **Residual gap:**
-  an ex-date inside a **backfill hole** stays unadjusted — across a hole the split factor
-  can't be separated from real drift over the missing sessions, so `_adjacent` refuses
-  rather than guessing (measured: 60 symbols straddling a 17-session hole, e.g. TEMBO
-  530.40 -> 59.75). Fix that with a **contiguous backfill**, not a detector change. The
-  zero-price guard never caught any of this (prices are all positive and self-consistent).
+  `db.eod_bars_all()`, route it through `ca` or you re-import the bug. 18 events are
+  currently detected across the universe. **Residual gap:** an ex-date inside a
+  **backfill hole** can't be sized — across a hole the factor is entangled with real
+  drift over the missing sessions, so `_adjacent` refuses rather than guessing. The
+  whole-market block is contiguous today (2026-07-13 -> 2026-08-24), so keeping it that
+  way is a **backfill** chore, not a detector change. `prevClose` is **not** a detector
+  on either ingest path (both report it unadjusted), and the zero-price guard never
+  caught any of this (prices are all positive and self-consistent).
 - Prices come from a five-tier chain (`nse_client.get_prices`): broker tick store →
   hot-list map (~100–150 names) → batched broker quote → NSE per-stock quote → **EOD
   bhavcopy close**. With a broker connected, off-hot-list names are genuinely live and
@@ -473,6 +475,46 @@ portfolio numbers built later — hence item 1 above.
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 🗄 Contiguous EOD backfill closes the corporate-action gap (data op, no code change)
+
+The detector shipped with one honest hole: an ex-date inside a **backfill hole** can't be sized, because across
+a hole the split factor is entangled with real drift over the missing sessions. Filled the hole instead of
+weakening the detector.
+
+- **What was wrong with the data.** `eod_bars` had 195 *sessions* but only **14 wide** ones — the whole-market
+  bhavcopy had been ingested for 2026-07-13..07-24 and 2026-08-18..08-21, and every other session held just
+  **59–208** curated names from the per-symbol live path. So the ~3,300 market-wide names had two blocks either
+  side of a 17-session hole, and the "195 contiguous sessions" figure was measuring dates, not coverage.
+- **Ran** `POST /api/eod/backfill {"days": 22}` (the in-app background job, so nothing else writes to SQLite
+  concurrently): **22 days, 70,953 bars, delivery merged on 70,953 / 70,953 = 100%**, 4,701 OI rows, **no WAF
+  block**, ~2 minutes. Off-hours with the pacer idle is the right window for this.
+- **Result:** the wide block is now **31 contiguous sessions (2026-07-13 → 2026-08-24, zero holes)**, and
+  detection went **13 → 18 events** — the five newly reachable ones are exactly the previously-straddling names
+  (`IVZINNIFTY` 10× on 07-31, `TEMBO` 8.7124× on 08-05, `NARMADA` 2.1263× on 07-31, `KIRLPNU` 2× on 08-18,
+  `TDPOWERSYS` 2× on 08-24). Large unadjusted moves fell **62 → 2**, with **zero** non-adjacent: the gap class
+  is gone, not hidden. Re-detection after adjustment still finds **0**.
+- **Backtest impact re-measured on the deeper history** (`source="eod"`, 180 days): `universe=60` — the size
+  `strategy_of_day` actually runs — **−12 phantom trades, expectancy +0.03R → +0.05R, total +46.5R → +75.0R**;
+  `universe=300` +26.7R; `universe=1500` +16.7R. Note the whole-market aggregate is now clearly negative
+  (−572R over 25,712 trades) simply because 27 more wide sessions added ~11k trades — the honest whole-market
+  read, consistent with the curated-universe flattery noted elsewhere.
+- **CORRECTION to the entry below.** It claimed the two ingest paths disagree about `prevClose` (live stale,
+  bhavcopy re-based). **That was wrong** — measured across six confirmed splits, the bhavcopy's ex-date
+  `prevClose` equals the previous session's raw close **exactly** (`prevBar/prevClose = 1.000` for
+  TDPOWERSYS 1534.8, KIRLPNU 1534.3, IVZINNIFTY 2786.51, TEMBO 574.15, NARMADA 36.19, GOODLUCK 1439.4). The
+  earlier reading came from mistaking TEMBO's first *post*-hole bar for its ex-date. So the rule is simpler and
+  stronger than documented: **`prevClose` is unadjusted on BOTH paths and is never a detector** — which is why
+  detection works off closes only.
+- **The 2 remaining declines are both correct, and they show why the two gates are separate.** `TRIVENI`
+  −41.6% (ratio 1.7114) sits in the 30–45% band with no clean factor: possibly a real demerger, but
+  indistinguishable from a violent real move on prices alone, so it's left untouched by design. `SUN-RE` posts
+  **three consecutive ~−40% sessions** (9.65 → 5.8 → 3.5 → 2.1) — a collapsing penny stock, and instructive
+  because it **passes** `_separated`: a monotonic collapse looks exactly like a scale break to the
+  geometric-mean test. The clean-ratio requirement below `HARD_MOVE_PCT` is the only thing that declines it,
+  so don't "simplify" the two gates into one.
+- **The limitation is now about future holes, not current data.** Nothing changed in `corporate_actions.py`;
+  keeping the whole-market backfill contiguous is the maintenance task.
 
 ### 2026-08-24 — 📐 BUILT: corporate-action adjustment (`core/corporate_actions.py`, roadmap item 1)
 
@@ -531,10 +573,7 @@ calendar — and the whole module is pure over a bar list, so it's testable with
   **2026-08-18** and all non-adjacent — the whole-market bhavcopy backfill is only **4 sessions deep** (~3,330
   symbols/day from 08-18; just **59** curated names before it), so those names have two blocks separated by a
   17-session hole. Several are genuine splits (TEMBO 530.40→59.75, IVZINNIFTY 2726.94→277.59) that we correctly
-  refuse to size, because across the hole the factor is entangled with 17 sessions of real drift. Also note the
-  two ingest paths **disagree** about `prevClose`: the live historical path reports it **stale** (ANGELONE
-  2489.90 vs a 246.50 close — this is why `prevClose` is not a detector), whereas the bhavcopy path reports it
-  **re-based** (TEMBO 60.35 against a 59.75 close).
+  refuse to size, because across the hole the factor is entangled with 17 sessions of real drift.
 - **Tests +18 (919 → 937):** clean split / bonus / reverse / demerger detection, the snapping band, both sides of
   the persistence guard (bad print not adjusted in *either* direction), the non-adjacent refusal, the
   violent-rally-is-not-a-consolidation case, back-adjustment maths incl. turnover invariance and the `prevClose`
