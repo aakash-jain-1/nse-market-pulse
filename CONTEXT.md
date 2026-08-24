@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-tests/               Unit tests — 875 across 39 suites; import `from nse_pulse.<sub> import <mod>`
+tests/               Unit tests — 894 across 39 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -218,7 +218,7 @@ data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / id
   file per day, `TradDt` already `YYYY-MM-DD`. Parsing is pure (`parse_cm`/
   `parse_fo`); downloads walk back over weekends/holidays (404 → prior session)
   and cache 30 min (`latest()`, lock-guarded). Wired as the **last-resort price**
-  in `nse_client.get_price()` (→ any listed symbol is priceable, off-hours + when
+  in `nse_client.get_prices()` (→ any listed symbol is priceable, off-hours + when
   the live API is down) and a **lot-size fallback** in `get_lot_sizes()`.
   `ingest_db()` bulk-loads CM bars + FO OI into `eod_bars`/`eod_oi` to widen the
   daily-backtest universe to the whole market. **`backfill(days, pace=0.5)`** loops
@@ -357,7 +357,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **875 tests** across 39 suites (grow it with every change;
+- `python -m pytest -q` — **894 tests** across 39 suites (grow it with every change;
   never shrink it).
 - **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
   committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
@@ -499,7 +499,10 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
   confirmation tier without ever touching the stacking count. *Feature complete.*
 
 **Open (older roadmap, in AGENTS.md):**
-- Route paper-trading fills / `get_price` through the broker feed.
+- ✅ *(done)* Route paper-trading fills / `get_price` / sim MTM through the broker feed —
+  `nse.get_prices()` is now a five-tier chain (broker store → hot lists → batched broker
+  quote → NSE quote → EOD close) fed by `register_price_source()` + each adapter's
+  `price_map()`. See the 2026-08-24 log entry. **The live-feed roadmap item is fully closed.**
 - ✅ *(done)* Extend the Live tab to **index/F&O** instruments — **indices** stream on
   the cash segment and **F&O legs** (option CE/PE + futures) on `NFO`, both over one
   socket, with a ⛓ underlying→expiry→strike picker. See the 2026-08-24 log entries.
@@ -514,9 +517,12 @@ a documented caveat).
 - Real intraday charts + depth are per-symbol NextApi (need stock Referer); depth
   empty outside market hours. OI price-direction coverage partial pre-market.
 - All endpoints unofficial; data meaningful only during market hours.
-- Only hot-list symbols (~100–150) have a *live intraday* price; any other listed
-  name now falls back to its **EOD bhavcopy close** (`bhavcopy.py`) — so paper
-  trading/pricing works market-wide, just at last close when it's not live.
+- Prices come from a five-tier chain (`nse_client.get_prices`): broker tick store →
+  hot-list map (~100–150 names) → batched broker quote → NSE per-stock quote → **EOD
+  bhavcopy close**. With a broker connected, off-hot-list names are genuinely live and
+  cost no NSE requests; without one they fall to last close. A **0 counts as unpriced**
+  (`_valid_px`) — a suspended/stale ticker really does return `ltp: 0.0`, and a ₹0 fill
+  would poison the paper P&L and every R-multiple.
 - Live tab needs the user's own broker creds (Angel free / Dhan paid). Angel streams NSE
   cash, **the NSE indices** and **F&O legs** (options + futures). An index has no
   volume/OI/depth — we omit those, not zero them; an option **is** traded, so it keeps
@@ -528,6 +534,54 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 💰 Paper fills / `get_price` / sim MTM price BROKER-FIRST — live-feed roadmap item fully closed (suite 875 → 894)
+- **Why:** the broker socket already held a live price for every watched symbol, but every paper fill and every sim
+  reprice still asked NSE — **one WAF-rationed request per off-hot-list symbol**. Last open leg of the
+  "real-time broker feed" roadmap item.
+- **Shape:** `nse_client.get_prices(symbols)` is now the one pricing entry point (`get_price` = thin wrapper on it),
+  resolving a whole list through five tiers, cheapest + most-live first:
+  1. **broker tick store** — free, real-time, covers whatever is streaming,
+  2. hot-list LTP map — free (those lists are already fetched), ~100–150 names,
+  3. **one batched broker quote** for the rest — the tier that actually saves the NSE requests,
+  4. per-stock NextApi quote — one NSE request each (now fanned out in parallel via `_nse_ltps`),
+  5. EOD bhavcopy close — works off-hours / during a WAF cooldown, prices any listed name.
+- **Why a hook, not an import:** `core` must never import `feeds` (the feeds import `core`). So the broker enters
+  through `nse.register_price_source(fn)`, installed by `web/app.py:_broker_price_map` once it has selected a
+  provider. Each adapter implements `price_map(symbols, fetch=False)`: `fetch=False` reads only already-held data
+  (the tick store), `fetch=True` may make ONE batched request. Anything it can't price is simply **absent**, so the
+  caller falls through unchanged — a broker outage degrades to the old NSE path. Adding a broker stays a one-module job.
+- **Batching details (`angel_feed.price_map`):** `getMarketData("FULL", {exchange: [tokens]})` is chunked at
+  `MARKET_DATA_BATCH = 50` and grouped by **exchange**, because cash and NFO tokens can't share one list. Response
+  rows come back in arbitrary order, so each is matched by its own `symbolToken` (documented fallback:
+  `tradingSymbol`), never by position.
+- **Gotcha — the store is ignored while disconnected.** `_latest` still holds the last ticks after the socket drops;
+  serving those as live would be worse than a miss (a stale price silently marks a whole book). The free tier is
+  gated on `_status["connected"]`.
+- **Consumers batched too:** `sim._resolve_prices` asks for the whole open book in one `get_prices` call (falling back
+  to the old per-symbol fan-out if that raises), and `paper.portfolio()` now resolves its **cash leg** in one batch.
+  That last one was a real gap, not just a speed-up: the cash leg was marked from `get_price_map()` **alone**, so a
+  holding that had dropped off the hot lists sat frozen at `avgPrice` and showed a flat P&L forever.
+- **BUG FOUND while live-verifying — a zero was being accepted as a price.** `GSPL` (a stale ticker off an old
+  watchlist; **absent from Angel's master across every segment**) came back from NSE's quote as **`ltp: 0.0`**, and
+  the old `if price is not None` let it through. A ₹0 fill poisons the paper P&L and every sim R-multiple
+  (risk-normalized), so this mattered. `_valid_px()` now treats non-positive / NaN / inf as **unpriced** at every
+  tier — including `get_price_map`'s `absorb`, since `paper._reprice` reads that map directly — so the symbol falls
+  through to the next source and, if nothing can price it, stays honestly `None`.
+- **Live-verified 2026-08-24 ~14:50 IST (market open, Angel connected):**
+  - free tier: 3 watched names priced from the store in **0.000s**, zero API calls;
+  - **12 cold off-hot-list names → 1 broker call, 0.32s** (previously 12 NSE quotes);
+  - `get_prices(15)` used **1 broker call + 1 NSE quote** — the single NSE hit was `GSPL`, correctly unpriceable;
+  - a `VRLLOG` paper fill + a full `portfolio()` (3 futures, 1 option, 2 equities) used **0 NSE per-symbol quotes**,
+    and `VRLLOG` (off every hot list) was marked at 287.2 instead of cost;
+  - cross-check: broker `TATACHEM` 625.7 == NSE quote 625.7.
+- **Tests (+19, 875 → 894):** the tier order and that a cheaper tier's hit is **never re-asked** of a dearer one;
+  dedupe/uppercase; a broken price source degrading to NSE; `register_price_source` round-trip; `_valid_px` junk
+  table + a zero walking the whole chain to EOD; `get_price_map` dropping zero-LTP rows; `angel_feed.price_map`
+  store-only / disconnected / per-segment batching / >50 chunking / no re-ask / quiet degradation; the Dhan
+  store-only stub; `sim._resolve_prices` batching + its per-symbol fallback; `paper.portfolio()` one-batch cash leg
+  and its hold-at-cost behaviour when pricing dies; and that `app.py` really registers the hook.
+- Whole suite re-run with **`socket.connect` blocked** to prove none of it touches the network.
 
 ### 2026-08-24 — ⛓ Live tab streams F&O LEGS (options + futures) — roadmap item closed (suite 860 → 875)
 - **Why:** "extend the Live tab to index/F&O instruments" was the last open half of the live-feed roadmap item.

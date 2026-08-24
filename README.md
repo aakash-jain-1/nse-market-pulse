@@ -103,6 +103,11 @@ layers analytics on top:
   `BUY` covers it, freeing margin and realizing P&L. Long options pay the premium up
   front (no margin). Live P&L + order history; state in `paper_state.json`. *(Virtual
   money only — no broker, no real orders.)*
+- **Fills price broker-first.** With a broker connected, fills and mark-to-market come
+  from the live feed — its streaming ticks first, then **one batched quote** for the
+  rest — falling back to NSE's hot lists, its per-stock quote, and finally the last EOD
+  close. So a holding that isn't on any hot list is still marked at a real live price,
+  and it costs no rate-limited NSE requests. Without a broker, nothing changes.
 
 ---
 
@@ -273,7 +278,7 @@ flowchart TB
 
     subgraph DATA["Data + logic modules"]
         direction TB
-        NC["nse_client.py<br/>• warmed requests.Session (TTL 300s)<br/>• hot lists → normalized dicts<br/>• get_scanner / _build_idea / get_demand_score<br/>• get_price (symbol→LTP map)"]
+        NC["nse_client.py<br/>• warmed requests.Session (TTL 300s)<br/>• hot lists → normalized dicts<br/>• get_scanner / _build_idea / get_demand_score<br/>• get_prices (broker → hot lists → NSE → EOD)"]
         NQ["nse_quote.py<br/>• NextApi gateway<br/>• quote / depth / intraday chart<br/>• option chain + Black-Scholes Greeks"]
         BC["bhavcopy.py<br/>• EOD UDiFF bhavcopy + delivery%<br/>• resilient price / lot fallback<br/>• ingest / backfill → eod_bars/eod_oi"]
         DL["deals.py<br/>• bulk/block deals (nsearchives)<br/>• institutional footprint<br/>• by_symbol / recent / status"]
@@ -972,7 +977,10 @@ always-on; `off` disables it. `pacer_stats()` shows `impersonate` (what's in eff
 **Block prevention (fewer needless hits).** Beyond recovery, the app trims NSE load
 proactively. Per-symbol quote/chart/candles are served **from the broker** (Angel)
 when connected — see [Live realtime data](#live-realtime-data-free-broker-feed) — so
-drilling into a stock no longer hits NSE. And the market-movers **auto-refresh is
+drilling into a stock no longer hits NSE. **Paper fills and the sims' mark-to-market**
+go the same way: the streaming tick store first, then **one batched broker quote for
+the whole book** (up to 50 names per call) before NSE is asked at all — repricing an
+open book used to cost one NSE request per off-hot-list symbol. And the market-movers **auto-refresh is
 adaptive**: it **pauses when the tab is backgrounded** (resumes + refreshes on
 return), **pauses during a WAF cooldown** (waking as it clears), and **slows to ≥5
 min when the market is closed** (the lists are static off-hours). The only
@@ -1023,7 +1031,12 @@ retry after cooldown. One gentle daily pass is the safe pattern (the WAF trips o
   the cash segment, contracts on `NFO`, all over one socket. An index is a computed
   level, so it has **no volume, OI or order book** — the UI shows those as absent
   rather than as a misleading `0`; an option, being genuinely traded, keeps all three.
-  Dhan stays cash-only (its adapter reports no indices or contracts).
+  Dhan stays cash-only (its adapter reports no indices or contracts). A connected feed
+  also prices paper fills / sim MTM (see [Paper trading](#paper-trading-virtual-paperpy)).
+- A price of **0 is treated as "no price", not as free.** A suspended or renamed ticker
+  really does come back from NSE's quote as `ltp: 0.0`; that value is dropped so the
+  lookup falls through to the next source, and a symbol nothing can price stays honestly
+  blank rather than filling a trade at ₹0.
 - The core app needs **no API key**; **no secrets in the repo** (`.gitignore`
   covers `.env`, `*.db`, state JSON, CSVs, `logs/`, and the broker configs
   `angel_config.json` / `dhan_config.json`).

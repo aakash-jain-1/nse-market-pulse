@@ -30,11 +30,14 @@ def _paper():
     """Isolate paper state + stub every price source. Yields a mutable store."""
     d = tempfile.mkdtemp(prefix="nse_paper_test_")
     saved_file = paper.STATE_FILE
-    saved = (nse.get_price, nse.get_lot_size, nse.get_price_map,
+    saved = (nse.get_price, nse.get_prices, nse.get_lot_size, nse.get_price_map,
              nse_quote.get_option_price, nse_quote.get_near_future)
     store = types.SimpleNamespace(price={}, pmap={}, lot={}, opt={}, fut={})
     paper.STATE_FILE = os.path.join(d, "paper_state.json")
     nse.get_price = lambda s: store.price.get(s)
+    # portfolio() marks the cash leg with ONE batched, broker-first lookup; here it
+    # resolves off the same stub the hot-list map uses (no network).
+    nse.get_prices = lambda syms: {s: store.pmap.get(s) for s in syms}
     nse.get_lot_size = lambda s: store.lot.get(s)
     nse.get_price_map = lambda: store.pmap
     nse_quote.get_option_price = lambda u, e, st, ot: store.opt.get((u, e, float(st), ot))
@@ -42,7 +45,7 @@ def _paper():
     try:
         yield store
     finally:
-        (nse.get_price, nse.get_lot_size, nse.get_price_map,
+        (nse.get_price, nse.get_prices, nse.get_lot_size, nse.get_price_map,
          nse_quote.get_option_price, nse_quote.get_near_future) = saved
         paper.STATE_FILE = saved_file
         shutil.rmtree(d, ignore_errors=True)
@@ -316,6 +319,46 @@ def test_portfolio_equity_mtm():
         assert pos["ltp"] == 130.0 and pos["pnl"] == 300.0
         assert pf["equity"] == round(pf["cash"] + 130.0 * 10, 2)
         assert pf["totalPnl"] == 300.0
+
+
+def test_portfolio_marks_the_cash_leg_in_one_broker_first_batch():
+    """The cash leg used to be marked from the hot-list map alone, so a holding that
+    had dropped off the live lists sat frozen at cost. It now goes through the batched
+    broker-first chain — one call for every equity, and none for the derivative legs
+    (those still need their own premium / futures quote)."""
+    with _paper() as s:
+        s.price.update({"X": 100.0, "OFFLIST": 50.0})
+        s.lot["NIFTY"] = 50
+        s.opt[("NIFTY", "2026-07-30", 25000.0, "CE")] = 100.0
+        paper.place_order("X", "BUY", 10)
+        paper.place_order("OFFLIST", "BUY", 4)
+        paper.place_option_order("NIFTY", "2026-07-30", 25000, "CE", "BUY", 1)
+
+        calls = []
+        s.pmap["X"] = 130.0                       # still on a hot list
+        nse.get_prices = lambda syms: (calls.append(sorted(syms))
+                                       or {"X": 130.0, "OFFLIST": 61.0})
+        pf = paper.portfolio()
+
+    assert calls == [["OFFLIST", "X"]]            # ONE batch, equities only
+    by = {p["symbol"]: p for p in pf["positions"]}
+    assert by["X"]["ltp"] == 130.0
+    assert by["OFFLIST"]["ltp"] == 61.0           # marked despite being off the lists
+    assert by["OFFLIST"]["pnl"] == round((61.0 - 50.0) * 4, 2)
+
+
+def test_portfolio_survives_a_dead_batch_and_holds_at_cost():
+    with _paper() as s:
+        s.price["X"] = 100.0
+        paper.place_order("X", "BUY", 10)
+
+        def _boom(syms):
+            raise RuntimeError("pricing down")
+
+        nse.get_prices = _boom
+        pf = paper.portfolio()                    # no hot-list entry either
+    assert pf["positions"][0]["ltp"] == 100.0     # avgPrice, not a crash or a zero
+    assert pf["positions"][0]["pnl"] == 0.0
 
 
 def test_portfolio_short_future_profits_on_drop():

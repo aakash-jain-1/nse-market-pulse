@@ -534,16 +534,15 @@ _update_gate = threading.Lock()
 
 
 def _resolve_prices(symbols):
-    """LTPs for the open-trade symbols. Warms the shared hot-list map ONCE (so the
-    fan-out mostly hits that cache and avoids a thundering herd rebuilding it), then
-    resolves the rest in PARALLEL — the pacer still bounds concurrency/rate, but
-    parallel submission beats resolving off-hot-list names one blocking call at a
-    time. Falls back to sequential on shutdown or pool failure."""
+    """LTPs for the open-trade symbols, as ONE batch. `nse.get_prices` resolves the
+    whole set tier by tier — broker tick store, then the shared hot-list map, then a
+    single batched broker quote — so only the names no source covers cost a per-symbol
+    NSE request. Falls back to the parallel per-symbol path if that batch call fails."""
     syms = list(symbols)
     if not syms:
         return {}
     try:
-        nse.get_price_map()          # warm the shared cache once, single-threaded
+        return nse.get_prices(syms)
     except Exception:
         pass
     if len(syms) == 1 or _STOPPING.is_set():

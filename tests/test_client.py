@@ -367,6 +367,133 @@ def test_price_map_and_get_price():
     assert nse.get_price(None) is None
 
 
+# ---------------------------------------------------------------------------
+# broker-first pricing (paper fills / sim MTM routed through the live feed)
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _price_chain(broker=None, hotlist=None, nse_ltp=None, eod=None):
+    """Stub every tier of get_prices so each test can assert exactly which one served
+    a symbol — and record what each tier was ASKED for (that's how we prove a cheaper
+    tier's hits are never re-fetched from a dearer one). No network."""
+    from nse_pulse.core import nse_quote
+    from nse_pulse.eod import bhavcopy
+    asked = {"cheap": [], "fetch": [], "hot": 0, "ltp": [], "eod": []}
+
+    def _src(symbols, fetch=False):
+        asked["fetch" if fetch else "cheap"].append(list(symbols))
+        return dict((broker or {}).get("fetch" if fetch else "cheap") or {})
+
+    def _hot():
+        asked["hot"] += 1
+        return dict(hotlist or {})
+
+    def _ltp(sym):
+        asked["ltp"].append(sym)
+        return (nse_ltp or {}).get(sym)
+
+    def _eod(sym):
+        asked["eod"].append(sym)
+        return (eod or {}).get(sym)
+
+    with _patch(nse, "_price_source", _src), \
+            _patch(nse, "get_price_map", _hot), \
+            _patch(nse_quote, "get_ltp", _ltp), \
+            _patch(bhavcopy, "eod_close", _eod):
+        yield asked
+
+
+def test_get_prices_prefers_the_broker_tick_store_over_everything():
+    """A streamed tick is real-time AND free, so it must win — and must not cost a
+    hot-list warm, a broker fetch or an NSE request."""
+    with _price_chain(broker={"cheap": {"RELIANCE": 1301.5}},
+                      hotlist={"RELIANCE": 1299.0},
+                      nse_ltp={"RELIANCE": 1298.0}) as asked:
+        assert nse.get_prices(["reliance"]) == {"RELIANCE": 1301.5}
+    assert asked["hot"] == 0 and asked["fetch"] == [] and asked["ltp"] == []
+
+
+def test_get_prices_walks_the_tiers_and_never_re_asks_a_hit():
+    """One batch, five tiers: each symbol is served by the cheapest source that has
+    it, and only the leftovers move to the next tier."""
+    with _price_chain(broker={"cheap": {"A": 1.0}, "fetch": {"C": 3.0}},
+                      hotlist={"B": 2.0}, nse_ltp={"D": 4.0},
+                      eod={"E": 5.0}) as asked:
+        got = nse.get_prices(["A", "B", "C", "D", "E", "F"])
+    assert got == {"A": 1.0, "B": 2.0, "C": 3.0, "D": 4.0, "E": 5.0, "F": None}
+    assert asked["cheap"] == [["A", "B", "C", "D", "E", "F"]]   # one batched ask
+    assert asked["fetch"] == [["C", "D", "E", "F"]]             # A/B already priced
+    # C came from the broker's batched quote, so NSE is never asked for it — that saved
+    # request is the whole point of this tier
+    assert sorted(asked["ltp"]) == ["D", "E", "F"]
+    assert sorted(asked["eod"]) == ["E", "F"]
+
+
+def test_get_prices_dedupes_and_normalizes_case():
+    with _price_chain(hotlist={"INFY": 1500.0}) as asked:
+        assert nse.get_prices(["infy", "INFY", "", None]) == {"INFY": 1500.0}
+    assert asked["cheap"] == [["INFY"]]
+
+
+def test_get_prices_survives_a_broken_price_source():
+    """A broker hiccup must degrade to NSE, never break pricing."""
+    def _boom(symbols, fetch=False):
+        raise RuntimeError("broker down")
+
+    from nse_pulse.core import nse_quote
+    with _patch(nse, "_price_source", _boom), \
+            _patch(nse, "get_price_map", lambda: {}), \
+            _patch(nse_quote, "get_ltp", lambda s: 42.0):
+        assert nse.get_price("ANY") == 42.0
+    assert nse.get_prices([]) == {}
+
+
+def test_valid_px_rejects_the_junk_every_source_can_emit():
+    assert nse._valid_px(1304.3) == 1304.3
+    assert nse._valid_px("625.65") == 625.65          # NSE ships numbers as strings
+    for junk in (0, 0.0, "0", -5, None, "", "n/a", float("nan"), float("inf"), [1]):
+        assert nse._valid_px(junk) is None, junk
+
+
+def test_get_prices_treats_a_zero_as_unpriced_and_keeps_falling_through():
+    """Live-observed: a stale/suspended ticker comes back from NSE's quote as
+    `ltp: 0.0`. Filling a paper trade at zero would poison the P&L and the sim's
+    R-multiples, so a zero must count as a miss, not an answer."""
+    with _price_chain(broker={"cheap": {"A": 0}, "fetch": {"A": 0.0}},
+                      hotlist={"A": 0.0}, nse_ltp={"A": 0.0},
+                      eod={"A": 611.25}) as asked:
+        assert nse.get_prices(["A"]) == {"A": 611.25}
+    assert asked["ltp"] == ["A"] and asked["eod"] == ["A"]   # walked every tier
+    # ...and a symbol nothing can price stays honestly None rather than 0
+    with _price_chain(nse_ltp={"GONE": 0.0}, eod={"GONE": 0}):
+        assert nse.get_prices(["GONE"]) == {"GONE": None}
+
+
+def test_price_map_drops_zero_ltp_rows():
+    """`get_price_map` also feeds the paper portfolio directly, so it filters too."""
+    stub = lambda *a, **k: [{"symbol": "A", "ltp": 0}, {"symbol": "B", "ltp": 200}]
+    with _reset_cache("_ltp_cache"), \
+         _patch(nse, "get_most_active", lambda kind, n=50: stub()), \
+         _patch(nse, "get_volume_gainers", stub), \
+         _patch(nse, "get_variations", lambda kind, n=50: stub()), \
+         _patch(nse, "get_oi_spurts", stub):
+        assert nse.get_price_map() == {"B": 200}
+
+
+def test_register_price_source_round_trip():
+    orig = nse._price_source
+    try:
+        nse.register_price_source(lambda syms, fetch=False: {"X": 9.0})
+        with _patch(nse, "get_price_map", lambda: {}):
+            assert nse.get_price("x") == 9.0
+        nse.register_price_source(None)          # unregistering falls back to NSE
+        from nse_pulse.core import nse_quote
+        with _patch(nse, "get_price_map", lambda: {}), \
+                _patch(nse_quote, "get_ltp", lambda s: 7.0):
+            assert nse.get_price("x") == 7.0
+    finally:
+        nse.register_price_source(orig)
+
+
 def test_get_lot_size():
     with _patch(nse, "get_lot_sizes", lambda: {"NIFTY": 50}):
         assert nse.get_lot_size("nifty") == 50

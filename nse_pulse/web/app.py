@@ -182,6 +182,23 @@ def _select_live_feed():
 live_feed = _select_live_feed()
 
 
+def _broker_price_map(symbols, fetch=False):
+    """Broker price source for `nse_client.get_prices` — see `angel_feed.price_map`.
+    Registered here because this module owns the provider choice; `core` must not
+    import `feeds`. Any failure returns {} so pricing falls through to NSE."""
+    try:
+        fn = getattr(live_feed, "price_map", None)
+        return fn(symbols, fetch=fetch) if fn else {}
+    except Exception:
+        return {}
+
+
+# Price paper fills / sim mark-to-market from the broker before NSE: the tick store is
+# real-time AND free for streamed names, and a batched broker quote replaces one
+# WAF-rationed NSE request per off-hot-list symbol.
+nse.register_price_source(_broker_price_map)
+
+
 @app.route("/")
 def index():
     return render_template("index.html")

@@ -388,6 +388,30 @@ def test_live_fno_browses_the_contract_tree():
     assert j["strikes"][0]["ce"] == "NIFTY25AUG2624200CE" and j["lot"] == 65
 
 
+def test_app_registers_the_broker_as_the_price_source():
+    """Paper fills / sim MTM must price from the broker before NSE. app.py owns the
+    provider choice, so it (not `core`) installs the hook at import."""
+    import types
+    from nse_pulse.core import nse_client as nse
+    assert nse._price_source is webapp._broker_price_map
+    seen = {}
+    fake = types.SimpleNamespace(
+        price_map=lambda syms, fetch=False: seen.update(syms=list(syms), fetch=fetch)
+        or {"RELIANCE": 1304.0})
+    with _patch(webapp, "live_feed", fake):
+        assert webapp._broker_price_map(["RELIANCE"], fetch=True) == {"RELIANCE": 1304.0}
+    assert seen == {"syms": ["RELIANCE"], "fetch": True}
+    # a provider without the hook (or one that raises) must not break pricing
+    with _patch(webapp, "live_feed", types.SimpleNamespace()):
+        assert webapp._broker_price_map(["RELIANCE"]) == {}
+
+    def _boom(syms, fetch=False):
+        raise RuntimeError("broker down")
+
+    with _patch(webapp, "live_feed", types.SimpleNamespace(price_map=_boom)):
+        assert webapp._broker_price_map(["RELIANCE"]) == {}
+
+
 def test_fno_leg_never_falls_through_to_nse():
     """An F&O tradingsymbol exists only in the broker's master, so quote/seed must
     fail fast rather than spend a WAF-rationed NSE request rediscovering that."""

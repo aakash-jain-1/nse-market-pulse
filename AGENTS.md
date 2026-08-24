@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 875 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 894 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +142,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 875 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 894 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -550,11 +550,19 @@ with no creds the app is unchanged.
  LONG **and** SHORT with proper netting/flip-through-zero, realizes P&L + releases
  margin on close, and marks to market on the live near-month price. Traded from a
  "Paper trade FUTURES" box in the detail modal (shown only for F&O names).
- **Pricing:** hot-list LTP → per-stock NextApi quote → **EOD bhavcopy close**
-  (`bhavcopy.py`), so ANY listed symbol is tradable (live during hours, last close
-  otherwise). State persists to `paper_state.json` (gitignored). This is
-  broker-agnostic by design: swapping in a real broker feed later only changes the
-  price/fill source.
+ **Pricing (`nse_client.get_prices`, broker-first):** **broker tick store** →
+ hot-list LTP map → **one batched broker quote** → per-stock NextApi quote → **EOD
+ bhavcopy close** (`bhavcopy.py`), so ANY listed symbol is tradable (live during
+ hours, last close otherwise). The two broker tiers come from whichever live feed is
+ selected, registered at startup via `nse.register_price_source()` — so a connected
+ Angel/Dhan session prices fills and marks the portfolio **without spending a single
+ rationed NSE request** (live-verified: an off-hot-list fill + full `portfolio()` used
+ 0 NSE quotes). `get_prices()` resolves a whole list in one pass (the batched broker
+ tier is one call per 50 names) and `get_price()` is a thin wrapper on it. A **0 is
+ treated as unpriced** (`_valid_px`) — a suspended/stale ticker really does come back
+ as `ltp: 0.0`, and a ₹0 fill would poison P&L and R-multiples. State persists to
+ `paper_state.json` (gitignored). Still broker-agnostic: a new broker only implements
+ `price_map(symbols, fetch=False)`.
 - **Futures tab** (`get_futures()`) — most-active stock futures with **basis**
   (futures price - spot = premium/discount), basis %, annualized carry (by days
   to expiry), OI, and long/short buildup. OI change is cross-referenced from the
@@ -605,8 +613,10 @@ with no creds the app is unchanged.
   data plan)** — `angel_feed.py` / `dhan_feed.py`, 📈 Live tab; see the live-feed
   architecture note. ✅ *(done — see below)* the Live tab now streams the **NSE indices**
   **and F&O legs** (options + futures on the `NFO` segment) — the whole
-  "extend the Live tab to index/F&O instruments" item is complete. Still open: route
-  paper-trading fills / `get_price` through the broker feed too.
+  "extend the Live tab to index/F&O instruments" item is complete. ✅ *(done — see
+  below)* paper-trading fills / `get_price` / sim mark-to-market now price
+  **broker-first** (`nse.register_price_source` + `feed.price_map`). **This roadmap
+  item is now fully closed.**
 - Phone/LAN access + optional deploy.
 - ✅ *(done — see below)* `jugaad-data`/`nsefeed`-style fallback for the flaky bits:
   implemented natively as `bhavcopy.py` (EOD UDiFF ingest), no third-party dep.
@@ -636,6 +646,25 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **💰 Paper fills / `get_price` / sim MTM now price BROKER-FIRST** — closes the last open leg of the real-time-feed
+ roadmap item. The broker socket already knew a live price for anything being watched, yet every paper fill and every
+ sim reprice still went to NSE — one **WAF-rationed** request per off-hot-list symbol. `nse_client.get_prices(symbols)`
+ (new; `get_price` is now a thin wrapper) resolves a whole list through five tiers, cheapest and most-live first:
+ **broker tick store** (free, real-time) → hot-list LTP map (already fetched) → **one batched broker quote** → per-stock
+ NextApi quote → EOD bhavcopy close. `core` still must not import `feeds`, so the broker enters through a hook —
+ `nse.register_price_source(fn)`, installed by `web/app.py` once it has picked a provider, with each adapter exposing
+ `price_map(symbols, fetch=False)` (`fetch=False` = store only; `fetch=True` = batched `getMarketData`, chunked by
+ `MARKET_DATA_BATCH=50` and grouped by exchange since cash and NFO tokens can't share a list). The store tier is
+ **ignored while disconnected** — a stale tick posing as live is worse than a miss. `sim._resolve_prices` and
+ `paper.portfolio()`'s cash leg now ask in ONE batch (the portfolio previously marked equities from the hot-list map
+ alone, so a holding that fell off the live lists sat frozen at cost). Dhan gets the free tier only (its REST quote
+ isn't wired). **Bug found while live-verifying:** NSE's quote returns `ltp: 0.0` for a stale/suspended ticker (hit on
+ `GSPL`, absent from Angel's master entirely) and that zero was being accepted as a price — a ₹0 fill would poison P&L
+ and every R-multiple. `_valid_px()` now treats non-positive/NaN/inf as **unpriced** at every tier (incl.
+ `get_price_map`), so it falls through instead. **Live-verified 2026-08-24 (market open):** 12 cold off-hot-list names
+ priced in **1 broker call / 0.32s**; a `VRLLOG` fill + a full `portfolio()` (3 futures + 1 option + 2 equities) used
+ **0 NSE per-symbol quotes**; broker vs NSE cross-check on TATACHEM matched exactly (625.7). Suite **875 → 894**.
 
 - **⛓ Live tab streams F&O LEGS (options + futures)** — closes the "extend the Live tab to index/F&O instruments"
  roadmap item. Contracts sit on a **different exchange segment** (`NFO`, `exchangeType 2`) but ride the **same

@@ -1867,7 +1867,7 @@ def get_price_map():
 
     def absorb(rows):
         for r in rows or []:
-            sym, ltp = r.get("symbol"), r.get("ltp")
+            sym, ltp = r.get("symbol"), _valid_px(r.get("ltp"))
             if sym and ltp is not None:
                 pmap[sym] = ltp
 
@@ -1889,31 +1889,134 @@ def get_price_map():
     return pmap
 
 
-def get_price(symbol):
+# Optional broker price source, registered by the web app once it has picked a live
+# feed (`register_price_source`). Kept as a hook rather than an import so `core` never
+# depends on `feeds` — and so tests can inject a fake without a broker session.
+_price_source = None
+
+
+def register_price_source(fn):
+    """Install a broker price source used ahead of NSE by `get_prices`.
+
+    `fn(symbols, fetch=False) -> {SYMBOL: price}` — with `fetch=False` it must only
+    read already-held data (a streaming tick store: free and real-time); with
+    `fetch=True` it may make one batched broker request. Absent symbols just fall
+    through to the NSE chain. Pass None to unregister.
     """
-    Return the latest known price for a symbol, most-live first:
-      1. the merged hot-list LTP map (fast, no extra request),
-      2. the per-stock NextApi quote (any symbol, live, during market hours),
-      3. the NSE EOD bhavcopy close (resilient: works off-hours & when the live
-         JSON API is down; prices ANY listed name — broadens the tradable
-         universe well beyond the ~100-150 hot-list symbols).
-    Lazy imports avoid circular dependencies (nse_quote/bhavcopy import this).
-    """
-    if not symbol:
+    global _price_source
+    _price_source = fn
+
+
+def _valid_px(px):
+    """A tradable price, or None. Every source here can report a **0** for a name it
+    can't actually price — a suspended/delisted ticker, or a symbol NSE's quote API
+    doesn't know (observed live: a stale ticker returned `ltp: 0.0`). Zero is a missing
+    value, not a price: letting it through would fill a paper trade at ₹0 and produce
+    nonsense P&L / R-multiples, so it's treated as a miss and falls to the next tier."""
+    try:
+        f = float(px)
+    except (TypeError, ValueError):
         return None
-    sym = symbol.upper()
-    price = get_price_map().get(sym)
-    if price is not None:
-        return price
+    return f if f > 0 and f == f and f != float("inf") else None
+
+
+def _from_broker(symbols, fetch):
+    if _price_source is None or not symbols:
+        return {}
+    try:
+        got = _price_source(list(symbols), fetch=fetch) or {}
+    except Exception:
+        return {}
+    return {s: px for s, px in ((s, _valid_px(p)) for s, p in got.items())
+            if px is not None}
+
+
+def _nse_ltps(symbols):
+    """`{SYMBOL: price|None}` from NSE's per-stock quote — one request each, so the
+    round-trips are overlapped (the pacer still bounds the actual rate). Sequential
+    for a single symbol or if a pool can't start."""
     try:
         from nse_pulse.core import nse_quote
-        price = nse_quote.get_ltp(sym)
-        if price is not None:
-            return price
     except Exception:
-        pass
+        return {}
+
+    def one(sym):
+        try:
+            return nse_quote.get_ltp(sym)
+        except Exception:
+            return None
+
+    if len(symbols) <= 1:
+        return {s: one(s) for s in symbols}
+    import concurrent.futures as _cf
     try:
-        from nse_pulse.eod import bhavcopy
+        workers = min(len(symbols), _NSE_MAX_CONCURRENCY + 2)
+        with _cf.ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="nse-ltp") as ex:
+            return dict(zip(symbols, ex.map(one, symbols)))
+    except Exception:
+        return {s: one(s) for s in symbols}
+
+
+def get_prices(symbols):
+    """`{SYMBOL: price|None}` for many symbols, cheapest and most-live source first:
+
+      1. the **broker tick store** — real-time and free, but only covers what's
+         currently streaming,
+      2. the merged hot-list LTP map — free (those lists are already fetched), ~100-150
+         names,
+      3. one **batched broker request** for the rest — real-time, and it dodges NSE's
+         WAF-rationed per-symbol quote entirely (the reason this tier exists),
+      4. the per-stock NextApi quote — one NSE request each,
+      5. the NSE EOD bhavcopy close — resilient: works off-hours and during a WAF
+         cooldown, and prices ANY listed name.
+
+    Resolving as a batch matters: repricing an open book used to cost one NSE request
+    per off-hot-list symbol. Lazy imports avoid circular dependencies
+    (nse_quote/bhavcopy import this module).
+    """
+    syms = list(dict.fromkeys(s.upper() for s in (symbols or []) if s))
+    if not syms:
+        return {}
+    out = {}
+
+    def _take(priced):
+        """Keep only real prices — anything else must stay unanswered so the symbol
+        falls through to the next (dearer) tier."""
+        for s, px in (priced or {}).items():
+            px = _valid_px(px)
+            if px is not None and s in syms:
+                out.setdefault(s, px)
+
+    def _todo():
+        return [s for s in syms if s not in out]
+
+    _take(_from_broker(syms, fetch=False))
+    if _todo():
+        _take(get_price_map())
+    if _todo():
+        _take(_from_broker(_todo(), fetch=True))
+    if _todo():
+        _take(_nse_ltps(_todo()))
+    todo = _todo()
+    if todo:
+        try:
+            from nse_pulse.eod import bhavcopy
+            _take({s: _eod_close(bhavcopy, s) for s in todo})
+        except Exception:
+            pass
+    return {s: out.get(s) for s in syms}
+
+
+def _eod_close(bhavcopy, sym):
+    try:
         return bhavcopy.eod_close(sym)
     except Exception:
         return None
+
+
+def get_price(symbol):
+    """Latest known price for one symbol — see `get_prices` for the source order."""
+    if not symbol:
+        return None
+    return get_prices([symbol]).get(symbol.upper())

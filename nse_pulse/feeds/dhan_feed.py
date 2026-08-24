@@ -391,6 +391,23 @@ def snapshot(symbols=None):
         return out
 
 
+def price_map(symbols, fetch=False):
+    """`{SYMBOL: ltp}` from the live tick store (see `angel_feed.price_map`). Only the
+    free tier exists here: Dhan's REST quote API is the paid plan we don't wire, so
+    `fetch=True` adds nothing and the caller falls back to NSE for the misses."""
+    if not _status["connected"]:
+        return {}                       # a disconnected store holds stale ticks
+    out = {}
+    with _lock:
+        for s in (symbols or []):
+            sym = (s or "").upper().strip()
+            sid = resolve(sym) if sym else None
+            ltp = (_latest.get(sid) or {}).get("ltp") if sid else None
+            if ltp is not None:
+                out[sym] = ltp
+    return out
+
+
 # On-demand REST for the stock-detail modal — parity with angel_feed's interface so
 # app.py can call live_feed.rest_quote/rest_chart uniformly. Dhan's data API is a
 # paid plan we don't wire here, so these are safe no-ops → the caller falls back to

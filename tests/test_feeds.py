@@ -658,6 +658,122 @@ def test_angel_rest_calls_use_the_nfo_exchange_for_a_leg():
 
 
 # ---------------------------------------------------------------------------
+# angel price_map — the broker price source behind nse_client.get_prices
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _connected(mod, on=True):
+    prev = mod._status["connected"]
+    mod._status["connected"] = on
+    try:
+        yield
+    finally:
+        mod._status["connected"] = prev
+
+
+def test_angel_price_map_free_tier_reads_the_tick_store():
+    with _scrip(ALL_ROWS), _connected(angel_feed):
+        angel_feed._on_data(None, dict(INDEX_TICK, token="2885",
+                                       last_traded_price=130400))
+        got = angel_feed.price_map(["reliance", "BANKNIFTY", "NOSUCH"])
+    # only what actually ticked; a miss is absent so the caller falls through to NSE
+    assert got == {"RELIANCE": 1304.0}
+
+
+def test_angel_price_map_ignores_the_store_while_disconnected():
+    """A disconnected store holds yesterday's ticks — a stale price passed off as live
+    is worse than a miss, so the free tier must go quiet."""
+    with _scrip(ALL_ROWS), _connected(angel_feed):
+        angel_feed._on_data(None, dict(INDEX_TICK, token="2885",
+                                       last_traded_price=130400))
+        with _connected(angel_feed, False):
+            assert angel_feed.price_map(["RELIANCE"]) == {}
+
+
+def test_angel_price_map_batches_the_rest_endpoint_by_segment():
+    """N symbols must cost ONE call per exchange (not N), because that batching is what
+    replaces a WAF-rationed NSE request per name."""
+    calls = []
+
+    class _Smart:
+        def getMarketData(self, mode, tokens):
+            calls.append((mode, {k: list(v) for k, v in tokens.items()}))
+            exch, toks = next(iter(tokens.items()))
+            return {"data": {"fetched": [
+                {"symbolToken": t, "ltp": 100.0 + i} for i, t in enumerate(toks)]}}
+
+    syms = ["RELIANCE", "BANKNIFTY", "NIFTY25AUG2624200CE", "NIFTY25AUG26FUT"]
+    with _scrip(ALL_ROWS), _patch(angel_feed, "_smart", _Smart()):
+        got = angel_feed.price_map(syms, fetch=True)
+    assert got == {"RELIANCE": 100.0, "BANKNIFTY": 101.0,
+                   "NIFTY25AUG2624200CE": 100.0, "NIFTY25AUG26FUT": 101.0}
+    # one call for the cash pair, one for the NFO pair — cash and NFO tokens can't
+    # share a list
+    assert len(calls) == 2 and all(m == "FULL" for m, _ in calls)
+    assert {next(iter(t)) for _, t in calls} == {"NSE", "NFO"}
+
+
+def test_angel_price_map_chunks_above_the_documented_batch_ceiling():
+    calls = []
+
+    class _Smart:
+        def getMarketData(self, mode, tokens):
+            calls.append(len(next(iter(tokens.values()))))
+            return {"data": {"fetched": []}}
+
+    rows = [dict(r) for r in SCRIP_ROWS[:1]]
+    rows += [{"token": str(900000 + i), "symbol": f"SYM{i}-EQ", "name": f"SYM{i}",
+              "exch_seg": "NSE", "instrumenttype": ""} for i in range(60)]
+    with _scrip(rows), _patch(angel_feed, "_smart", _Smart()):
+        angel_feed.price_map([f"SYM{i}" for i in range(60)], fetch=True)
+    assert calls == [angel_feed.MARKET_DATA_BATCH, 60 - angel_feed.MARKET_DATA_BATCH]
+
+
+def test_angel_price_map_skips_symbols_the_free_tier_already_priced():
+    """The dear tier must only be asked for what the free one missed."""
+    asked = {}
+
+    class _Smart:
+        def getMarketData(self, mode, tokens):
+            asked.update(tokens)
+            return {"data": {"fetched": []}}
+
+    with _scrip(ALL_ROWS), _connected(angel_feed), \
+            _patch(angel_feed, "_smart", _Smart()):
+        angel_feed._on_data(None, dict(INDEX_TICK, token="2885",
+                                       last_traded_price=130400))
+        got = angel_feed.price_map(["RELIANCE", "BANKNIFTY"], fetch=True)
+    assert got["RELIANCE"] == 1304.0
+    assert asked == {"NSE": ["99926009"]}          # RELIANCE not re-fetched
+
+
+def test_angel_price_map_degrades_quietly():
+    class _Boom:
+        def getMarketData(self, mode, tokens):
+            raise RuntimeError("rate limited")
+
+    with _scrip(ALL_ROWS):
+        assert angel_feed.price_map([]) == {}
+        assert angel_feed.price_map(["NOSUCH"], fetch=True) == {}
+        with _patch(angel_feed, "_smart", None):      # not logged in
+            assert angel_feed.price_map(["RELIANCE"], fetch=True) == {}
+        with _patch(angel_feed, "_smart", _Boom()):   # a raising client
+            assert angel_feed.price_map(["RELIANCE"], fetch=True) == {}
+
+
+def test_dhan_price_map_is_store_only():
+    """Dhan's REST quote is the paid plan we don't wire, so fetch=True adds nothing."""
+    with _feed_state(dhan_feed), _connected(dhan_feed):
+        dhan_feed._sym2sec.update({"RELIANCE": "2885"})
+        dhan_feed._sec2sym.update({"2885": "RELIANCE"})
+        dhan_feed._latest["2885"] = {"symbol": "RELIANCE", "ltp": 1304.0}
+        assert dhan_feed.price_map(["reliance"]) == {"RELIANCE": 1304.0}
+        assert dhan_feed.price_map(["reliance"], fetch=True) == {"RELIANCE": 1304.0}
+        assert dhan_feed.price_map(["NOSUCH"], fetch=True) == {}
+        with _connected(dhan_feed, False):
+            assert dhan_feed.price_map(["RELIANCE"]) == {}
+
+
+# ---------------------------------------------------------------------------
 # angel on-demand REST (stock-detail modal served from the broker, not NSE)
 # ---------------------------------------------------------------------------
 class _FakeSmart:

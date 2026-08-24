@@ -232,19 +232,38 @@ def test_request_stop_halts_intrabar_fetch():
 # ---------------------------------------------------------------------------
 # update() throttle + parallel reprice (stops SIM/F&O piling up NSE calls)
 # ---------------------------------------------------------------------------
-def test_resolve_prices_fans_out_all_symbols():
-    # Parallel price resolution returns one entry per symbol; the empty and
-    # single-symbol shortcuts work too. get_price_map is warmed once (stubbed here
-    # so the test never touches the network).
-    restore = _patch("_price", lambda s: 100.0 + len(s))
-    orig_gpm = sim.nse.get_price_map
-    sim.nse.get_price_map = lambda: {}
+def test_resolve_prices_asks_for_the_whole_book_in_one_batch():
+    # Repricing must resolve the open book as ONE nse.get_prices() call — that's what
+    # lets the broker tick store / a single batched broker quote cover the set instead
+    # of spending one NSE request per symbol.
+    seen = []
+    orig = sim.nse.get_prices
+    sim.nse.get_prices = lambda syms: seen.append(list(syms)) or {
+        s: 100.0 + len(s) for s in syms}
     try:
         assert sim._resolve_prices(set()) == {}
+        assert seen == []                     # nothing to price → no call at all
+        assert sim._resolve_prices({"Z"}) == {"Z": 101.0}
+        assert sim._resolve_prices({"AAA", "BB"}) == {"AAA": 103.0, "BB": 102.0}
+        assert len(seen) == 2 and sorted(seen[1]) == ["AAA", "BB"]
+    finally:
+        sim.nse.get_prices = orig
+
+
+def test_resolve_prices_falls_back_to_per_symbol_when_the_batch_fails():
+    """A broken batch call must not leave the book unpriced."""
+    restore = _patch("_price", lambda s: 100.0 + len(s))
+    orig = sim.nse.get_prices
+
+    def _boom(syms):
+        raise RuntimeError("batch down")
+
+    sim.nse.get_prices = _boom
+    try:
         assert sim._resolve_prices({"Z"}) == {"Z": 101.0}
         assert sim._resolve_prices({"AAA", "BB"}) == {"AAA": 103.0, "BB": 102.0}
     finally:
-        sim.nse.get_price_map = orig_gpm
+        sim.nse.get_prices = orig
         restore()
 
 

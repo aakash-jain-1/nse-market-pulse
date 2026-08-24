@@ -650,6 +650,73 @@ def snapshot(symbols=None):
         return out
 
 
+# Angel's getMarketData takes a LIST of tokens per exchange, so N symbols cost ONE
+# call instead of N. Its documented ceiling is 50 tokens per request.
+MARKET_DATA_BATCH = 50
+
+
+def price_map(symbols, fetch=False):
+    """`{SYMBOL: ltp}` for whichever of `symbols` the broker can price — the price
+    source `nse_client.get_price()` prefers over NSE's per-symbol quote.
+
+    Two tiers, so the caller controls cost. `fetch=False` reads ONLY the streaming
+    tick store: free, real-time, and covers whatever is being watched. `fetch=True`
+    additionally asks Angel's REST for the misses, **batched** by exchange segment
+    (see `MARKET_DATA_BATCH`) — one call for up to 50 names, versus one rationed NSE
+    request each. Misses are simply absent, so callers fall through as before.
+    """
+    want = {}                               # token -> requested symbol (as asked)
+    for s in (symbols or []):
+        sym = (s or "").upper().strip()
+        tok = resolve(sym) if sym else None
+        if tok:
+            want.setdefault(tok, sym)
+    if not want:
+        return {}
+
+    out = {}
+    # Tier 1: the live tick store. Only while the socket is up — otherwise these are
+    # yesterday's ticks, and a stale price masquerading as live is worse than a miss.
+    if _status["connected"]:
+        with _lock:
+            for tok, sym in want.items():
+                ltp = (_latest.get(tok) or {}).get("ltp")
+                if ltp is not None:
+                    out[sym] = ltp
+    if not fetch:
+        return out
+
+    smart = _smart
+    missing = [t for t, s in want.items() if s not in out]
+    if smart is None or not missing or not hasattr(smart, "getMarketData"):
+        return out
+    # Tier 2: batched REST, grouped by exchange because cash and NFO tokens can't
+    # share one list.
+    by_exch = {}
+    for tok in missing:
+        by_exch.setdefault(exchange_of(tok), []).append(tok)
+    for exch, toks in by_exch.items():
+        for i in range(0, len(toks), MARKET_DATA_BATCH):
+            chunk = toks[i:i + MARKET_DATA_BATCH]
+            try:
+                resp = smart.getMarketData("FULL", {exch: chunk})
+                fetched = (((resp or {}).get("data") or {}).get("fetched") or [])
+            except Exception:
+                continue                     # partial results are fine — caller falls back
+            # Rows come back in arbitrary order, so each is matched by its own token
+            # (`tradingSymbol` is the documented fallback if a response omits it).
+            trad2tok = {_sec2trad.get(t): t for t in chunk if _sec2trad.get(t)}
+            for row in fetched:
+                row = row or {}
+                tok = str(row.get("symbolToken") or "").strip() \
+                    or trad2tok.get((row.get("tradingSymbol") or "").strip(), "")
+                ltp = _to_f(row.get("ltp"))
+                sym = want.get(tok)
+                if sym and ltp is not None:
+                    out[sym] = ltp
+    return out
+
+
 # ---------------------------------------------------------------------------
 # On-demand REST (stock-detail modal) — serve quote/chart from Angel instead of
 # NSE for ARBITRARY symbols (not just the streamed watch set), so drilling into a

@@ -390,8 +390,12 @@ def place_futures_order(symbol, side, lots):
         return True, f"{side} {lots} lot(s) x {lot_size} {symbol} FUT @ {price:g}{rmsg}", order
 
 
-def _reprice(key, pos):
-    """Current LTP for a position, re-fetching option premiums as needed."""
+def _reprice(key, pos, equity_px=None):
+    """Current LTP for a position, re-fetching option premiums as needed.
+
+    `equity_px` is the pre-resolved `{symbol: price}` batch for the cash leg (see
+    `portfolio`); without it the cash leg falls back to the hot-list map alone, which
+    only knows the ~100-150 names currently on a live list."""
     if pos.get("kind") == "future":
         from nse_pulse.core import nse_quote
         fut = nse_quote.get_near_future(pos.get("symbol"))
@@ -403,7 +407,10 @@ def _reprice(key, pos):
             pos.get("strike"), pos.get("optType"),
         )
         return p if p is not None else pos["avgPrice"]
-    return nse.get_price_map().get(key, pos["avgPrice"])
+    px = (equity_px or {}).get(key)
+    if px is None:
+        px = nse.get_price_map().get(key)
+    return px if px is not None else pos["avgPrice"]
 
 
 def portfolio():
@@ -411,11 +418,22 @@ def portfolio():
     with _lock:
         state = _load()
 
+    # One batched, broker-first lookup for the whole cash leg — otherwise a holding
+    # that has dropped off the hot lists is marked at cost and shows a flat P&L.
+    cash_keys = [k for k, p in state["positions"].items()
+                 if p.get("kind") not in ("future", "option")]
+    equity_px = {}
+    if cash_keys:
+        try:
+            equity_px = nse.get_prices(cash_keys) or {}
+        except Exception:
+            equity_px = {}
+
     positions = []
     holdings_value = 0.0
     invested = 0.0
     for key, pos in state["positions"].items():
-        ltp = _reprice(key, pos)
+        ltp = _reprice(key, pos, equity_px)
         qty = pos["qty"]
         kind = pos.get("kind")
         margin = pos.get("margin", 0.0)          # >0 for futures + SHORT options
