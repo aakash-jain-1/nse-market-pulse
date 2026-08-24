@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-  tests/               Unit tests — 904 across 39 suites; import `from nse_pulse.<sub> import <mod>`
+  tests/               Unit tests — 909 across 39 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -357,7 +357,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **904 tests** across 39 suites (grow it with every change;
+- `python -m pytest -q` — **909 tests** across 39 suites (grow it with every change;
   never shrink it).
 - **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
   committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
@@ -536,6 +536,45 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 🧯 Standing phantom guard in `/api/health` (suite 904 → 909)
+- **Why:** the filter below *hides* the 27 historical rows, and that creates a new hazard — if a price guard ever
+  regresses, the fresh corruption is now **invisible**, silently filtered alongside the old. A filter without an
+  alarm converts a loud bug into a quiet one.
+- **The design point: split history from a live leak.** `/api/health.dataQuality.phantomTrades` reports **`known`**
+  (pre-guard residue, deliberately kept) separately from **`leaked`** (closed by a zero price *since*
+  `sim.GUARDS_LANDED = "2026-08-24"`). Only `leaked` flips the top-level `ok`; if the total drove it, the 27
+  historical rows would peg the alarm permanently on, which is the same as having no alarm.
+- **Split on `closedAt`, NOT `closedDay`.** 20 of the 27 phantoms carry a valid `closedAt` with a **NULL
+  `closedDay`** (some close path doesn't populate it — a separate small gap worth knowing about), so keying the
+  date filter off `closedDay` would have classified most live leaks as historical. `closedAt` is
+  `YYYY-MM-DD HH:MM:SS`, so a lexicographic compare is a date compare.
+- **Cost mattered, and the first attempt was too slow.** This is the probe we *just* fixed from blocking 15-28s, so
+  it must not become expensive. v1 expressed the rule as a SQL `CASE`, which defeats every index → full scan,
+  **50ms** per call (and two `_conn()` opens at ~25ms each: `_conn` builds a fresh connection + 2 PRAGMAs every
+  time, so *connection setup dominated*, not the query). Fixed by (a) collapsing to **one** query on one connection
+  and (b) rewriting the predicate as **OR-of-ANDs** so a **partial index** can match it:
+  `ix_sim_phantom ON sim_trades(closedAt) WHERE <suspect>` — indexing only the ~27 offending rows out of 16k.
+  Result: **1.3ms**, plan `SEARCH sim_trades USING INDEX ix_sim_phantom (closedAt>?)`, `/api/health` end-to-end
+  **14ms**, and flat as the ledger grows. `init()` creates the index on the existing DB, so there's no migration.
+- **`COALESCE(direction,'')` is load-bearing, not defensive noise.** Bare `direction <> 'SHORT'` evaluates to
+  **NULL — not true** — for a NULL direction, whereas Python's `t.get("direction") == "SHORT"` is False and takes
+  the LONG branch. Without the COALESCE the SQL and Python disagree on exactly the rows most likely to be
+  malformed.
+- **Two representations of one rule, locked together.** `db._SUSPECT_COND` is a second expression of
+  `sim.is_suspect`, so `test_sql_and_python_suspect_rules_agree` runs **both** over the same 14 edge cases
+  (boundaries, wrong-sign, NULL direction) and fails on any drift. Cross-checked on the real ledger too: SQL 27,
+  Python 27.
+- **Fails safe:** a DB error returns `ok: null` ("check unavailable") — never a false all-clear — and does not
+  fail liveness, since a broken data-quality probe isn't a dead app.
+- **Verified end-to-end with real SQL** on a temp DB: empty → clean; a pre-guard phantom → `known 1, ok true`; a
+  real −98.5% trade → still clean; a post-guard phantom → **`ok false, leaked 1`**.
+- **UI:** rendered in the Log modal off the `/api/health` fetch `renderNseBudget` already makes (no extra request),
+  and **silent while clean and empty** so it doesn't become wallpaper.
+- **Tests (+5, 904 → 909):** the SQL↔Python drift lock; `sim_suspect_stats` history-vs-leak split incl. the
+  `closedAt`/`closedDay` distinction and near-boundary/wrong-sign non-matches; `EXPLAIN QUERY PLAN` asserting the
+  partial index is used and it is *not* a `SCAN`; `phantom_health` verdicts + one-query contract + graceful
+  degradation; `/api/health` staying green on history and going red (`ok: false`) on a leak.
 
 ### 2026-08-24 — 🧯 Phantom trades excluded from the scorecards, flagged not deleted (suite 902 → 904)
 - **Why:** the sweep below plugged the *sources* of a zero price, but the trades those zeros had already closed were

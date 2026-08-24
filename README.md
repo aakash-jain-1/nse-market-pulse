@@ -835,7 +835,7 @@ python nse_demand.py losers     # top losers
 | `GET /api/log/status · /health · /backtest` · `POST /api/log/snapshot · /iv` · `GET /api/log/download` | Snapshot logger status/health + signal backtest + CSV export |
 | `GET /api/iv/rank/<sym>` | IV rank/percentile from logged ATM-IV history |
 | `GET /api/alerts/status` · `POST /api/alerts/test` | Off-screen alert status (no secrets) · send a test Telegram/webhook message |
-| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture + `nse` pacer/WAF stats: `blockedForSec`, `blockCount`, `reqLastMin`, `concurrency`, `impersonate`, `impersonateMode`, `endpoints` per-endpoint request budget) |
+| `GET /api/health` | Consolidated liveness (logger + feed + DB + posture + `nse` pacer/WAF stats: `blockedForSec`, `blockCount`, `reqLastMin`, `concurrency`, `impersonate`, `impersonateMode`, `endpoints` per-endpoint request budget) + `dataQuality.phantomTrades` (zero-price exits: `known` history vs `leaked`, which must be 0) |
 
 ---
 
@@ -1042,7 +1042,10 @@ retry after cooldown. One gentle daily pass is the safe pattern (the WAF trips o
   candle feed: a zero-priced or inverted bar is skipped rather than being read as a low
   of ₹0 that trips every stop. **27 trades closed by a zero before those guards existed
   are still in the ledger** — they're excluded from every Sim scorecard (which says so,
-  above the numbers) rather than deleted, so the raw history stays auditable.
+  above the numbers) rather than deleted, so the raw history stays auditable. Because
+  that filter would also hide any *new* corruption, `/api/health` carries a standing
+  check: `dataQuality.phantomTrades.leaked` counts zero-price exits since the guards
+  shipped, must be 0, and turns the whole health payload red if it isn't.
 - The core app needs **no API key**; **no secrets in the repo** (`.gitignore`
   covers `.env`, `*.db`, state JSON, CSVs, `logs/`, and the broker configs
   `angel_config.json` / `dhan_config.json`).

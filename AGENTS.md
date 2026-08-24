@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 904 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 909 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +142,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 904 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 909 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -187,7 +187,11 @@ NSE-load knobs: `NSE_CTX_CANDIDATES` (default 30) bounds the per-context quote+c
 fan-out; `SIM_INTRABAR_SEC` / `IDEAS_INTRABAR_SEC` (default 180) space out the 1-min
 intrabar chart sweeps; `SIM_WARM_DELAY_SEC` (default 60) defers the startup strategy-of-day
 warm pass (which also auto-skips during market hours) — raise them if the Akamai budget is tight.
-Health/liveness is at `GET /api/health`. See `AUDIT.md` for the full posture.
+Health/liveness is at `GET /api/health` — which also carries a standing **data-quality**
+guard (`dataQuality.phantomTrades`): `leaked` counts trades closed by a **zero price**
+since the guards landed and must stay 0, and a non-zero value flips the top-level `ok`
+(the 27 known historical rows are reported as `known` and do NOT trip it). One partial-
+index query, ~1.3ms. See `AUDIT.md` for the full posture.
 
 ### Phone / LAN access
 The server binds `0.0.0.0` by default, so any device on the same Wi-Fi can open
@@ -646,6 +650,21 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **🧯 Standing guard so a new phantom can't go unnoticed** — the filter below hides the 27 historical rows, which
+ creates a new risk: if a price guard ever regresses, the fresh corruption is now *invisible* (silently filtered
+ alongside the old). So `/api/health` gained `dataQuality.phantomTrades`, splitting **`known`** (pre-guard residue,
+ deliberately kept) from **`leaked`** (closed by a zero price *since* `sim.GUARDS_LANDED`, must be 0) — only `leaked`
+ flips the top-level `ok`, because otherwise the historical rows would peg the alarm permanently on and mask the real
+ event. The split is on **`closedAt`, not `closedDay`**: 20 of the 27 carry a valid `closedAt` with a NULL `closedDay`,
+ so keying off `closedDay` would have missed most of them. Cost mattered (this is the probe we just un-blocked from
+ 15-28s): the first cut ran a `CASE` per row and measured **50ms**, so the rule was rewritten as OR-of-ANDs and given a
+ **partial index** over only the offending rows (`ix_sim_phantom`, created by `init()` on the existing DB — no
+ migration) → **1.3ms**, flat as the ledger grows, `/api/health` end-to-end 14ms. `COALESCE(direction,'')` is load-
+ bearing: bare `direction <> 'SHORT'` is NULL (not true) for a NULL direction where Python takes the LONG branch. The
+ SQL is a second expression of `sim.is_suspect`, so a test runs **both** over the same edge cases (incl. NULL
+ direction) and fails on any drift; a DB error degrades to `ok: null`, never a false all-clear. Surfaced in the Log
+ modal, silent while clean. Suite **904 → 909**.
 
 - **🧯 Phantom trades excluded from the scorecards (flagged, not deleted)** — the sweep below fixed the *sources* of a
  zero price, but 27 trades it had already closed were sitting in the ledger, poisoning every aggregate that reads it.

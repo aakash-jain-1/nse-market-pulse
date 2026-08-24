@@ -160,6 +160,43 @@ def test_health_reports_nse_block():
              nse._last_block_ts, nse._prev_cooldown) = saved
 
 
+def test_health_flags_a_new_phantom_trade_but_not_the_historical_ones():
+    """The standing data-quality guard: /api/health must stay green with the 27 known
+    (filtered) rows and go red the moment a zero price closes a NEW trade, since that
+    corruption is otherwise silent."""
+    from nse_pulse.sim import sim
+    base = (lambda: {"healthy": True, "marketHours": False},
+            lambda: {"provider": "none", "connected": False, "configured": False})
+
+    def _health():
+        with _patches((webapp.snaplog, "health", base[0]),
+                      (webapp.live_feed, "public_status", base[1])):
+            return _json("/api/health")
+
+    # historical residue only -> reported, but healthy
+    with _patches((sim.db, "sim_suspect_stats",
+                   lambda since=None: {"total": 27, "leaked": 0})):
+        st, j = _health()
+        pt = j["dataQuality"]["phantomTrades"]
+        assert st == 200 and j["ok"] is True
+        assert pt["known"] == 27 and pt["leaked"] == 0 and pt["ok"] is True
+
+    # a leak since the guards -> ok goes False so monitoring actually notices
+    with _patches((sim.db, "sim_suspect_stats",
+                   lambda since=None: {"total": 28, "leaked": 1})):
+        st, j = _health()
+        pt = j["dataQuality"]["phantomTrades"]
+        assert j["ok"] is False and pt["ok"] is False and pt["leaked"] == 1
+
+    # and an unavailable check must not fabricate an all-clear NOR fail liveness
+    def _boom(since=None):
+        raise RuntimeError("db gone")
+
+    with _patches((sim.db, "sim_suspect_stats", _boom)):
+        st, j = _health()
+        assert j["ok"] is True and j["dataQuality"]["phantomTrades"]["ok"] is None
+
+
 def test_quote_falls_back_to_eod_during_block():
     from nse_pulse.eod import bhavcopy
     from nse_pulse.core import nse_client as nse
@@ -973,8 +1010,10 @@ def test_index_renders():
     assert r.status_code == 200 and r.mimetype == "text/html"
     # Header widgets the pacer/impersonation UX depends on are wired into the template.
     assert b'id="nsePulse"' in r.data and b'id="nseTls"' in r.data
-    # NSE request-budget table lives in the Log/diagnostics modal.
+    # NSE request-budget table lives in the Log/diagnostics modal, alongside the
+    # standing zero-price (phantom trade) data-quality guard.
     assert b'id="nseBudget"' in r.data
+    assert b"renderPhantomGuard" in r.data
     # Live-tab instrument pickers: one-click index chips + the F&O leg selector
     # (underlying -> expiry -> strike -> CE/PE/FUT).
     assert b'id="liveIndexPicks"' in r.data

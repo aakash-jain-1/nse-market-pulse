@@ -1110,6 +1110,7 @@ def api_health():
     from nse_pulse.core import db
     from nse_pulse.eod import eod_scheduler
     from nse_pulse.core import nse_client as nse
+    from nse_pulse.sim import sim
     h = snaplog.health()
     sch = eod_scheduler.status()
     try:
@@ -1117,8 +1118,12 @@ def api_health():
     except Exception:
         dbsize = 0
     feed = live_feed.public_status()
-    # Healthy during market hours if the loop is ticking; idle outside is fine.
-    ok = bool(h.get("healthy") or not h.get("marketHours"))
+    phantoms = sim.phantom_health()
+    # Healthy during market hours if the loop is ticking; idle outside is fine. A
+    # phantom leak counts: it means a zero price is reaching the resolver again and
+    # silently corrupting the ledger, which is exactly the kind of damage that goes
+    # unnoticed without a liveness signal (the historical rows don't trip it).
+    ok = bool(h.get("healthy") or not h.get("marketHours")) and phantoms.get("ok") is not False
     return jsonify({
         "ok": ok,
         "time": int(time.time() * 1000),
@@ -1136,6 +1141,9 @@ def api_health():
                     "lastRunDate": sch.get("lastRunDate"), "running": sch.get("running")},
         "db": {"path": db.DB_FILE, "bytes": dbsize,
                "mb": round(dbsize / 1_048_576, 1)},
+        # Standing check that no NEW trade is being closed by a zero price. `known` is
+        # the historical residue the sim views filter; `leaked` must stay 0.
+        "dataQuality": {"phantomTrades": phantoms},
         "posture": {"debug": DEBUG, "host": HOST,
                     "authRequired": bool(ACCESS_TOKEN)},
     })

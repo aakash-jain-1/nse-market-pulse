@@ -232,6 +232,82 @@ def test_views_exclude_zero_price_phantoms_but_keep_the_rows():
         r2(); r1()
 
 
+def test_sql_and_python_suspect_rules_agree():
+    """`db._SUSPECT_COND` re-expresses `sim.is_suspect` in SQL so /api/health can use an
+    index instead of a ledger read. Two representations of one rule can drift, so run
+    BOTH over the same edge cases and demand identical verdicts row by row."""
+    import sqlite3
+    cases = [
+        # (direction, maePct, mfePct) spanning both signatures, both signs, boundaries
+        ("LONG", -100.0, 0.0), ("LONG", -100.5, 0.0), ("LONG", -99.9, 0.0),
+        ("LONG", -98.5, 0.0), ("LONG", 0.0, 100.0), ("LONG", None, None),
+        ("SHORT", 0.0, 100.0), ("SHORT", -0.3, 100.5), ("SHORT", 0.0, 99.9),
+        ("SHORT", 0.0, 98.5), ("SHORT", -100.0, 0.0), ("SHORT", None, None),
+        # a NULL direction is the case the two forms most easily disagree on:
+        # `direction <> 'SHORT'` is NULL there, while Python takes the LONG branch
+        (None, -100.0, 0.0), (None, 0.0, 100.0),
+    ]
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.execute("CREATE TABLE sim_trades (direction TEXT, maePct REAL, mfePct REAL)")
+    con.executemany("INSERT INTO sim_trades VALUES (?,?,?)", cases)
+    sql = [bool(r["v"]) for r in
+           con.execute(f"SELECT ({sim.db._SUSPECT_COND}) v FROM sim_trades")]
+    py = [sim.is_suspect({"direction": d, "maePct": a, "mfePct": f})
+          for d, a, f in cases]
+    assert sql == py, f"SQL/Python drift: {list(zip(cases, sql, py))}"
+    assert sum(py) == 5                     # sanity: the five impossible rows
+    con.close()
+
+
+def test_phantom_health_separates_history_from_a_live_leak():
+    """Only a phantom closing AFTER the guards is a bug; the kept historical rows must
+    not mask it, so they're reported separately and don't flip `ok`."""
+    seen = []
+
+    def _stats(since=None):
+        seen.append(since)
+        return {"total": 27, "leaked": 0}
+
+    r = _patch_attr(sim.db, "sim_suspect_stats", _stats)
+    try:
+        h = sim.phantom_health()
+        assert h["ok"] is True and h["known"] == 27 and h["leaked"] == 0
+        assert h["guardsLanded"] == sim.GUARDS_LANDED
+        assert seen == [sim.GUARDS_LANDED]          # ONE query, and it is date-bounded
+    finally:
+        r()
+
+    r = _patch_attr(sim.db, "sim_suspect_stats",
+                    lambda since=None: {"total": 30, "leaked": 3})
+    try:
+        h = sim.phantom_health()
+        assert h["ok"] is False and h["known"] == 27 and h["leaked"] == 3
+        assert "zero price" in h["detail"]
+    finally:
+        r()
+
+    r = _patch_attr(sim.db, "sim_suspect_stats",
+                    lambda since=None: {"total": 0, "leaked": 0})
+    try:
+        assert sim.phantom_health() == {
+            "ok": True, "known": 0, "leaked": 0, "guardsLanded": sim.GUARDS_LANDED,
+            "detail": "no zero-price exits since the guards landed"}
+    finally:
+        r()
+
+    # a DB hiccup must degrade to "unknown", never to a false all-clear
+    def _boom(since=None):
+        raise RuntimeError("db gone")
+
+    r = _patch_attr(sim.db, "sim_suspect_stats", _boom)
+    try:
+        h = sim.phantom_health()
+        assert h["ok"] is None and h["known"] is None
+    finally:
+        r()
+
+
 def test_refresh_trade_reads_a_zero_price_as_no_price():
     """A 0 is below every long stop, so treating it as a price would stop the trade
     out at -100% and write that to the ledger for good. It must read as 'no price'."""

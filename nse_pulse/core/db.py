@@ -70,6 +70,18 @@ SIM_TRADE_COLS = [
 _SIM_TEXT = {"id", "book", "strategy", "symbol", "direction", "rating", "status",
              "openedAt", "openedDate", "regimeAtEntry", "volAtEntry",
              "closedAt", "closedDay"}
+# Trades whose excursion says a zero price closed them, not the market — the SQL
+# mirror of `sim.is_suspect()`. Used by the partial index in init() and by
+# sim_suspect_stats(). Two representations of one rule can drift, so
+# test_sim.py::test_sql_and_python_suspect_rules_agree runs both over the same edge
+# cases and fails if they ever disagree.
+#
+# Written as OR-of-ANDs rather than a CASE so SQLite can match it against that partial
+# index (a CASE forces a full scan). `COALESCE(direction,'')` matters: plain
+# `direction <> 'SHORT'` evaluates to NULL — not true — for a NULL direction, whereas
+# Python's `t.get("direction") == "SHORT"` is False there and takes the LONG branch.
+_SUSPECT_COND = ("((direction = 'SHORT' AND COALESCE(mfePct, 0) >= 100.0) "
+                 "OR (COALESCE(direction, '') <> 'SHORT' AND COALESCE(maePct, 0) <= -100.0))")
 EOD_BAR_COLS = [
     "symbol", "d", "date", "iso", "open", "high", "low", "close",
     "prevClose", "vwap", "volume", "value", "trades", "delivQty", "delivPct",
@@ -154,6 +166,11 @@ def init():
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_status ON sim_trades(status)")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_strat_day ON sim_trades(strategy, openedDate)")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_regime ON sim_trades(regimeAtEntry, strategy)")
+            # PARTIAL index: only the handful of zero-price-closed rows (27 of 16k), so
+            # /api/health's standing data-quality check is a small index scan instead of
+            # a full-table scan, and stays flat as the ledger grows.
+            c.execute("CREATE INDEX IF NOT EXISTS ix_sim_phantom ON sim_trades(closedAt) "
+                      f"WHERE {_SUSPECT_COND}")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_book ON sim_trades(book, status)")
             c.execute("""
                 CREATE TABLE IF NOT EXISTS eod_bars (
@@ -444,6 +461,30 @@ def sim_trade_count(book=None):
         args.append(book)
     with _conn() as c:
         return c.execute(q, args).fetchone()["n"]
+
+
+def sim_suspect_stats(since=None):
+    """How many trades were closed by a zero price rather than by the market?
+
+    Polled by `/api/health`, so it's one query on one connection over a **partial
+    index** covering only the offending rows: measured **1.3ms** on a 16k-row ledger,
+    vs 50ms for the same counts without the index and ~330ms to materialise the trades
+    as dicts. Being a partial index, the cost stays flat as the ledger grows.
+
+    `since` is an inclusive `YYYY-MM-DD` floor separating a live leak from the known
+    history. It filters on **`closedAt`**, not `closedDay`: most real phantoms carry a
+    valid `closedAt` with a NULL `closedDay` (20 of the 27), so keying off `closedDay`
+    would miss them. `closedAt` is `YYYY-MM-DD HH:MM:SS`, so a lexicographic compare
+    is a date compare.
+    """
+    with _conn() as c:
+        r = c.execute(
+            f"SELECT COUNT(*) total, "
+            f"COALESCE(SUM(CASE WHEN closedAt >= ? THEN 1 ELSE 0 END), 0) leaked "
+            f"FROM sim_trades WHERE {_SUSPECT_COND}",
+            (since if since is not None else "\uffff",),   # unreachable floor => 0
+        ).fetchone()
+        return {"total": r["total"], "leaked": r["leaked"]}
 
 
 def sim_clear(book=None):

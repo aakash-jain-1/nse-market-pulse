@@ -218,6 +218,40 @@ def data_quality(book="cash"):
     }
 
 
+# Date the zero-price guards shipped (nse_quote/paper/sim/intrabar/ideas_journal all
+# treat a 0 as "no price" from here on). Every known phantom closed on or before
+# 2026-08-20, so a suspect trade closing on/after this date means one of those guards
+# has a hole and is actively writing bad data — that is the alert-worthy event, as
+# opposed to the 27 historical rows, which are merely filtered.
+GUARDS_LANDED = "2026-08-24"
+
+
+def phantom_health():
+    """Standing data-quality guard for `/api/health` (one indexed query, no ledger read).
+
+    `known` is the historical residue the views already exclude; `leaked` is the number
+    that appeared AFTER the guards, and should always be 0. They're reported separately
+    rather than as one total because only a rise in `leaked` is a bug: the 27 historical
+    rows are deliberately kept (see data_quality) and would otherwise mask a new one.
+    """
+    try:
+        st = db.sim_suspect_stats(since=GUARDS_LANDED)
+        total, leaked = st["total"], st["leaked"]
+    except Exception:
+        return {"ok": None, "known": None, "leaked": None,
+                "detail": "phantom check unavailable"}
+    ok = leaked == 0
+    return {
+        "ok": ok,
+        "known": total - leaked,
+        "leaked": leaked,
+        "guardsLanded": GUARDS_LANDED,
+        "detail": (f"{leaked} trade(s) closed by a zero price since the guards landed — "
+                   "a zero is reaching the resolver again"
+                   if not ok else "no zero-price exits since the guards landed"),
+    }
+
+
 def _price(symbol):
     try:
         return nse.get_price(symbol)

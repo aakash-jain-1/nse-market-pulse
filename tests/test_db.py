@@ -179,6 +179,47 @@ def test_sim_open_and_where_filters():
         assert db.sim_trade_count(book="fno") == 1
 
 
+def test_sim_suspect_stats_splits_history_from_a_new_leak():
+    """The /api/health guard. `since` must filter on `closedAt`, NOT `closedDay`: most
+    of the real phantoms carry a valid closedAt with a NULL closedDay, so keying off
+    closedDay would report a live leak as historical (or miss it entirely)."""
+    with _temp_db():
+        db.sim_insert_trades([
+            # historical phantoms, one of each signature, closedDay deliberately absent
+            _trade("h1", direction="LONG", maePct=-100.0,
+                   closedAt="2026-07-20 10:00:00", closedDay=None),
+            _trade("h2", direction="SHORT", mfePct=100.0,
+                   closedAt="2026-08-20 10:00:00", closedDay=None),
+            # a NEW one, after the guards landed
+            _trade("new", direction="LONG", maePct=-100.0,
+                   closedAt="2026-08-25 10:00:00", closedDay="2026-08-25"),
+            # real trades, including near-boundary ones that must NOT be counted
+            _trade("ok1", direction="LONG", maePct=-98.5, closedAt="2026-08-25 10:00:00"),
+            _trade("ok2", direction="SHORT", mfePct=98.5, closedAt="2026-08-25 10:00:00"),
+            # wrong-sign: a LONG can't gain 100%, a SHORT can't lose 100%, from a zero
+            _trade("ok3", direction="LONG", mfePct=100.0, closedAt="2026-08-25 10:00:00"),
+            _trade("ok4", direction="SHORT", maePct=-100.0, closedAt="2026-08-25 10:00:00"),
+        ])
+        assert db.sim_suspect_stats() == {"total": 3, "leaked": 0}
+        assert db.sim_suspect_stats(since="2026-08-24") == {"total": 3, "leaked": 1}
+        assert db.sim_suspect_stats(since="2026-07-01") == {"total": 3, "leaked": 3}
+        assert db.sim_suspect_stats(since="2099-01-01") == {"total": 3, "leaked": 0}
+
+
+def test_phantom_check_uses_its_partial_index_not_a_table_scan():
+    """The guard is polled by /api/health, so it must not degrade into a full scan as
+    the ledger grows — a partial index over just the offending rows keeps it flat."""
+    with _temp_db():
+        db.sim_insert_trades([_trade(str(i)) for i in range(50)])
+        with db._conn() as c:
+            plan = " ".join(
+                r[-1] for r in c.execute(
+                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM sim_trades "
+                    f"WHERE {db._SUSPECT_COND} AND closedAt >= '2026-08-24'"))
+        assert "ix_sim_phantom" in plan, plan
+        assert "SCAN sim_trades" not in plan, plan
+
+
 def test_sim_clear_by_book_and_all():
     with _temp_db():
         db.sim_insert_trades([_trade("1", book="cash"), _trade("2", book="fno")])

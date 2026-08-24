@@ -5007,22 +5007,41 @@
       if (!el) return;
       try {
         const h = await (await fetch("/api/health")).json();
+        const dq = renderPhantomGuard(h);
         const eps = (h.nse && h.nse.endpoints) || [];
         if (!eps.length) {
-          el.innerHTML = `<div class="empty" style="padding:16px">No NSE calls logged yet.</div>`;
+          el.innerHTML = dq + `<div class="empty" style="padding:16px">No NSE calls logged yet.</div>`;
           return;
         }
         const rows = eps.map(e =>
           `<tr><td style="font-family:monospace;font-size:11px">${escapeHtml(e.endpoint)}</td>`
           + `<td style="text-align:right">${e.lastMin}</td>`
           + `<td style="text-align:right">${e.lastHour}</td></tr>`).join("");
-        el.innerHTML = `<table class="depth-tbl"><thead><tr>`
+        el.innerHTML = dq + `<table class="depth-tbl"><thead><tr>`
           + `<th style="text-align:left">Endpoint</th>`
           + `<th style="text-align:right">/min</th>`
           + `<th style="text-align:right">/hour</th></tr></thead><tbody>${rows}</tbody></table>`;
       } catch (e) {
         el.innerHTML = `<div class="empty" style="padding:16px">Couldn't load the request budget.</div>`;
       }
+    }
+    // Standing data-quality guard (/api/health.dataQuality.phantomTrades). Silent while
+    // clean so it doesn't become wallpaper — a corrupted ledger is otherwise invisible.
+    function renderPhantomGuard(h) {
+      const p = ((h.dataQuality || {}).phantomTrades) || {};
+      if (p.ok === true && !p.known) return "";
+      if (p.ok === null || p.ok === undefined) {
+        return `<div class="chart-note" style="margin:0 0 8px">🧯 Zero-price trade check unavailable.</div>`;
+      }
+      if (p.ok === false) {
+        return `<div class="chart-note" style="margin:0 0 8px;color:var(--red)"><b>🧯 ${p.leaked}
+          trade(s) closed by a zero price since ${escapeHtml(p.guardsLanded || "")}</b> — a price
+          guard has a hole and the ledger is being corrupted again. This is a bug, not a
+          market event.</div>`;
+      }
+      return `<div class="chart-note" style="margin:0 0 8px">🧯 Zero-price trade check:
+        <span class="pos">clean</span> — ${p.known} historical row(s) excluded from the sim
+        scorecards, none since ${escapeHtml(p.guardsLanded || "")}.</div>`;
     }
     async function runBacktest() {
       const view = document.getElementById("logView").value;
