@@ -124,7 +124,7 @@ nse_pulse/cli/
   nse_demand.py      Standalone CLI scanner
   db_inspect.py      Read-only SQLite inspector CLI
 
-  tests/               Unit tests — 909 across 39 suites; import `from nse_pulse.<sub> import <mod>`
+  tests/               Unit tests — 911 across 39 suites; import `from nse_pulse.<sub> import <mod>`
 docs/                AUDIT.md (round 1) + AUDIT2.md (round 2)
 data/market.db       (gitignored) SQLite; sim_state.json / paper_state.json / ideas_journal.json (gitignored, repo root)
 *.example.json       Config templates (angel/dhan/notify) → copy to gitignored real files
@@ -357,7 +357,7 @@ sanitization on user-typed sinks. See `AUDIT.md` for the full posture + status.
 
 ## Testing
 
-- `python -m pytest -q` — **909 tests** across 39 suites (grow it with every change;
+- `python -m pytest -q` — **911 tests** across 39 suites (grow it with every change;
   never shrink it).
 - **Count gotcha:** a bare `pytest -q` on this machine reports **more** than the
   committed total, because `tests/test_tv_watchlist.py` (~41 tests, the TradingView →
@@ -536,6 +536,39 @@ a documented caveat).
 ---
 
 ## Findings & change log (newest first, IST)
+
+### 2026-08-24 — 🗓 `closedDay` NULLs: derived at the write choke point + legacy backfill (suite 909 → 911)
+- **How it surfaced:** the phantom guard's date filter *had* to key on `closedAt` because so many rows had a NULL
+  `closedDay`. Quantified: **2,131 of 15,711 closed trades (13.6%)**.
+- **Checked the premise before changing code — and it was wrong.** There is **no live bug**: all three close paths
+  (`sim._refresh_trade`'s two coarse branches and the intrabar path via `intrabar._apply`) stamp `closedDay` today.
+  The NULLs are bounded to **closedAt 2026-07-10..16** with nothing after, i.e. rows closed before the AUDIT2 N6
+  "stamp like intrabar" fix. On those same days *some* rows do have it, consistent with one path stamping and
+  another not — exactly what N6 repaired. Today's session (2026-08-24) has 798 closed, 0 missing.
+- **So the risk wasn't wrong output, it was a landmine.** The day-level readers already fell back
+  (`closedDay or closedAt[:10]`), so `/api/sim/daily` was correct all along — but any *future* query keying naively
+  on `closedDay` would silently drop that week. My own first cut at the phantom guard did exactly that.
+- **Fix 1 — derive at the single write choke point.** `db.closed_day_of(t)` is now applied inside
+  **`_trade_to_row`**, which every trade write funnels through, so a close path that forgets can no longer persist a
+  NULL. This is strictly better than fixing the three call sites: those can grow a fourth. It also replaces the same
+  fallback that was open-coded at 3 reader sites in `sim.py`, so there is one definition of "a trade's close day".
+- **Fix 2 — one-time backfill in `init()`:** `UPDATE sim_trades SET closedDay = substr(closedAt,1,10) WHERE
+  closedDay IS NULL AND closedAt IS NOT NULL AND status <> 'OPEN'`. **Lossless** — `closedDay` is by definition the
+  date part of `closedAt`, empirically verified identical on all **13,580** rows carrying both — and idempotent, so
+  it no-ops from the second run. The `status <> 'OPEN'` clause matters: an open trade must not be handed a close date.
+- **Verified live:** 2,131 → **0** NULLs, **0** OPEN rows given a date, **0** rows where `closedDay` disagrees with
+  `closedAt`, the 2026-07-10..16 week now resolves by `closedDay` (548/826/725/972/1057), and `/api/sim/daily` is
+  **byte-identical** before and after (the readers already compensated).
+- **Gotcha worth remembering:** the Flask reloader re-runs `db.init()`, so a schema/migration edit applies to the
+  live DB the moment you save. That's how the real ledger got backfilled mid-session. It also means an edit saved in
+  a half-finished state (here: `_SUSPECT_COND` referenced by `init()` after being cut from its old location but
+  before being pasted at the top) **crashes the reloader and the app stays down** — check the terminal, don't assume
+  it recovered. Module-level SQL constants must therefore be defined **above** `init()`, not merely somewhere in the
+  file: it works at call time either way, but the ordering is what makes a partial save survivable and the code
+  readable.
+- **Tests (+2, 909 → 911):** the write path deriving `closedDay` from `closedAt`, respecting an explicit value, and
+  leaving OPEN trades NULL (plus `closed_day_of` as a pure helper); and `init()`'s backfill being correct,
+  OPEN-safe, and idempotent across two runs.
 
 ### 2026-08-24 — 🧯 Standing phantom guard in `/api/health` (suite 904 → 909)
 - **Why:** the filter below *hides* the 27 historical rows, and that creates a new hazard — if a price guard ever

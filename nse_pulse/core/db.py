@@ -163,6 +163,14 @@ def init():
                 c.execute("UPDATE sim_trades SET book='cash' WHERE book IS NULL")
             if "volAtEntry" not in cols:
                 c.execute("ALTER TABLE sim_trades ADD COLUMN volAtEntry TEXT")
+            # Backfill `closedDay` on rows closed before every path stamped it (2,131
+            # of 15,711, all from 2026-07-10..16). Lossless — it is by definition the
+            # date part of `closedAt`, and the two agree on every row that has both —
+            # and idempotent, so it no-ops from the second run on. Without it, any
+            # date-keyed query on closedDay silently under-reports that week.
+            c.execute("UPDATE sim_trades SET closedDay = substr(closedAt, 1, 10) "
+                      "WHERE closedDay IS NULL AND closedAt IS NOT NULL "
+                      "AND status <> 'OPEN'")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_status ON sim_trades(status)")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_strat_day ON sim_trades(strategy, openedDate)")
             c.execute("CREATE INDEX IF NOT EXISTS ix_sim_regime ON sim_trades(regimeAtEntry, strategy)")
@@ -368,6 +376,19 @@ def regime_by_day():
 # ----------------------------------------------------------------------------
 # Sim trades ledger (durable, queryable — replaces the JSON trades blob)
 # ----------------------------------------------------------------------------
+def closed_day_of(t):
+    """A closed trade's session date. `closedDay` is purely the date part of `closedAt`
+    (verified: identical on all 13,580 rows carrying both), but it's a *denormalised*
+    copy that each close path had to remember to stamp — and one of them didn't, leaving
+    2,131 rows with a NULL `closedDay` and a valid `closedAt`. Deriving it here, at the
+    single write choke point, means no future close path can forget it again.
+
+    Sliced to 10 chars either way: callers compare it against a `YYYY-MM-DD` string, so
+    a stray timestamp in the field must not turn into a silent non-match.
+    """
+    return (t.get("closedDay") or t.get("closedAt") or "")[:10] or None
+
+
 def _trade_to_row(t):
     row = []
     for col in SIM_TRADE_COLS:
@@ -377,6 +398,8 @@ def _trade_to_row(t):
             row.append(1 if t.get("fno") else 0)
         elif col == "book":
             row.append(t.get("book") or "cash")
+        elif col == "closedDay":
+            row.append(closed_day_of(t))
         elif col in _SIM_TEXT:
             row.append(t.get(col))
         else:

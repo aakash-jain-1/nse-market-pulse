@@ -848,8 +848,7 @@ def daily_performance(days=30, book="cash"):
             open_now += 1
             unreal += t.get("pnl") or 0.0
             continue
-        cd = ((t.get("closedDay") or "")[:10]
-              or (t.get("closedAt") or "")[:10] or od)
+        cd = db.closed_day_of(t) or od
         if not cd:
             continue
         b = bucket(cd)
@@ -900,7 +899,7 @@ def day_trades(date, limit=400, book="cash"):
             if t.get("openedDate") == date:
                 opened_open.append(t)
             continue
-        cd = (t.get("closedDay") or "")[:10] or (t.get("closedAt") or "")[:10]
+        cd = db.closed_day_of(t)
         if cd == date:
             closed.append(t)
     closed.sort(key=lambda t: t.get("closedAt") or "", reverse=True)
@@ -1103,7 +1102,7 @@ def _analytics_for(closed):
             "cumR": round(cumR, 2), "cumInr": round(cumInr, 0),
             "ddR": round(ddR, 2),
             "r": round(r, 2), "pnl": round(pnl, 0),
-            "day": (t.get("closedDay") or "")[:10] or (t.get("closedAt") or "")[:10],
+            "day": db.closed_day_of(t),
             "symbol": t.get("symbol"), "dir": t.get("direction"),
             "status": t.get("status"),
         })

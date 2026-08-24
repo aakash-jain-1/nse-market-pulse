@@ -206,6 +206,63 @@ def test_sim_suspect_stats_splits_history_from_a_new_leak():
         assert db.sim_suspect_stats(since="2099-01-01") == {"total": 3, "leaked": 0}
 
 
+def test_closed_day_is_derived_at_the_write_choke_point():
+    """`closedDay` is a denormalised copy of `closedAt`'s date that each close path had
+    to remember to stamp — and one didn't, orphaning 2,131 rows. Deriving it in
+    _trade_to_row means a path that forgets can no longer produce a NULL."""
+    with _temp_db():
+        db.sim_insert_trades([
+            # a close path that forgot to stamp closedDay
+            _trade("forgot", status="STOP", closedAt="2026-08-25 14:30:11"),
+            # an explicit value must be respected, not overwritten
+            _trade("explicit", status="TARGET", closedAt="2026-08-25 09:15:00",
+                   closedDay="2026-08-24"),
+            # an OPEN trade has no close date and must stay NULL
+            _trade("open", status="OPEN"),
+        ])
+        rows = {t["id"]: t for t in db.sim_all_trades()}
+        assert rows["forgot"]["closedDay"] == "2026-08-25"
+        assert rows["explicit"]["closedDay"] == "2026-08-24"
+        assert rows["open"]["closedDay"] is None
+        # pure helper, usable on in-memory trades the readers haven't written yet
+        assert db.closed_day_of({"closedAt": "2026-08-25 14:30:11"}) == "2026-08-25"
+        assert db.closed_day_of({}) is None
+        # always a bare date: readers compare against 'YYYY-MM-DD', so a stray
+        # timestamp in the column must not become a silent non-match
+        assert db.closed_day_of({"closedDay": "2026-08-25 00:00:00"}) == "2026-08-25"
+
+
+def test_init_backfills_legacy_null_closed_days():
+    """The 2,131 pre-existing rows can't be fixed by the write path — they're already
+    written. init() backfills them: lossless (closedDay IS closedAt's date) and
+    idempotent, and it must not invent a close date for an OPEN trade."""
+    with _temp_db():
+        # simulate the legacy state: closedAt set, closedDay NULL (bypassing the
+        # derivation the write path now applies)
+        with db._conn() as c:
+            c.execute("UPDATE sim_trades SET closedDay=NULL")   # no-op, table empty
+        db.sim_insert_trades([
+            _trade("a", status="STOP", closedAt="2026-07-13 10:00:00"),
+            _trade("b", status="TARGET", closedAt="2026-07-16 15:20:00"),
+            _trade("open", status="OPEN"),
+        ])
+        with db._conn() as c:
+            c.execute("UPDATE sim_trades SET closedDay=NULL")   # re-create the gap
+            assert c.execute("SELECT COUNT(*) n FROM sim_trades "
+                             "WHERE closedDay IS NULL").fetchone()["n"] == 3
+        db._initialized = False
+        db.init()
+        rows = {t["id"]: t for t in db.sim_all_trades()}
+        assert rows["a"]["closedDay"] == "2026-07-13"
+        assert rows["b"]["closedDay"] == "2026-07-16"
+        assert rows["open"]["closedDay"] is None        # never invent one
+        # idempotent: a second pass changes nothing
+        db._initialized = False
+        db.init()
+        assert {t["id"]: t["closedDay"] for t in db.sim_all_trades()} == {
+            "a": "2026-07-13", "b": "2026-07-16", "open": None}
+
+
 def test_phantom_check_uses_its_partial_index_not_a_table_scan():
     """The guard is polled by /api/health, so it must not degrade into a full scan as
     the ledger grows — a partial index over just the offending rows keeps it flat."""

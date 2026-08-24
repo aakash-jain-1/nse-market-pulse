@@ -88,7 +88,7 @@ NSE/
 │   └── cli/           # command-line tools
 │       ├── nse_demand.py      # Standalone CLI scanner (gainers/losers/volume/value/volgainers)
 │       └── db_inspect.py      # Read-only SQLite inspector CLI (overview / tail / SQL)
-├── tests/             # 909 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
+├── tests/             # 911 unit tests across 39 suites (pytest) — import `from nse_pulse.<sub> import <mod>`
 ├── docs/              # AUDIT.md (round 1) + AUDIT2.md (round 2: financial-correctness + concurrency)
 ├── data/              # (gitignored) market.db (SQLite) + any legacy *.csv
 ├── angel_config.example.json / dhan_config.example.json / notify_config.example.json  # templates → copy (gitignored)
@@ -142,7 +142,7 @@ python start.py          # RECOMMENDED: kill stale instances + preflight, then l
 python app.py            # dashboard at http://127.0.0.1:5055 (prints a per-request access log)
 python nse_demand.py     # CLI: all views (also: gainers/losers/volume/value/volgainers)
 python -m nse_pulse.cli.db_inspect   # peek into data/market.db (no sqlite3 CLI / GUI needed)
-python -m pytest -q      # 909 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
+python -m pytest -q      # 911 unit tests (client/nseclient-pacer/quote/paper/strategies/sim/backtests/walkforward/portfolio/eod*/sectors/convictioncalibration/rollover/db/app+routes/feeds/observability/swr/start/…)
 ```
 
 The terminal access log (`observability.py`) is always on: one line per request —
@@ -650,6 +650,19 @@ with no creds the app is unchanged.
   verdict), then feeds each pillar's measured edge back into board scoring (`board(adaptive=True)`).
 
 ## Done recently
+
+- **🗓 `closedDay` can no longer go NULL (write-path derivation + one-time backfill)** — found while building the guard
+ below: its date filter had to key on `closedAt` because **2,131 of 15,711 closed trades (13.6%) had a NULL
+ `closedDay`**, so any date-keyed query on that column silently under-reported. Investigated before "fixing" and the
+ premise was wrong — **there is no live bug**: all three close paths stamp it today, and the NULLs are bounded to
+ **2026-07-10..16** (pre-dating the AUDIT2 N6 stamp fix). The real risk was a **landmine for future queries**, which
+ this closed two ways. (1) `db.closed_day_of(t)` derives the value in **`_trade_to_row`** — the single choke point
+ every trade write passes — so a close path that forgets can no longer produce a NULL, and it replaces the same
+ fallback open-coded at 3 reader sites. (2) `init()` backfills the legacy rows with
+ `substr(closedAt,1,10)`, **lossless** (verified: the two agree on all 13,580 rows carrying both) and idempotent,
+ skipping OPEN trades so none is invented. Live result: 2,131 → **0** NULLs, 0 OPEN rows given a date, 0
+ disagreements, and the day-level views **unchanged** (they already fell back, so the data now merely matches the
+ code). Suite **909 → 911**.
 
 - **🧯 Standing guard so a new phantom can't go unnoticed** — the filter below hides the 27 historical rows, which
  creates a new risk: if a price guard ever regresses, the fresh corruption is now *invisible* (silently filtered
