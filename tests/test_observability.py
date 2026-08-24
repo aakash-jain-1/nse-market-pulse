@@ -140,6 +140,14 @@ def _mk_app():
     def _boom():
         raise RuntimeError("kaboom")
 
+    @app.route("/endless")
+    def _endless():
+        """An SSE-style response whose body never ends (like /api/live/stream)."""
+        def gen():
+            while True:
+                yield "data: tick\n\n"
+        return app.response_class(gen(), mimetype="text/event-stream")
+
     return app
 
 
@@ -168,6 +176,25 @@ def test_access_log_records_500_via_teardown():
     with _capture_access() as cap:
         app.test_client().get("/boom")
     assert len(cap.lines) == 1 and " 500 " in cap.lines[0] and "/boom" in cap.lines[0]
+
+
+def test_access_log_never_measures_a_streamed_response():
+    """Regression: the size probe used to call calculate_content_length(), which
+    MATERIALIZES the response iterator. On an endless SSE body (/api/live/stream)
+    that hangs the request before any byte reaches the browser — it silently killed
+    the Live tab's realtime feed. Headers must come back immediately, with size '-'.
+    """
+    app = _mk_app()
+    with _capture_access() as cap:
+        resp = app.test_client().get("/endless")           # must NOT hang
+        assert resp.status_code == 200
+        assert resp.headers["Content-Type"].startswith("text/event-stream")
+        assert resp.headers.get("Content-Length") is None  # never computed
+        it = resp.response                                 # read just the first chunk
+        assert next(iter(it)).decode().startswith("data: ")
+        resp.close()
+    assert len(cap.lines) == 1 and "/endless" in cap.lines[0]
+    assert " - " in cap.lines[0]                           # size logged as unknown
 
 
 def test_init_is_idempotent():

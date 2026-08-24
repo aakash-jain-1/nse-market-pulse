@@ -225,6 +225,13 @@ def _install_access_log(app, log, serving):
     @app.after_request
     def _obs_capture(resp):
         g._obs_status = resp.status_code
+        # NEVER measure a STREAMED response. calculate_content_length() materializes
+        # the response iterator, and /api/live/stream is an SSE generator that never
+        # ends — measuring it hangs the request before a single byte reaches the
+        # browser, silently killing the Live tab's realtime feed.
+        if resp.is_streamed:
+            g._obs_size = None
+            return resp
         try:
             g._obs_size = resp.calculate_content_length()
         except Exception:
